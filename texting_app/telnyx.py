@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
 import sqlite3
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -15,6 +17,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import config
+from . import settings as app_settings
 from .db import (
     add_attachment,
     as_json,
@@ -117,6 +120,63 @@ def _download_media(media: dict[str, Any]) -> tuple[str | None, int | None, str 
     return f"media/{filename}" if target.exists() else None, size, sha
 
 
+def _media_file(local_path: str | None) -> Path | None:
+    if not local_path:
+        return None
+    path = config.MEDIA_DIR / Path(local_path).name
+    return path if path.exists() else None
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _page_number(path: Path) -> tuple[int, str]:
+    stem = path.stem
+    _, _, suffix = stem.rpartition("-")
+    try:
+        return int(suffix), path.name
+    except ValueError:
+        return 0, path.name
+
+
+def _render_pdf_pages(local_path: str | None) -> list[dict[str, Any]]:
+    pdf_path = _media_file(local_path)
+    pdftoppm = shutil.which("pdftoppm")
+    if not pdf_path or not pdftoppm:
+        return []
+    prefix = config.MEDIA_DIR / f"{pdf_path.stem}-page"
+    pages = sorted(config.MEDIA_DIR.glob(f"{prefix.name}-*.png"), key=_page_number)
+    if not pages:
+        try:
+            subprocess.run(
+                [pdftoppm, "-png", "-r", "160", str(pdf_path), str(prefix)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=90,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        pages = sorted(config.MEDIA_DIR.glob(f"{prefix.name}-*.png"), key=_page_number)
+    attachments: list[dict[str, Any]] = []
+    for page in pages:
+        attachments.append(
+            {
+                "local_path": f"media/{page.name}",
+                "content_type": "image/png",
+                "size": page.stat().st_size,
+                "sha256": _file_sha256(page),
+                "filename": page.name,
+            }
+        )
+    return attachments
+
+
 def _json_request(url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -151,7 +211,7 @@ def _notification_text(text: str, media_count: int) -> str:
 
 
 def _ntfy_url() -> str:
-    endpoint = config.NTFY_ENDPOINT.strip()
+    endpoint = app_settings.get_value("notifications.ntfy_endpoint", config.NTFY_ENDPOINT).strip()
     if not endpoint:
         return ""
     if "://" not in endpoint:
@@ -167,7 +227,7 @@ def _contact_name_for_phone(conn: sqlite3.Connection, phone: str) -> str:
         FROM contact_phones cp
         JOIN contacts c ON c.id = cp.contact_id
         WHERE cp.phone_number = ?
-        ORDER BY c.source = 'fastmail' DESC, c.updated_at DESC
+        ORDER BY c.source IN ('fastmail', 'google') DESC, c.updated_at DESC
         LIMIT 1
         """,
         (phone,),
@@ -178,7 +238,7 @@ def _contact_name_for_phone(conn: sqlite3.Connection, phone: str) -> str:
 
 
 def _notify_incoming_message(*, from_number: str, sender_name: str, text: str, media_count: int) -> None:
-    if not config.NTFY_ENABLED:
+    if not app_settings.get_bool("notifications.ntfy_enabled", config.NTFY_ENABLED):
         return
     url = _ntfy_url()
     if not url:
@@ -212,7 +272,9 @@ def send_message(
     media_urls: list[str] | None = None,
     conversation_id: int | None = None,
 ) -> dict[str, Any]:
-    if not config.TELNYX_API_KEY:
+    api_key = app_settings.get_value("telnyx.api_key", config.TELNYX_API_KEY)
+    api_base = app_settings.get_value("telnyx.api_base", config.TELNYX_API_BASE).rstrip("/")
+    if not api_key:
         raise TelnyxError("TELNYX_API_KEY is not configured.")
     from_number = normalize_phone(from_number)
     to_numbers = [normalize_phone(n) for n in to_numbers if normalize_phone(n)]
@@ -222,16 +284,16 @@ def send_message(
     if len(to_numbers) > 8:
         raise TelnyxError("Telnyx group MMS supports up to 8 recipients.")
     if len(to_numbers) > 1:
-        endpoint = f"{config.TELNYX_API_BASE}/messages/group_mms"
+        endpoint = f"{api_base}/messages/group_mms"
         payload: dict[str, Any] = {"from": from_number, "to": to_numbers}
     else:
-        endpoint = f"{config.TELNYX_API_BASE}/messages"
+        endpoint = f"{api_base}/messages"
         payload = {"from": from_number, "to": to_numbers[0]}
     if text:
         payload["text"] = text
     if media_urls:
         payload["media_urls"] = media_urls
-    response = _json_request(endpoint, payload, config.TELNYX_API_KEY)
+    response = _json_request(endpoint, payload, api_key)
 
     conn = connect()
     init_db(conn)
@@ -262,7 +324,8 @@ def send_message(
 
 
 def verify_signature(raw_body: bytes, signature: str | None, timestamp: str | None) -> bool:
-    if not config.TELNYX_PUBLIC_KEY:
+    public_key_value = app_settings.get_value("telnyx.public_key", config.TELNYX_PUBLIC_KEY)
+    if not public_key_value:
         return True
     if not signature or not timestamp:
         return False
@@ -273,9 +336,9 @@ def verify_signature(raw_body: bytes, signature: str | None, timestamp: str | No
     if abs(int(time.time()) - signed_at) > 300:
         return False
     try:
-        key_bytes = bytes.fromhex(config.TELNYX_PUBLIC_KEY)
+        key_bytes = bytes.fromhex(public_key_value)
     except ValueError:
-        key_bytes = base64.b64decode(config.TELNYX_PUBLIC_KEY)
+        key_bytes = base64.b64decode(public_key_value)
     public_key = Ed25519PublicKey.from_public_bytes(key_bytes)
     message = timestamp.encode("utf-8") + b"|" + raw_body
     try:
@@ -350,6 +413,105 @@ def _update_outbound_status(conn, event: dict[str, Any]) -> int | None:
     return int(row["id"])
 
 
+def _fax_message_text(payload: dict[str, Any]) -> str:
+    page_count = payload.get("page_count")
+    if isinstance(page_count, str) and page_count.isdigit():
+        page_count = int(page_count)
+    if isinstance(page_count, int) and page_count > 0:
+        return f"Fax received ({page_count} page{'s' if page_count != 1 else ''})"
+    return "Fax received"
+
+
+def _store_fax_received(conn, event: dict[str, Any]) -> int | None:
+    data = event.get("data", {})
+    payload = data.get("payload", {})
+    if data.get("event_type") != "fax.received":
+        return None
+    if payload.get("direction") and str(payload.get("direction")).lower() != "inbound":
+        return None
+
+    fax_id = str(payload.get("fax_id") or payload.get("id") or data.get("id") or "")
+    telnyx_id = f"fax:{fax_id}" if fax_id else str(data.get("id") or "")
+    occurred_at = normalize_iso_timestamp(payload.get("completed_at") or data.get("occurred_at"))
+    from_number = _payload_phone(payload.get("from") or payload.get("caller_id"))
+    to_numbers = _payload_phone_list(payload.get("to"))
+    known_self = self_numbers(conn)
+    participants = set([from_number] + to_numbers)
+    remote_numbers = sorted(n for n in participants if n and n not in known_self)
+    self_participants = sorted(n for n in participants if n in known_self)
+    conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
+    status = str(payload.get("status") or "received")
+    text = _fax_message_text(payload)
+
+    if telnyx_id:
+        row = conn.execute("SELECT id FROM messages WHERE telnyx_id = ? ORDER BY id LIMIT 1", (telnyx_id,)).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE messages
+                SET status = ?, telnyx_event_id = ?, raw_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, data.get("id"), as_json(event), now_est(), row["id"]),
+            )
+            return int(row["id"])
+
+    message_id = upsert_message(
+        conn,
+        conversation_id=conversation_id,
+        direction="inbound",
+        from_number=from_number,
+        to_numbers=to_numbers,
+        cc_numbers=[],
+        text=text,
+        occurred_at=occurred_at,
+        message_type="MMS",
+        status=status,
+        source="telnyx-fax",
+        telnyx_id=telnyx_id or None,
+        telnyx_event_id=data.get("id"),
+        raw_json=event,
+    )
+
+    media_url = payload.get("media_url")
+    attachment_count = 0
+    if isinstance(media_url, str) and media_url:
+        local_path, size, sha = _download_media(
+            {
+                "url": media_url,
+                "content_type": "application/pdf",
+                "size": payload.get("media_size") or payload.get("file_size"),
+                "sha256": payload.get("sha256"),
+            }
+        )
+        rendered_pages = _render_pdf_pages(local_path)
+        if rendered_pages:
+            for attachment in rendered_pages:
+                add_attachment(conn, message_id, **attachment, source="telnyx-fax")
+            attachment_count = len(rendered_pages)
+        else:
+            add_attachment(
+                conn,
+                message_id,
+                local_path=local_path,
+                remote_url=media_url,
+                content_type="application/pdf",
+                size=size,
+                sha256=sha,
+                filename=Path(local_path or urlparse(media_url).path).name,
+                source="telnyx-fax",
+            )
+            attachment_count = 1
+
+    _notify_incoming_message(
+        from_number=from_number,
+        sender_name=_contact_name_for_phone(conn, from_number),
+        text=text,
+        media_count=attachment_count,
+    )
+    return message_id
+
+
 def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
     data = event.get("data", {})
     payload = data.get("payload", {})
@@ -365,6 +527,8 @@ def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
         updated_id = _update_outbound_status(conn, event)
         if updated_id:
             return updated_id
+    if event_type == "fax.received":
+        return _store_fax_received(conn, event)
     if event_type not in {"message.received", "message.sent"}:
         return None
 

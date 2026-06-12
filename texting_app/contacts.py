@@ -6,6 +6,7 @@ from typing import Any
 
 from . import config
 from . import fastmail, google_contacts
+from . import settings as app_settings
 
 
 class ContactsError(RuntimeError):
@@ -13,11 +14,12 @@ class ContactsError(RuntimeError):
 
 
 def active_provider() -> str:
-    provider = config.CONTACTS_PROVIDER
+    provider = app_settings.get_value("contacts.provider", config.CONTACTS_PROVIDER).strip().lower()
     if provider in {"", "auto"}:
-        if config.FASTMAIL_CONFIGURED:
+        providers = configured_providers()
+        if providers["fastmail"]:
             return "fastmail"
-        if config.GOOGLE_CONTACTS_CONFIGURED:
+        if providers["google"]:
             return "google"
         return "none"
     if provider in {"fastmail", "google", "none"}:
@@ -27,8 +29,21 @@ def active_provider() -> str:
 
 def configured_providers() -> dict[str, bool]:
     return {
-        "fastmail": config.FASTMAIL_CONFIGURED,
-        "google": config.GOOGLE_CONTACTS_CONFIGURED,
+        "fastmail": bool(
+            app_settings.get_value("fastmail.api_token", config.FASTMAIL_API_TOKEN)
+            or (
+                app_settings.get_value("fastmail.username", config.FASTMAIL_USERNAME)
+                and app_settings.get_value("fastmail.app_password", config.FASTMAIL_APP_PASSWORD)
+            )
+        ),
+        "google": bool(
+            app_settings.get_value("google.contacts_access_token", config.GOOGLE_CONTACTS_ACCESS_TOKEN)
+            or (
+                app_settings.get_value("google.client_id", config.GOOGLE_CLIENT_ID)
+                and app_settings.get_value("google.client_secret", config.GOOGLE_CLIENT_SECRET)
+                and app_settings.get_value("google.refresh_token", config.GOOGLE_REFRESH_TOKEN)
+            )
+        ),
     }
 
 
@@ -46,7 +61,7 @@ def save_contact_name(phone_number: str, display_name: str) -> dict[str, Any]:
 
 
 def start_autosync() -> None:
-    if not config.CONTACTS_AUTOSYNC or active_provider() == "none":
+    if not app_settings.get_bool("contacts.autosync", config.CONTACTS_AUTOSYNC) or active_provider() == "none":
         return
 
     def worker() -> None:
@@ -55,7 +70,7 @@ def start_autosync() -> None:
                 sync_contacts()
             except Exception as exc:
                 print(f"Contact sync failed: {exc}", flush=True)
-            time.sleep(max(config.CONTACTS_SYNC_INTERVAL_MINUTES, 5) * 60)
+            time.sleep(max(app_settings.get_int("contacts.sync_interval_minutes", config.CONTACTS_SYNC_INTERVAL_MINUTES), 5) * 60)
 
     provider = active_provider()
     thread = threading.Thread(target=worker, name=f"{provider}-contacts-sync", daemon=True)

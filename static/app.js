@@ -31,6 +31,12 @@ const els = {
   statStrip: document.querySelector("#statStrip"),
   categoryTabs: document.querySelectorAll(".category-tab"),
   themeToggle: document.querySelector("#themeToggle"),
+  settingsButton: document.querySelector("#settingsButton"),
+  settingsModal: document.querySelector("#settingsModal"),
+  settingsForm: document.querySelector("#settingsForm"),
+  settingsSections: document.querySelector("#settingsSections"),
+  settingsClose: document.querySelector("#settingsClose"),
+  settingsCancel: document.querySelector("#settingsCancel"),
   themeColor: document.querySelector("#themeColor"),
   fromNumber: document.querySelector("#fromNumber"),
   threadKind: document.querySelector("#threadKind"),
@@ -257,6 +263,173 @@ function toast(message) {
   els.toast.classList.add("visible");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => els.toast.classList.remove("visible"), 4200);
+}
+
+function settingSourceLabel(field) {
+  if (!field.has_value) return "Not set";
+  if (field.source === "saved") return "Saved";
+  if (field.source === "env") return ".env";
+  return "Default";
+}
+
+function renderSettings(payload = state.bootstrap?.settings) {
+  const sections = payload?.sections || [];
+  if (!sections.length) {
+    els.settingsSections.innerHTML = `<div class="empty-state">No settings are available.</div>`;
+    return;
+  }
+  els.settingsSections.innerHTML = sections
+    .map(
+      (section) => `
+        <section class="settings-section">
+          <h3>${escapeHtml(section.name)}</h3>
+          <div class="settings-fields">
+            ${(section.fields || []).map(renderSettingField).join("")}
+          </div>
+        </section>`,
+    )
+    .join("");
+}
+
+function renderSettingField(field) {
+  const key = escapeHtml(field.key);
+  const source = escapeHtml(settingSourceLabel(field));
+  const help = field.help ? `<p class="setting-help">${escapeHtml(field.help)}</p>` : "";
+  if (field.type === "bool") {
+    const checked = String(field.value || "0") === "1" ? "checked" : "";
+    return `
+      <label class="setting-field setting-toggle">
+        <span>
+          <strong>${escapeHtml(field.label)}</strong>
+          <small>${source}</small>
+          ${help}
+        </span>
+        <input data-setting-key="${key}" data-setting-type="bool" type="checkbox" ${checked} />
+      </label>`;
+  }
+  if (field.type === "select") {
+    return `
+      <label class="setting-field">
+        <span>
+          <strong>${escapeHtml(field.label)}</strong>
+          <small>${source}</small>
+          ${help}
+        </span>
+        <select data-setting-key="${key}" data-setting-type="select">
+          ${(field.options || [])
+            .map((option) => {
+              const selected = option.value === field.value ? "selected" : "";
+              return `<option value="${escapeHtml(option.value)}" ${selected}>${escapeHtml(option.label)}</option>`;
+            })
+            .join("")}
+        </select>
+      </label>`;
+  }
+  if (field.secret) {
+    const placeholder = field.has_value ? `${settingSourceLabel(field)} - leave blank to keep` : "Not set";
+    const clearControl = field.has_value && field.source === "saved"
+      ? `<label class="setting-clear"><input data-clear-setting="${key}" type="checkbox" /> Clear saved value</label>`
+      : "";
+    return `
+      <label class="setting-field">
+        <span>
+          <strong>${escapeHtml(field.label)}</strong>
+          <small>${source}</small>
+          ${help}
+        </span>
+        <input
+          data-setting-key="${key}"
+          data-setting-type="secret"
+          type="password"
+          placeholder="${escapeHtml(placeholder)}"
+          autocomplete="off"
+        />
+        ${clearControl}
+      </label>`;
+  }
+  const inputType = field.type === "number" ? "number" : field.type === "url" ? "url" : "text";
+  const min = field.type === "number" ? ` min="0"` : "";
+  return `
+    <label class="setting-field">
+      <span>
+        <strong>${escapeHtml(field.label)}</strong>
+        <small>${source}</small>
+        ${help}
+      </span>
+      <input
+        data-setting-key="${key}"
+        data-setting-type="${escapeHtml(field.type)}"
+        type="${inputType}"
+        value="${escapeHtml(field.value || "")}"
+        autocomplete="off"
+        ${min}
+      />
+    </label>`;
+}
+
+async function openSettings() {
+  try {
+    const payload = await api("/api/settings");
+    if (state.bootstrap) {
+      state.bootstrap.settings = payload;
+    }
+    renderSettings(payload);
+    els.settingsModal.classList.remove("hidden");
+    els.settingsModal.focus();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function closeSettings() {
+  els.settingsModal.classList.add("hidden");
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const settings = {};
+  const clear = [];
+  els.settingsSections.querySelectorAll("[data-clear-setting]:checked").forEach((input) => {
+    clear.push(input.dataset.clearSetting);
+  });
+  els.settingsSections.querySelectorAll("[data-setting-key]").forEach((input) => {
+    const key = input.dataset.settingKey;
+    const type = input.dataset.settingType;
+    if (type === "secret") {
+      if (input.value.trim() && !clear.includes(key)) settings[key] = input.value.trim();
+      return;
+    }
+    if (type === "bool") {
+      settings[key] = input.checked;
+      return;
+    }
+    settings[key] = input.value;
+  });
+  const controls = els.settingsForm.querySelectorAll("input, select, button");
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    const payload = await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ settings, clear }),
+    });
+    if (state.bootstrap) {
+      state.bootstrap.settings = payload;
+    }
+    state.bootstrap = await api("/api/bootstrap");
+    renderBootstrap();
+    renderThreadHeader();
+    renderSettings(state.bootstrap.settings);
+    closeSettings();
+    toast("Settings saved.");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    controls.forEach((control) => {
+      control.disabled = false;
+    });
+  }
 }
 
 function showComposerError(message) {
@@ -814,6 +987,14 @@ function scrollMessagesWithArrowKey(event) {
 }
 
 function handleGlobalKeydown(event) {
+  const settingsOpen = !els.settingsModal.classList.contains("hidden");
+  if (settingsOpen) {
+    if (event.key === "Escape") {
+      closeSettings();
+      event.preventDefault();
+    }
+    return;
+  }
   const lightboxOpen = !els.lightbox.classList.contains("hidden");
   if (lightboxOpen) {
     if (event.key === "Escape") closeLightbox();
@@ -996,6 +1177,9 @@ async function openConversation(id, options = {}) {
   renderThreadHeader();
   renderMessages(state.messages, "bottom");
   scheduleStatusPoll();
+  if (state.bootstrap?.mark_read_on_open && !conversationIsRead(state.currentConversation)) {
+    setCurrentConversationRead(true, { silent: true }).catch((error) => toast(error.message));
+  }
 }
 
 async function setCurrentConversationArchived(archived) {
@@ -1022,17 +1206,20 @@ async function setCurrentConversationArchived(archived) {
   }
 }
 
-async function toggleCurrentConversationRead() {
+async function setCurrentConversationRead(dealt, { silent = false } = {}) {
   if (!state.currentConversationId) return;
-  const shouldMarkRead = !conversationIsRead(state.currentConversation);
+  const conversationId = state.currentConversationId;
   els.dealtButton.disabled = true;
   try {
-    const payload = await api(`/api/conversations/${state.currentConversationId}/dealt`, {
+    const payload = await api(`/api/conversations/${conversationId}/dealt`, {
       method: "POST",
-      body: JSON.stringify({ dealt: shouldMarkRead }),
+      body: JSON.stringify({ dealt }),
     });
-    state.currentConversation = payload.conversation;
-    const current = state.conversations.find((conversation) => conversation.id === state.currentConversationId);
+    const isCurrent = state.currentConversationId === conversationId;
+    if (isCurrent) {
+      state.currentConversation = payload.conversation;
+    }
+    const current = state.conversations.find((conversation) => conversation.id === conversationId);
     if (current) {
       current.dealt_with_at = payload.conversation.dealt_with_at;
       current.manual_unread_at = payload.conversation.manual_unread_at;
@@ -1040,16 +1227,25 @@ async function toggleCurrentConversationRead() {
     }
     state.bootstrap = await api("/api/bootstrap");
     renderBootstrap();
-    if (state.conversationCategory === "unread" && shouldMarkRead) {
-      state.conversations = state.conversations.filter((conversation) => conversation.id !== state.currentConversationId);
+    if (state.conversationCategory === "unread" && dealt) {
+      state.conversations = state.conversations.filter((conversation) => conversation.id !== conversationId);
     }
     renderConversations();
-    renderThreadHeader();
-    toast(shouldMarkRead ? "Marked read." : "Marked unread.");
+    if (isCurrent) {
+      renderThreadHeader();
+    }
+    if (!silent) {
+      toast(dealt ? "Marked read." : "Marked unread.");
+    }
   } catch (error) {
     toast(error.message);
     renderThreadHeader();
   }
+}
+
+async function toggleCurrentConversationRead() {
+  const shouldMarkRead = !conversationIsRead(state.currentConversation);
+  await setCurrentConversationRead(shouldMarkRead);
 }
 
 async function loadOlderMessages() {
@@ -1278,6 +1474,13 @@ function bindEvents() {
     const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     applyTheme(current === "dark" ? "light" : "dark");
   });
+  els.settingsButton.addEventListener("click", openSettings);
+  els.settingsClose.addEventListener("click", closeSettings);
+  els.settingsCancel.addEventListener("click", closeSettings);
+  els.settingsModal.addEventListener("click", (event) => {
+    if (event.target === els.settingsModal) closeSettings();
+  });
+  els.settingsForm.addEventListener("submit", saveSettings);
   els.conversationList.addEventListener("click", (event) => {
     const button = event.target.closest(".conversation-item");
     if (button) openConversation(button.dataset.id).catch((error) => toast(error.message));
@@ -1470,9 +1673,10 @@ async function init() {
   updateComposerOffset();
   const savedCategory = localStorage.getItem("conversationCategory");
   state.conversationCategory = ["inbox", "unread", "hidden"].includes(savedCategory) ? savedCategory : "inbox";
-  const savedDetailsState = localStorage.getItem("detailsCollapsedDefaultHidden");
-  setDetailsCollapsed(savedDetailsState === null ? true : savedDetailsState === "1");
   state.bootstrap = await api("/api/bootstrap");
+  const savedDetailsState = localStorage.getItem("detailsCollapsedDefaultHidden");
+  const detailsDefault = state.bootstrap.details_collapsed_default ?? true;
+  setDetailsCollapsed(savedDetailsState === null ? Boolean(detailsDefault) : savedDetailsState === "1");
   renderBootstrap();
   await loadConversations();
   if (isDesktopLayout() && state.conversations[0]) {

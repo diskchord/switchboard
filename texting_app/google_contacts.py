@@ -7,6 +7,7 @@ import urllib.request
 from typing import Any
 
 from . import config
+from . import settings as app_settings
 from .fastmail import import_cards
 
 
@@ -16,6 +17,22 @@ CONNECTION_PERSON_FIELDS = "names,emailAddresses,phoneNumbers,organizations"
 
 class GoogleContactsError(RuntimeError):
     pass
+
+
+def _google_contacts_access_token() -> str:
+    return app_settings.get_value("google.contacts_access_token", config.GOOGLE_CONTACTS_ACCESS_TOKEN)
+
+
+def _google_client_id() -> str:
+    return app_settings.get_value("google.client_id", config.GOOGLE_CLIENT_ID)
+
+
+def _google_client_secret() -> str:
+    return app_settings.get_value("google.client_secret", config.GOOGLE_CLIENT_SECRET)
+
+
+def _google_refresh_token() -> str:
+    return app_settings.get_value("google.refresh_token", config.GOOGLE_REFRESH_TOKEN)
 
 
 def _request_json(
@@ -37,18 +54,22 @@ def _request_json(
 
 
 def _access_token() -> str:
-    if config.GOOGLE_CONTACTS_ACCESS_TOKEN:
-        return config.GOOGLE_CONTACTS_ACCESS_TOKEN
-    if not (config.GOOGLE_CLIENT_ID and config.GOOGLE_CLIENT_SECRET and config.GOOGLE_REFRESH_TOKEN):
+    access_token = _google_contacts_access_token()
+    if access_token:
+        return access_token
+    client_id = _google_client_id()
+    client_secret = _google_client_secret()
+    refresh_token = _google_refresh_token()
+    if not (client_id and client_secret and refresh_token):
         raise GoogleContactsError(
             "Google Contacts is not configured. Set GOOGLE_CONTACTS_ACCESS_TOKEN, or "
             "GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN."
         )
     payload = urllib.parse.urlencode(
         {
-            "client_id": config.GOOGLE_CLIENT_ID,
-            "client_secret": config.GOOGLE_CLIENT_SECRET,
-            "refresh_token": config.GOOGLE_REFRESH_TOKEN,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         }
     ).encode("utf-8")

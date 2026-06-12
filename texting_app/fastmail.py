@@ -13,6 +13,7 @@ from urllib.parse import quote, urljoin, urlparse
 from xml.etree import ElementTree
 
 from . import config
+from . import settings as app_settings
 from .db import as_json, connect, init_db
 from .phone import normalize_phone
 from .timeutil import now_est
@@ -26,6 +27,30 @@ DAV_NS = "{DAV:}"
 
 class FastmailError(RuntimeError):
     pass
+
+
+def _fastmail_api_token() -> str:
+    return app_settings.get_value("fastmail.api_token", config.FASTMAIL_API_TOKEN)
+
+
+def _fastmail_username_value() -> str:
+    return app_settings.get_value("fastmail.username", config.FASTMAIL_USERNAME)
+
+
+def _fastmail_app_password() -> str:
+    return app_settings.get_value("fastmail.app_password", config.FASTMAIL_APP_PASSWORD)
+
+
+def _fastmail_carddav_url() -> str:
+    return app_settings.get_value("fastmail.carddav_url", config.FASTMAIL_CARDDAV_URL)
+
+
+def _fastmail_carddav_username_value() -> str:
+    return app_settings.get_value("fastmail.carddav_username", config.FASTMAIL_CARDDAV_USERNAME)
+
+
+def _fastmail_account_id() -> str:
+    return app_settings.get_value("fastmail.account_id", config.FASTMAIL_ACCOUNT_ID)
 
 
 def _request_json(url: str, token: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -56,18 +81,20 @@ def _basic_auth(username: str, password: str) -> str:
 
 
 def _carddav_collection_url() -> str:
-    if config.FASTMAIL_CARDDAV_URL:
-        return config.FASTMAIL_CARDDAV_URL.rstrip("/")
-    username = config.FASTMAIL_USERNAME
+    carddav_url = _fastmail_carddav_url()
+    if carddav_url:
+        return carddav_url.rstrip("/")
+    username = _fastmail_username_value()
     if not username:
         raise FastmailError("FASTMAIL_USERNAME is not configured.")
     return f"https://carddav.fastmail.com/dav/addressbooks/user/{quote(username, safe='@')}/Default"
 
 
 def _carddav_username() -> str:
-    if config.FASTMAIL_CARDDAV_USERNAME:
-        return config.FASTMAIL_CARDDAV_USERNAME
-    username = config.FASTMAIL_USERNAME
+    carddav_username = _fastmail_carddav_username_value()
+    if carddav_username:
+        return carddav_username
+    username = _fastmail_username_value()
     if "@" not in username:
         return username
     local, domain = username.split("@", 1)
@@ -75,7 +102,8 @@ def _carddav_username() -> str:
 
 
 def _request_carddav_cards() -> list[dict[str, Any]]:
-    if not config.FASTMAIL_USERNAME or not config.FASTMAIL_APP_PASSWORD:
+    app_password = _fastmail_app_password()
+    if not _fastmail_username_value() or not app_password:
         raise FastmailError("FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD are required for Fastmail CardDAV sync.")
     body = b"""<?xml version="1.0" encoding="utf-8"?>
 <C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
@@ -90,7 +118,7 @@ def _request_carddav_cards() -> list[dict[str, Any]]:
         data=body,
         method="REPORT",
         headers={
-            "Authorization": _basic_auth(_carddav_username(), config.FASTMAIL_APP_PASSWORD),
+            "Authorization": _basic_auth(_carddav_username(), app_password),
             "Content-Type": "application/xml; charset=utf-8",
             "Accept": "application/xml,text/xml",
             "Depth": "1",
@@ -212,8 +240,9 @@ def _parse_vcard(vcard: str) -> dict[str, Any] | None:
 
 
 def _choose_account(session: dict[str, Any]) -> str:
-    if config.FASTMAIL_ACCOUNT_ID:
-        return config.FASTMAIL_ACCOUNT_ID
+    account_id = _fastmail_account_id()
+    if account_id:
+        return account_id
     for account_id, account in (session.get("accounts") or {}).items():
         if CONTACTS_CAPABILITY in (account.get("accountCapabilities") or {}):
             return account_id
@@ -321,10 +350,11 @@ def _carddav_href_for_uid(uid: str) -> str:
 
 
 def _carddav_headers(content_type: str | None = None) -> dict[str, str]:
-    if not config.FASTMAIL_USERNAME or not config.FASTMAIL_APP_PASSWORD:
+    app_password = _fastmail_app_password()
+    if not _fastmail_username_value() or not app_password:
         raise FastmailError("FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD are required to save Fastmail contacts.")
     headers = {
-        "Authorization": _basic_auth(_carddav_username(), config.FASTMAIL_APP_PASSWORD),
+        "Authorization": _basic_auth(_carddav_username(), app_password),
         "Accept": "text/vcard,text/plain,*/*",
     }
     if content_type:
@@ -571,7 +601,7 @@ def save_contact_name(phone_number: str, display_name: str) -> dict[str, Any]:
     href = str(card.get("href") or "")
     synced = False
 
-    if config.FASTMAIL_USERNAME and config.FASTMAIL_APP_PASSWORD:
+    if _fastmail_username_value() and _fastmail_app_password():
         if row and row["source"] == "fastmail" and not href:
             matched = _find_carddav_card(phone, uid)
             if matched:
@@ -617,7 +647,7 @@ def save_contact_name(phone_number: str, display_name: str) -> dict[str, Any]:
 
 
 def sync_contacts() -> dict[str, int]:
-    if config.FASTMAIL_USERNAME and config.FASTMAIL_APP_PASSWORD:
+    if _fastmail_username_value() and _fastmail_app_password():
         cards = _request_carddav_cards()
     else:
         cards = _request_jmap_cards()
@@ -625,9 +655,10 @@ def sync_contacts() -> dict[str, int]:
 
 
 def _request_jmap_cards() -> list[dict[str, Any]]:
-    if not config.FASTMAIL_API_TOKEN:
+    api_token = _fastmail_api_token()
+    if not api_token:
         raise FastmailError("Fastmail is not configured. Set FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD, or FASTMAIL_API_TOKEN.")
-    session = _request_json("https://api.fastmail.com/jmap/session", config.FASTMAIL_API_TOKEN)
+    session = _request_json("https://api.fastmail.com/jmap/session", api_token)
     account_id = _choose_account(session)
     api_url = session.get("apiUrl")
     if not api_url:
@@ -638,7 +669,7 @@ def _request_jmap_cards() -> list[dict[str, Any]]:
             ["ContactCard/get", {"accountId": account_id}, "contacts"],
         ],
     }
-    response = _request_json(api_url, config.FASTMAIL_API_TOKEN, payload)
+    response = _request_json(api_url, api_token, payload)
     cards: list[dict[str, Any]] = []
     for method_name, args, _tag in response.get("methodResponses", []):
         if method_name == "ContactCard/get":
@@ -735,7 +766,8 @@ def _relink_participants_to_synced_contacts(conn) -> int:
 
 
 def start_autosync() -> None:
-    if not config.FASTMAIL_CONFIGURED or not config.FASTMAIL_AUTOSYNC:
+    configured = bool(_fastmail_api_token() or (_fastmail_username_value() and _fastmail_app_password()))
+    if not configured or not app_settings.get_bool("contacts.autosync", config.CONTACTS_AUTOSYNC):
         return
 
     def worker() -> None:
@@ -744,7 +776,8 @@ def start_autosync() -> None:
                 sync_contacts()
             except Exception as exc:
                 print(f"Fastmail sync failed: {exc}", flush=True)
-            time.sleep(max(config.FASTMAIL_SYNC_INTERVAL_MINUTES, 5) * 60)
+            interval = app_settings.get_int("contacts.sync_interval_minutes", config.CONTACTS_SYNC_INTERVAL_MINUTES)
+            time.sleep(max(interval, 5) * 60)
 
     thread = threading.Thread(target=worker, name="fastmail-sync", daemon=True)
     thread.start()

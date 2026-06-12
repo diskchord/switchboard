@@ -16,6 +16,7 @@ from .db import connect, conversation_key, ensure_conversation, from_json, init_
 from .fastmail import FastmailError
 from .google_contacts import GoogleContactsError
 from .phone import display_phone, normalize_phone
+from .settings import SettingsError, configured_values, get_bool, get_value, update_values
 from .telnyx import TelnyxError, handle_webhook, send_message
 from .timeutil import now_est
 
@@ -402,16 +403,20 @@ def bootstrap() -> dict:
             """
         ).fetchone()
     )
+    providers = configured_providers()
     return {
         "identities": identities,
         "stats": stats,
         "server_time_et": server_time,
         "server_time_est": server_time,
-        "telnyx_configured": bool(config.TELNYX_API_KEY),
-        "fastmail_configured": config.FASTMAIL_CONFIGURED,
-        "google_contacts_configured": config.GOOGLE_CONTACTS_CONFIGURED,
+        "telnyx_configured": bool(get_value("telnyx.api_key", config.TELNYX_API_KEY)),
+        "fastmail_configured": providers.get("fastmail", False),
+        "google_contacts_configured": providers.get("google", False),
         "contacts_provider": active_provider(),
-        "contact_providers": configured_providers(),
+        "contact_providers": providers,
+        "settings": configured_values(),
+        "mark_read_on_open": get_bool("behavior.mark_read_on_open", False),
+        "details_collapsed_default": get_bool("behavior.details_collapsed_default", True),
         "default_identity": identities[0]["phone_number"] if identities else "",
     }
 
@@ -621,6 +626,8 @@ class TextingHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/bootstrap":
                 self._send_json(bootstrap())
+            elif path == "/api/settings":
+                self._send_json(configured_values())
             elif path == "/api/conversations":
                 self._send_json(list_conversations(query))
             elif path == "/api/conversations/match":
@@ -662,13 +669,15 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json({"synced": sync_contacts()})
             elif path == "/api/contacts/name":
                 self._send_json(save_contact_name(self._read_json()))
+            elif path == "/api/settings":
+                self._send_json(update_values(self._read_json()))
             elif path == "/api/telnyx/webhook":
                 raw = self._read_raw()
                 headers = {key.lower(): value for key, value in self.headers.items()}
                 self._send_json(handle_webhook(raw, headers))
             else:
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-        except (ValueError, TelnyxError, FastmailError, GoogleContactsError, ContactsError) as exc:
+        except (ValueError, SettingsError, TelnyxError, FastmailError, GoogleContactsError, ContactsError) as exc:
             self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
             self._send_json({"error": str(exc)}, 500)

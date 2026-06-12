@@ -1,8 +1,8 @@
 # Texting App
 
-A local-first SMS/MMS/group texting app for Telnyx, with a desktop web UI and a small Android WebView wrapper for sideloading.
+A local-first SMS/MMS/group texting app for Telnyx, with inbound fax support, a desktop web UI, and a small Android WebView wrapper for sideloading.
 
-The server stores conversations, messages, contacts, identities, and media metadata in SQLite. It can import historical HTML exports, receive Telnyx webhooks, send outbound Telnyx messages, sync contacts from Fastmail or Google Contacts, and optionally notify an ntfy topic when inbound texts arrive.
+The server stores conversations, messages, contacts, identities, and media metadata in SQLite. It can import historical HTML exports, receive Telnyx SMS/MMS/fax webhooks, send outbound Telnyx messages, sync contacts from Fastmail or Google Contacts, and optionally notify an ntfy topic when inbound texts arrive.
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
@@ -53,10 +53,20 @@ Important settings:
 - `CONTACTS_PROVIDER`: `auto`, `fastmail`, `google`, or `none`.
   `auto` uses Fastmail when configured, otherwise Google when configured.
 
+The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values for behavior, notifications, Telnyx, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. On a public server, keep Apache or another auth layer in front of the app before enabling browser-editable settings.
+
 The Telnyx webhook endpoint is:
 
 ```text
 /api/telnyx/webhook
+```
+
+Use this endpoint for both Messaging Profile webhooks and Programmable Fax Application webhooks. Inbound `fax.received` events are stored as inbound picture messages: the Telnyx fax PDF is downloaded immediately and rendered into PNG page attachments when `pdftoppm` is available. If PDF rendering is unavailable, the local PDF is kept as the attachment fallback.
+
+On Debian/Ubuntu servers, install the optional fax preview dependency with:
+
+```bash
+sudo apt install poppler-utils
 ```
 
 ## Importing Old Texts

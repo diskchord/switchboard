@@ -23,6 +23,7 @@
             <h1>Texts</h1>
           </div>
           <div class="rail-actions">
+            <button class="icon-button" id="settingsButton" title="Settings" aria-label="Settings">⚙</button>
             <button class="icon-button theme-button" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
             <button class="icon-button" id="newConversationButton" title="New conversation" aria-label="New conversation">+</button>
           </div>
@@ -139,6 +140,22 @@
     </div>
 
     <div class="toast" id="toast" role="status"></div>
+    <div class="settings-modal hidden" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1">
+      <form class="settings-card" id="settingsForm">
+        <header class="settings-header">
+          <div>
+            <h2>Settings</h2>
+            <p>Changes are saved locally and override matching .env values.</p>
+          </div>
+          <button class="icon-button" id="settingsClose" type="button" aria-label="Close settings">×</button>
+        </header>
+        <div class="settings-sections" id="settingsSections"></div>
+        <footer class="settings-footer">
+          <button class="small-button" id="settingsCancel" type="button">Cancel</button>
+          <button class="small-button done-button" type="submit">Save</button>
+        </footer>
+      </form>
+    </div>
     <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1">
       <button class="lightbox-close" id="lightboxClose" aria-label="Close image preview">×</button>
       <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous image">‹</button>

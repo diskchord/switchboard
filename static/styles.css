@@ -1050,6 +1050,138 @@ select:focus {
   transform: translateX(-50%) translateY(0);
 }
 
+.settings-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  display: grid;
+  place-items: center;
+  background: rgba(14, 18, 24, 0.46);
+  padding: 22px;
+}
+
+.settings-modal.hidden {
+  display: none;
+}
+
+.settings-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(860px, calc(100vw - 44px));
+  max-height: min(780px, calc(100dvh - 44px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.settings-header,
+.settings-footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.settings-header {
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.settings-header p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-sections {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-section h3 {
+  color: var(--accent);
+  font-size: 13px;
+  text-transform: uppercase;
+}
+
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.setting-field {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 12px;
+  min-width: 0;
+}
+
+.setting-field span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.setting-field strong {
+  font-size: 14px;
+}
+
+.setting-field small,
+.setting-help,
+.setting-clear {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setting-help {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.setting-toggle {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.setting-toggle input[type="checkbox"],
+.setting-clear input[type="checkbox"] {
+  width: auto;
+  height: auto;
+}
+
+.setting-toggle input[type="checkbox"] {
+  inline-size: 20px;
+  block-size: 20px;
+}
+
+.setting-clear {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.settings-footer {
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  justify-content: end;
+}
+
 .lightbox {
   position: fixed;
   inset: 0;
@@ -1349,6 +1481,29 @@ select:focus {
     width: 42px;
     height: 58px;
     font-size: 34px;
+  }
+
+  .settings-modal {
+    align-items: stretch;
+    padding: max(env(safe-area-inset-top), 12px) 12px max(env(safe-area-inset-bottom), 12px);
+  }
+
+  .settings-card {
+    width: 100%;
+    max-height: none;
+  }
+
+  .settings-header,
+  .settings-footer {
+    padding: 14px;
+  }
+
+  .settings-sections {
+    padding: 14px;
+  }
+
+  .settings-fields {
+    grid-template-columns: 1fr;
   }
 
   .detail-rail {
