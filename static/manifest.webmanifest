@@ -1,0 +1,10 @@
+{
+  "name": "Texts",
+  "short_name": "Texts",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f1eee7",
+  "theme_color": "#f7f5ef",
+  "icons": []
+}
+

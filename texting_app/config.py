@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _strip_env_comment(value: str) -> str:
+    quote: str | None = None
+    for index, char in enumerate(value):
+        if char in {"'", '"'} and (index == 0 or value[index - 1] != "\\"):
+            quote = None if quote == char else char if quote is None else quote
+        if char == "#" and quote is None and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value.strip()
+
+
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+            continue
+        value = _strip_env_comment(value.strip())
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv(ROOT / ".env")
+
+DEFAULT_DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "texting-app"
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in {"", "0", "false", "no", "off"}
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _csv_env(name: str) -> list[str]:
+    value = os.environ.get(name, "")
+    return [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
+
+
+def _labels_env(name: str) -> dict[str, str]:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = {}
+        for part in value.split(","):
+            phone, separator, label = part.partition("=")
+            if separator and phone.strip() and label.strip():
+                parsed[phone.strip()] = label.strip()
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(val) for key, val in parsed.items() if str(key).strip() and str(val).strip()}
+
+
+_DB_ENV = os.environ.get("TEXTING_DB", "")
+DATA_DIR = Path(os.environ.get("TEXTING_DATA_DIR") or (Path(_DB_ENV).parent if _DB_ENV else DEFAULT_DATA_DIR))
+MEDIA_DIR = Path(os.environ.get("TEXTING_MEDIA_DIR", DATA_DIR / "media"))
+DB_PATH = Path(_DB_ENV or DATA_DIR / "texting.sqlite")
+
+HOST = os.environ.get("TEXTING_HOST", "127.0.0.1")
+PORT = int(os.environ.get("TEXTING_PORT", "8766"))
+
+EST_OFFSET = "-04:00"
+EST_TZ_NAME = "ET"
+
+PERSONAL_NUMBERS = _csv_env("TEXTING_PERSONAL_NUMBERS")
+DEFAULT_IDENTITY_LABELS = _labels_env("TEXTING_IDENTITY_LABELS")
+
+IDENTITY_COLORS = [
+    "#0f766e",
+    "#b45309",
+    "#2563eb",
+    "#be123c",
+    "#4d7c0f",
+    "#7c3aed",
+    "#0e7490",
+    "#a16207",
+    "#c2410c",
+    "#4338ca",
+    "#15803d",
+    "#a21caf",
+    "#0369a1",
+]
+
+TELNYX_API_KEY = os.environ.get("TELNYX_API_KEY", "")
+TELNYX_PUBLIC_KEY = os.environ.get("TELNYX_PUBLIC_KEY", "")
+TELNYX_API_BASE = os.environ.get("TELNYX_API_BASE", "https://api.telnyx.com/v2")
+
+NTFY_ENDPOINT = os.environ.get("NTFY_ENDPOINT", "")
+NTFY_ENABLED = _bool_env("NTFY_ENABLED", bool(NTFY_ENDPOINT)) and bool(NTFY_ENDPOINT)
+
+FASTMAIL_API_TOKEN = os.environ.get("FASTMAIL_API_TOKEN", "")
+FASTMAIL_USERNAME = os.environ.get("FASTMAIL_USERNAME", "") or os.environ.get("FASTMAIL_EMAIL", "")
+FASTMAIL_APP_PASSWORD = os.environ.get("FASTMAIL_APP_PASSWORD", "") or os.environ.get("FASTMAIL_PASSWORD", "")
+FASTMAIL_CARDDAV_URL = os.environ.get("FASTMAIL_CARDDAV_URL", "")
+FASTMAIL_CARDDAV_USERNAME = os.environ.get("FASTMAIL_CARDDAV_USERNAME", "")
+FASTMAIL_ACCOUNT_ID = os.environ.get("FASTMAIL_ACCOUNT_ID", "")
+FASTMAIL_CONFIGURED = bool(FASTMAIL_API_TOKEN or (FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD))
+FASTMAIL_AUTOSYNC = _bool_env("FASTMAIL_AUTOSYNC", True)
+FASTMAIL_SYNC_INTERVAL_MINUTES = _int_env("FASTMAIL_SYNC_INTERVAL_MINUTES", 360)
+
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
+GOOGLE_CONTACTS_ACCESS_TOKEN = os.environ.get("GOOGLE_CONTACTS_ACCESS_TOKEN", "")
+GOOGLE_TOKEN_URI = os.environ.get("GOOGLE_TOKEN_URI", "https://oauth2.googleapis.com/token")
+GOOGLE_PEOPLE_API_BASE = os.environ.get("GOOGLE_PEOPLE_API_BASE", "https://people.googleapis.com/v1")
+GOOGLE_CONTACTS_CONFIGURED = bool(
+    GOOGLE_CONTACTS_ACCESS_TOKEN or (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN)
+)
+
+CONTACTS_PROVIDER = os.environ.get("CONTACTS_PROVIDER", "auto").strip().lower() or "auto"
+CONTACTS_AUTOSYNC = _bool_env("CONTACTS_AUTOSYNC", _bool_env("FASTMAIL_AUTOSYNC", True))
+CONTACTS_SYNC_INTERVAL_MINUTES = _int_env("CONTACTS_SYNC_INTERVAL_MINUTES", FASTMAIL_SYNC_INTERVAL_MINUTES)

@@ -1,0 +1,24 @@
+plugins {
+    id "com.android.application"
+}
+
+def localProps = new Properties()
+def localPropsFile = rootProject.file("local.properties")
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def textingAppUrl = localProps.getProperty("TEXTING_APP_URL", "https://texts.example.com")
+
+android {
+    namespace "com.example.texting"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.example.texting"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+        resValue "string", "app_url", textingAppUrl
+    }
+}

@@ -1,0 +1,52 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*secret*
+*token*
+*credential*
+
+# Private message/contact data
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+media/
+exports/
+imports/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Logs and process files
+*.log
+*.pid
+
+# Android/Gradle build output
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/build/
+mobile/android/app/build/
+*.apk
+*.aab
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

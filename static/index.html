@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#e6e8eb" id="themeColor" />
+    <title>Texts</title>
+    <link rel="manifest" href="/static/manifest.webmanifest" />
+    <script>
+      (() => {
+        const saved = localStorage.getItem("textingTheme");
+        const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = saved || (prefersDark ? "dark" : "light");
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail conversation-rail">
+        <header class="rail-header">
+          <div>
+            <h1>Texts</h1>
+          </div>
+          <div class="rail-actions">
+            <button class="icon-button theme-button" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
+            <button class="icon-button" id="newConversationButton" title="New conversation" aria-label="New conversation">+</button>
+          </div>
+        </header>
+        <div class="search-row">
+          <input id="conversationSearch" type="search" placeholder="Search" autocomplete="off" />
+        </div>
+        <div class="stat-strip" id="statStrip"></div>
+        <div class="category-tabs" role="tablist" aria-label="Thread category">
+          <button class="category-tab active" data-category="inbox">Inbox</button>
+          <button class="category-tab" data-category="unread">Unread</button>
+          <button class="category-tab" data-category="hidden">Hidden</button>
+        </div>
+        <div class="conversation-list" id="conversationList"></div>
+      </aside>
+
+      <div
+        class="column-resizer left-resizer"
+        data-resizer="left"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize thread list"
+        tabindex="0"
+      ></div>
+
+      <main class="thread-pane">
+        <header class="thread-header">
+          <button class="icon-button mobile-back-button" id="mobileBackButton" title="Back to conversations" aria-label="Back to conversations">‹</button>
+          <div class="thread-title-wrap">
+            <p class="eyebrow" id="threadKind">Conversation</p>
+            <h2 id="threadTitle">Select a thread</h2>
+            <div class="participant-row">
+              <div class="participant-line" id="participantLine"></div>
+              <button class="name-contact-button" id="contactNameToggle" type="button" hidden>Name</button>
+            </div>
+            <form class="contact-name-form hidden" id="contactNameForm">
+              <input id="contactNameInput" type="text" placeholder="Contact name" autocomplete="off" />
+              <button class="small-button" type="submit">Save</button>
+              <button class="small-button" id="contactNameCancel" type="button">Cancel</button>
+            </form>
+          </div>
+          <div class="thread-actions">
+            <label class="sender-picker">
+              <span>From</span>
+              <select id="fromNumber"></select>
+            </label>
+            <div class="thread-action-row" role="group" aria-label="Conversation actions">
+              <button class="small-button done-button" id="dealtButton" disabled>Read</button>
+              <button class="small-button danger-button" id="archiveButton" disabled>Hide</button>
+              <button class="small-button panel-button" id="toggleDetailsButton" aria-pressed="false">Panel</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="recipient-bar" id="recipientBar">
+          <div class="chips" id="recipientChips"></div>
+          <div class="recipient-entry">
+            <input
+              id="recipientInput"
+              type="text"
+              placeholder="Add recipient"
+              autocomplete="off"
+              aria-autocomplete="list"
+              aria-controls="recipientSuggestions"
+              aria-expanded="false"
+            />
+            <div class="recipient-suggestions hidden" id="recipientSuggestions" role="listbox"></div>
+          </div>
+        </section>
+
+        <section class="messages" id="messages" tabindex="0" aria-label="Messages"></section>
+
+        <footer class="composer">
+          <textarea id="messageText" placeholder="Message" rows="2"></textarea>
+          <div class="composer-error hidden" id="composerError" role="alert"></div>
+          <div class="composer-tools">
+            <input id="mediaUrls" type="text" placeholder="Media URLs" autocomplete="off" />
+            <button class="icon-button send-button" id="sendButton" title="Send" aria-label="Send">➤</button>
+          </div>
+        </footer>
+      </main>
+
+      <div
+        class="column-resizer right-resizer"
+        data-resizer="right"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize side panel"
+        tabindex="0"
+      ></div>
+
+      <aside class="rail detail-rail">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="identities">Numbers</button>
+          <button class="tab" data-tab="contacts">Contacts</button>
+        </div>
+
+        <section class="panel-section active" id="identitiesPanel">
+          <div class="panel-heading">
+            <h3>Sender Identities</h3>
+          </div>
+          <div class="identity-list" id="identityList"></div>
+        </section>
+
+        <section class="panel-section" id="contactsPanel">
+          <div class="panel-heading">
+            <h3>Contacts</h3>
+            <button class="small-button" id="syncContactsButton">Sync</button>
+          </div>
+          <input id="contactSearch" type="search" placeholder="Find contact" autocomplete="off" />
+          <div class="contact-results" id="contactResults"></div>
+        </section>
+      </aside>
+    </div>
+
+    <div class="toast" id="toast" role="status"></div>
+    <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1">
+      <button class="lightbox-close" id="lightboxClose" aria-label="Close image preview">×</button>
+      <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous image">‹</button>
+      <img id="lightboxImage" alt="" />
+      <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image">›</button>
+      <div class="lightbox-caption" id="lightboxCaption"></div>
+    </div>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
