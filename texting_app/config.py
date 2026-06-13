@@ -41,7 +41,21 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(ROOT / ".env")
 
-DEFAULT_DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "texting-app"
+APP_NAME = "Switchboard"
+APP_SLUG = "switchboard"
+LEGACY_APP_SLUG = "texting-app"
+
+
+def _default_data_dir() -> Path:
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    preferred = base / APP_SLUG
+    legacy = base / LEGACY_APP_SLUG
+    if not os.environ.get("TEXTING_DATA_DIR") and not os.environ.get("TEXTING_DB") and legacy.exists() and not preferred.exists():
+        return legacy
+    return preferred
+
+
+DEFAULT_DATA_DIR = _default_data_dir()
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -78,6 +92,23 @@ def _labels_env(name: str) -> dict[str, str]:
     if not isinstance(parsed, dict):
         return {}
     return {str(key): str(val) for key, val in parsed.items() if str(key).strip() and str(val).strip()}
+
+
+def _mapping_env(name: str) -> dict[str, str]:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = {}
+        for part in value.split(","):
+            key, separator, raw = part.partition("=")
+            if separator and key.strip() and raw.strip():
+                parsed[key.strip()] = raw.strip()
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key).strip(): str(val).strip() for key, val in parsed.items() if str(key).strip() and str(val).strip()}
 
 
 _DB_ENV = os.environ.get("TEXTING_DB", "")
@@ -117,10 +148,22 @@ TELNYX_API_KEY = os.environ.get("TELNYX_API_KEY", "")
 TELNYX_PUBLIC_KEY = os.environ.get("TELNYX_PUBLIC_KEY", "")
 TELNYX_API_BASE = os.environ.get("TELNYX_API_BASE", "https://api.telnyx.com/v2")
 
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TWILIO_API_BASE = os.environ.get("TWILIO_API_BASE", "https://api.twilio.com")
+TWILIO_WEBHOOK_URL = os.environ.get("TWILIO_WEBHOOK_URL", "")
+TWILIO_STATUS_CALLBACK_URL = os.environ.get("TWILIO_STATUS_CALLBACK_URL", "")
+
+MESSAGING_PROVIDER = os.environ.get("TEXTING_MESSAGING_PROVIDER", "telnyx").strip().lower() or "telnyx"
+MESSAGING_PROVIDER_BY_NUMBER = _mapping_env("TEXTING_PROVIDER_BY_NUMBER")
+
+UI_LANGUAGE = os.environ.get("TEXTING_UI_LANGUAGE", "auto").strip().lower() or "auto"
+
 NTFY_ENDPOINT = os.environ.get("NTFY_ENDPOINT", "")
 NTFY_ENABLED = _bool_env("NTFY_ENABLED", bool(NTFY_ENDPOINT)) and bool(NTFY_ENDPOINT)
 NATIVE_NOTIFICATIONS_ENABLED = _bool_env("TEXTING_NATIVE_NOTIFICATIONS_ENABLED", False)
 NATIVE_NOTIFICATION_INTERVAL_MINUTES = _int_env("TEXTING_NATIVE_NOTIFICATION_INTERVAL_MINUTES", 15)
+AUTO_REFRESH_SECONDS = _int_env("TEXTING_AUTO_REFRESH_SECONDS", 15)
 
 FASTMAIL_API_TOKEN = os.environ.get("FASTMAIL_API_TOKEN", "")
 FASTMAIL_USERNAME = os.environ.get("FASTMAIL_USERNAME", "") or os.environ.get("FASTMAIL_EMAIL", "")

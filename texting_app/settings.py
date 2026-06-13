@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,15 @@ class SettingDef:
 
 SETTING_DEFS: tuple[SettingDef, ...] = (
     SettingDef(
+        "ui.language",
+        "Language",
+        "Interface",
+        "select",
+        config.UI_LANGUAGE,
+        options=(("auto", "Automatic"), ("en", "English"), ("es", "Español"), ("fr", "Français")),
+        env_names=("TEXTING_UI_LANGUAGE",),
+    ),
+    SettingDef(
         "behavior.mark_read_on_open",
         "Mark thread read when opened",
         "Behavior",
@@ -38,6 +48,15 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         "bool",
         "1",
         help="Applies when this browser has no saved panel preference.",
+    ),
+    SettingDef(
+        "behavior.auto_refresh_seconds",
+        "Auto-refresh seconds",
+        "Behavior",
+        "number",
+        str(config.AUTO_REFRESH_SECONDS),
+        help="Browser polling interval. Set to 0 to disable.",
+        env_names=("TEXTING_AUTO_REFRESH_SECONDS",),
     ),
     SettingDef(
         "notifications.ntfy_enabled",
@@ -101,6 +120,25 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         env_names=("TEXTING_UPLOAD_MAX_FILE_MB",),
     ),
     SettingDef(
+        "messaging.provider",
+        "Default sender provider",
+        "Messaging",
+        "select",
+        config.MESSAGING_PROVIDER,
+        options=(("telnyx", "Telnyx"), ("twilio", "Twilio")),
+        help="Used when a sender number has no provider override.",
+        env_names=("TEXTING_MESSAGING_PROVIDER",),
+    ),
+    SettingDef(
+        "messaging.provider_by_number",
+        "Provider by number",
+        "Messaging",
+        "text",
+        json.dumps(config.MESSAGING_PROVIDER_BY_NUMBER, separators=(",", ":")),
+        help='JSON object such as {"+15551230001":"twilio","+15551230002":"telnyx"}.',
+        env_names=("TEXTING_PROVIDER_BY_NUMBER",),
+    ),
+    SettingDef(
         "contacts.provider",
         "Contact provider",
         "Contacts",
@@ -128,6 +166,44 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
     SettingDef("telnyx.api_base", "Telnyx API base", "Telnyx", "url", config.TELNYX_API_BASE, env_names=("TELNYX_API_BASE",)),
     SettingDef("telnyx.api_key", "Telnyx API key", "Telnyx", "secret", config.TELNYX_API_KEY, secret=True, env_names=("TELNYX_API_KEY",)),
     SettingDef("telnyx.public_key", "Telnyx public key", "Telnyx", "secret", config.TELNYX_PUBLIC_KEY, secret=True, env_names=("TELNYX_PUBLIC_KEY",)),
+    SettingDef("twilio.api_base", "Twilio API base", "Twilio", "url", config.TWILIO_API_BASE, env_names=("TWILIO_API_BASE",)),
+    SettingDef("twilio.account_sid", "Twilio account SID", "Twilio", "text", config.TWILIO_ACCOUNT_SID, env_names=("TWILIO_ACCOUNT_SID",)),
+    SettingDef(
+        "twilio.auth_token",
+        "Twilio auth token",
+        "Twilio",
+        "secret",
+        config.TWILIO_AUTH_TOKEN,
+        secret=True,
+        env_names=("TWILIO_AUTH_TOKEN",),
+    ),
+    SettingDef(
+        "twilio.webhook_url",
+        "Twilio webhook URL",
+        "Twilio",
+        "url",
+        config.TWILIO_WEBHOOK_URL,
+        help="Exact public URL Twilio calls. Used for request signature validation.",
+        env_names=("TWILIO_WEBHOOK_URL",),
+    ),
+    SettingDef(
+        "twilio.status_callback_url",
+        "Twilio status callback URL",
+        "Twilio",
+        "url",
+        config.TWILIO_STATUS_CALLBACK_URL,
+        help="Optional. Sent with outbound Twilio messages so delivery callbacks return here.",
+        env_names=("TWILIO_STATUS_CALLBACK_URL",),
+    ),
+    SettingDef("hotkeys.enabled", "Enable hotkeys", "Hotkeys", "bool", "1"),
+    SettingDef("hotkeys.new_conversation", "New conversation", "Hotkeys", "text", "n"),
+    SettingDef("hotkeys.focus_search", "Focus search", "Hotkeys", "text", "/"),
+    SettingDef("hotkeys.focus_message", "Focus message", "Hotkeys", "text", "m"),
+    SettingDef("hotkeys.toggle_read", "Read/unread", "Hotkeys", "text", "r"),
+    SettingDef("hotkeys.archive", "Hide/unhide", "Hotkeys", "text", "h"),
+    SettingDef("hotkeys.toggle_details", "Toggle side panel", "Hotkeys", "text", "p"),
+    SettingDef("hotkeys.next_thread", "Next thread", "Hotkeys", "text", "j"),
+    SettingDef("hotkeys.previous_thread", "Previous thread", "Hotkeys", "text", "k"),
     SettingDef("fastmail.username", "Fastmail username", "Fastmail", "text", config.FASTMAIL_USERNAME, env_names=("FASTMAIL_USERNAME", "FASTMAIL_EMAIL")),
     SettingDef(
         "fastmail.app_password",

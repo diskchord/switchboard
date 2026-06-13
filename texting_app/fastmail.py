@@ -398,14 +398,14 @@ def _put_carddav_vcard(vcard: str, *, href: str | None = None, uid: str) -> str:
 
 def _uid_for_phone(phone: str) -> str:
     digest = hashlib.sha256(phone.encode("utf-8")).hexdigest()[:24]
-    return f"texting-app-{digest}"
+    return f"switchboard-{digest}"
 
 
 def _build_vcard(uid: str, display_name: str, phones: list[tuple[str, str]], emails: list[tuple[str, str]] | None = None) -> str:
     lines = [
         "BEGIN:VCARD",
         "VERSION:3.0",
-        "PRODID:-//Texting App//Contacts//EN",
+        "PRODID:-//Switchboard//Contacts//EN",
         f"UID:{_vcard_escape(uid)}",
         f"FN:{_vcard_escape(display_name)}",
         f"N:{_n_value(display_name)}",

@@ -1,2 +1,1 @@
-"""Local texting app package."""
-
+"""Local Switchboard package."""

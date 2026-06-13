@@ -762,8 +762,8 @@ select:focus {
 }
 
 .outbound .message-bubble {
-  background: var(--bubble-out);
-  border-color: var(--bubble-out);
+  background: var(--message-out, var(--bubble-out));
+  border-color: var(--message-out, var(--bubble-out));
   color: white;
 }
 
@@ -1010,15 +1010,27 @@ select:focus {
 }
 
 .swatch {
+  position: relative;
   width: 32px;
   height: 32px;
   border-radius: 8px;
   border: 1px solid var(--line);
+  overflow: hidden;
 }
 
-.identity-card input[type="color"] {
+.color-swatch {
+  cursor: pointer;
+}
+
+.identity-card .identity-color {
+  position: absolute;
+  inset: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  border: 0;
+  cursor: pointer;
+  opacity: 0;
   padding: 0;
-  height: 32px;
 }
 
 .identity-main {

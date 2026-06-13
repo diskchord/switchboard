@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#e6e8eb" id="themeColor" />
-    <title>Texts</title>
+    <title data-i18n="app.title">Switchboard</title>
     <link rel="manifest" href="/static/manifest.webmanifest" />
     <script>
       (() => {
@@ -20,22 +20,22 @@
       <aside class="rail conversation-rail">
         <header class="rail-header">
           <div>
-            <h1>Texts</h1>
+            <h1 data-i18n="app.title">Switchboard</h1>
           </div>
           <div class="rail-actions">
-            <button class="icon-button" id="settingsButton" title="Settings" aria-label="Settings">⚙</button>
+            <button class="icon-button" id="settingsButton" title="Settings" aria-label="Settings" data-i18n-title="settings.title" data-i18n-aria-label="settings.title">⚙</button>
             <button class="icon-button theme-button" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
-            <button class="icon-button" id="newConversationButton" title="New conversation" aria-label="New conversation">+</button>
+            <button class="icon-button" id="newConversationButton" title="New conversation" aria-label="New conversation" data-i18n-title="conversation.new" data-i18n-aria-label="conversation.new">+</button>
           </div>
         </header>
         <div class="search-row">
-          <input id="conversationSearch" type="search" placeholder="Search" autocomplete="off" />
+          <input id="conversationSearch" type="search" placeholder="Search" autocomplete="off" data-i18n-placeholder="search.placeholder" />
         </div>
         <div class="stat-strip" id="statStrip"></div>
-        <div class="category-tabs" role="tablist" aria-label="Thread category">
-          <button class="category-tab active" data-category="inbox">Inbox</button>
-          <button class="category-tab" data-category="unread">Unread</button>
-          <button class="category-tab" data-category="hidden">Hidden</button>
+        <div class="category-tabs" role="tablist" aria-label="Thread category" data-i18n-aria-label="category.aria">
+          <button class="category-tab active" data-category="inbox" data-i18n="category.inbox">Inbox</button>
+          <button class="category-tab" data-category="unread" data-i18n="category.unread">Unread</button>
+          <button class="category-tab" data-category="hidden" data-i18n="category.hidden">Hidden</button>
         </div>
         <div class="conversation-list" id="conversationList"></div>
       </aside>
@@ -51,29 +51,29 @@
 
       <main class="thread-pane">
         <header class="thread-header">
-          <button class="icon-button mobile-back-button" id="mobileBackButton" title="Back to conversations" aria-label="Back to conversations">‹</button>
+          <button class="icon-button mobile-back-button" id="mobileBackButton" title="Back to conversations" aria-label="Back to conversations" data-i18n-title="conversation.back" data-i18n-aria-label="conversation.back">‹</button>
           <div class="thread-title-wrap">
-            <p class="eyebrow" id="threadKind">Conversation</p>
-            <h2 id="threadTitle">Select a thread</h2>
+            <p class="eyebrow" id="threadKind" data-i18n="thread.conversation">Conversation</p>
+            <h2 id="threadTitle" data-i18n="thread.select">Select a thread</h2>
             <div class="participant-row">
               <div class="participant-line" id="participantLine"></div>
-              <button class="name-contact-button" id="contactNameToggle" type="button" hidden>Name</button>
+              <button class="name-contact-button" id="contactNameToggle" type="button" hidden data-i18n="contact.name">Name</button>
             </div>
             <form class="contact-name-form hidden" id="contactNameForm">
-              <input id="contactNameInput" type="text" placeholder="Contact name" autocomplete="off" />
-              <button class="small-button" type="submit">Save</button>
-              <button class="small-button" id="contactNameCancel" type="button">Cancel</button>
+              <input id="contactNameInput" type="text" placeholder="Contact name" autocomplete="off" data-i18n-placeholder="contact.name_placeholder" />
+              <button class="small-button" type="submit" data-i18n="common.save">Save</button>
+              <button class="small-button" id="contactNameCancel" type="button" data-i18n="common.cancel">Cancel</button>
             </form>
           </div>
           <div class="thread-actions">
             <label class="sender-picker">
-              <span>From</span>
+              <span data-i18n="composer.from">From</span>
               <select id="fromNumber"></select>
             </label>
-            <div class="thread-action-row" role="group" aria-label="Conversation actions">
-              <button class="small-button done-button" id="dealtButton" disabled>Read</button>
-              <button class="small-button danger-button" id="archiveButton" disabled>Hide</button>
-              <button class="small-button panel-button" id="toggleDetailsButton" aria-pressed="false">Panel</button>
+            <div class="thread-action-row" role="group" aria-label="Conversation actions" data-i18n-aria-label="conversation.actions">
+              <button class="small-button done-button" id="dealtButton" disabled data-i18n="conversation.read">Read</button>
+              <button class="small-button danger-button" id="archiveButton" disabled data-i18n="conversation.hide">Hide</button>
+              <button class="small-button panel-button" id="toggleDetailsButton" aria-pressed="false" data-i18n="panel.label">Panel</button>
             </div>
           </div>
         </header>
@@ -85,6 +85,7 @@
               id="recipientInput"
               type="text"
               placeholder="Add recipient"
+              data-i18n-placeholder="recipient.add"
               autocomplete="off"
               aria-autocomplete="list"
               aria-controls="recipientSuggestions"
@@ -94,20 +95,20 @@
           </div>
         </section>
 
-        <section class="messages" id="messages" tabindex="0" aria-label="Messages"></section>
+        <section class="messages" id="messages" tabindex="0" aria-label="Messages" data-i18n-aria-label="messages.aria"></section>
 
         <footer class="composer">
-          <textarea id="messageText" placeholder="Message" rows="2"></textarea>
+          <textarea id="messageText" placeholder="Message" rows="2" data-i18n-placeholder="composer.message"></textarea>
           <div class="composer-meta">
             <span id="messageCounter">0/160</span>
           </div>
           <div class="composer-error hidden" id="composerError" role="alert"></div>
           <div class="upload-list hidden" id="uploadList"></div>
           <div class="composer-tools">
-            <input id="mediaUrls" type="text" placeholder="Media URLs" autocomplete="off" />
-            <label class="icon-button upload-button" for="mediaFiles" title="Upload media" aria-label="Upload media">📎</label>
+            <input id="mediaUrls" type="text" placeholder="Media URLs" autocomplete="off" data-i18n-placeholder="composer.media_urls" />
+            <label class="icon-button upload-button" for="mediaFiles" title="Upload media" aria-label="Upload media" data-i18n-title="composer.upload" data-i18n-aria-label="composer.upload">📎</label>
             <input id="mediaFiles" class="hidden-file-input" type="file" accept="image/*,video/*,audio/*,application/pdf" multiple />
-            <button class="icon-button send-button" id="sendButton" title="Send" aria-label="Send">➤</button>
+            <button class="icon-button send-button" id="sendButton" title="Send" aria-label="Send" data-i18n-title="composer.send" data-i18n-aria-label="composer.send">➤</button>
           </div>
         </footer>
       </main>
@@ -123,50 +124,50 @@
 
       <aside class="rail detail-rail">
         <div class="tabs" role="tablist">
-          <button class="tab active" data-tab="identities">Numbers</button>
-          <button class="tab" data-tab="contacts">Contacts</button>
+          <button class="tab active" data-tab="identities" data-i18n="tabs.numbers">Numbers</button>
+          <button class="tab" data-tab="contacts" data-i18n="tabs.contacts">Contacts</button>
         </div>
 
         <section class="panel-section active" id="identitiesPanel">
           <div class="panel-heading">
-            <h3>Sender Identities</h3>
+            <h3 data-i18n="identities.heading">Sender Identities</h3>
           </div>
           <div class="identity-list" id="identityList"></div>
         </section>
 
         <section class="panel-section" id="contactsPanel">
           <div class="panel-heading">
-            <h3>Contacts</h3>
-            <button class="small-button" id="syncContactsButton">Sync</button>
+            <h3 data-i18n="tabs.contacts">Contacts</h3>
+            <button class="small-button" id="syncContactsButton" data-i18n="contacts.sync">Sync</button>
           </div>
-          <input id="contactSearch" type="search" placeholder="Find contact" autocomplete="off" />
+          <input id="contactSearch" type="search" placeholder="Find contact" autocomplete="off" data-i18n-placeholder="contacts.find" />
           <div class="contact-results" id="contactResults"></div>
         </section>
       </aside>
     </div>
 
     <div class="toast" id="toast" role="status"></div>
-    <div class="settings-modal hidden" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1">
+    <div class="settings-modal hidden" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1" data-i18n-aria-label="settings.title">
       <form class="settings-card" id="settingsForm">
         <header class="settings-header">
           <div>
-            <h2>Settings</h2>
-            <p>Changes are saved locally and override matching .env values.</p>
+            <h2 data-i18n="settings.title">Settings</h2>
+            <p data-i18n="settings.description">Changes are saved locally and override matching .env values.</p>
           </div>
-          <button class="icon-button" id="settingsClose" type="button" aria-label="Close settings">×</button>
+          <button class="icon-button" id="settingsClose" type="button" aria-label="Close settings" data-i18n-aria-label="settings.close">×</button>
         </header>
         <div class="settings-sections" id="settingsSections"></div>
         <footer class="settings-footer">
-          <button class="small-button" id="settingsCancel" type="button">Cancel</button>
-          <button class="small-button done-button" type="submit">Save</button>
+          <button class="small-button" id="settingsCancel" type="button" data-i18n="common.cancel">Cancel</button>
+          <button class="small-button done-button" type="submit" data-i18n="common.save">Save</button>
         </footer>
       </form>
     </div>
-    <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1">
-      <button class="lightbox-close" id="lightboxClose" aria-label="Close image preview">×</button>
-      <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous image">‹</button>
+    <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1" data-i18n-aria-label="lightbox.preview">
+      <button class="lightbox-close" id="lightboxClose" aria-label="Close image preview" data-i18n-aria-label="lightbox.close">×</button>
+      <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous image" data-i18n-aria-label="lightbox.previous">‹</button>
       <img id="lightboxImage" alt="" />
-      <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image">›</button>
+      <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
       <div class="lightbox-caption" id="lightboxCaption"></div>
     </div>
     <script src="/static/app.js" type="module"></script>

@@ -20,6 +20,7 @@ from . import config
 from . import settings as app_settings
 from .db import (
     add_attachment,
+    add_provider_message_ref,
     as_json,
     connect,
     ensure_conversation,
@@ -107,7 +108,7 @@ def _download_media(media: dict[str, Any]) -> tuple[str | None, int | None, str 
     filename = base if base.endswith(extension) else f"{base}{extension}"
     target = config.MEDIA_DIR / filename
     if not target.exists():
-        request = urllib.request.Request(url, headers={"User-Agent": "texting-app/0.1"})
+        request = urllib.request.Request(url, headers={"User-Agent": "switchboard/0.1"})
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
                 payload = response.read()
@@ -319,6 +320,7 @@ def send_message(
     )
     for url in media_urls:
         add_attachment(conn, message_id, remote_url=url, filename=Path(url).name, source="telnyx")
+    add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
     conn.commit()
     return {"message_id": message_id, "telnyx": response}
 
@@ -413,7 +415,19 @@ def _update_outbound_status(conn, event: dict[str, Any]) -> int | None:
     return int(row["id"])
 
 
-def _fax_message_text(payload: dict[str, Any]) -> str:
+def _humanize_token(value: Any) -> str:
+    return str(value or "").replace("_", " ").strip()
+
+
+def _fax_failed(payload: dict[str, Any], event_type: str) -> bool:
+    status = str(payload.get("status") or "").lower()
+    return event_type.endswith(".failed") or status == "failed" or bool(payload.get("failure_reason"))
+
+
+def _fax_message_text(payload: dict[str, Any], event_type: str) -> str:
+    if _fax_failed(payload, event_type):
+        reason = _humanize_token(payload.get("failure_reason"))
+        return f"Fax failed: {reason}" if reason else "Fax failed"
     page_count = payload.get("page_count")
     if isinstance(page_count, str) and page_count.isdigit():
         page_count = int(page_count)
@@ -422,17 +436,20 @@ def _fax_message_text(payload: dict[str, Any]) -> str:
     return "Fax received"
 
 
-def _store_fax_received(conn, event: dict[str, Any]) -> int | None:
+def _store_fax_event(conn, event: dict[str, Any]) -> int | None:
     data = event.get("data", {})
     payload = data.get("payload", {})
-    if data.get("event_type") != "fax.received":
+    event_type = str(data.get("event_type") or "")
+    if not event_type.startswith("fax."):
         return None
     if payload.get("direction") and str(payload.get("direction")).lower() != "inbound":
+        return None
+    if event_type != "fax.received" and not _fax_failed(payload, event_type):
         return None
 
     fax_id = str(payload.get("fax_id") or payload.get("id") or data.get("id") or "")
     telnyx_id = f"fax:{fax_id}" if fax_id else str(data.get("id") or "")
-    occurred_at = normalize_iso_timestamp(payload.get("completed_at") or data.get("occurred_at"))
+    occurred_at = normalize_iso_timestamp(payload.get("completed_at") or payload.get("failed_at") or data.get("occurred_at"))
     from_number = _payload_phone(payload.get("from") or payload.get("caller_id"))
     to_numbers = _payload_phone_list(payload.get("to"))
     known_self = self_numbers(conn)
@@ -440,8 +457,8 @@ def _store_fax_received(conn, event: dict[str, Any]) -> int | None:
     remote_numbers = sorted(n for n in participants if n and n not in known_self)
     self_participants = sorted(n for n in participants if n in known_self)
     conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
-    status = str(payload.get("status") or "received")
-    text = _fax_message_text(payload)
+    status = str(payload.get("status") or ("failed" if _fax_failed(payload, event_type) else "received"))
+    text = _fax_message_text(payload, event_type)
 
     if telnyx_id:
         row = conn.execute("SELECT id FROM messages WHERE telnyx_id = ? ORDER BY id LIMIT 1", (telnyx_id,)).fetchone()
@@ -449,11 +466,12 @@ def _store_fax_received(conn, event: dict[str, Any]) -> int | None:
             conn.execute(
                 """
                 UPDATE messages
-                SET status = ?, telnyx_event_id = ?, raw_json = ?, updated_at = ?
+                SET text = ?, status = ?, telnyx_event_id = ?, raw_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (status, data.get("id"), as_json(event), now_est(), row["id"]),
+                (text, status, data.get("id"), as_json(event), now_est(), row["id"]),
             )
+            add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=int(row["id"]))
             return int(row["id"])
 
     message_id = upsert_message(
@@ -472,6 +490,7 @@ def _store_fax_received(conn, event: dict[str, Any]) -> int | None:
         telnyx_event_id=data.get("id"),
         raw_json=event,
     )
+    add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
 
     media_url = payload.get("media_url")
     attachment_count = 0
@@ -503,6 +522,7 @@ def _store_fax_received(conn, event: dict[str, Any]) -> int | None:
             )
             attachment_count = 1
 
+    conn.commit()
     _notify_incoming_message(
         from_number=from_number,
         sender_name=_contact_name_for_phone(conn, from_number),
@@ -527,8 +547,8 @@ def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
         updated_id = _update_outbound_status(conn, event)
         if updated_id:
             return updated_id
-    if event_type == "fax.received":
-        return _store_fax_received(conn, event)
+    if str(event_type).startswith("fax."):
+        return _store_fax_event(conn, event)
     if event_type not in {"message.received", "message.sent"}:
         return None
 
@@ -586,7 +606,9 @@ def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
             filename=Path(local_path or media.get("url", "")).name,
             source="telnyx",
         )
+    add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
     if direction == "inbound":
+        conn.commit()
         _notify_incoming_message(
             from_number=from_number,
             sender_name=_contact_name_for_phone(conn, from_number),

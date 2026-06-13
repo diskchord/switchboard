@@ -7,7 +7,10 @@ def localPropsFile = rootProject.file("local.properties")
 if (localPropsFile.exists()) {
     localPropsFile.withInputStream { localProps.load(it) }
 }
-def textingAppUrl = localProps.getProperty("TEXTING_APP_URL", "https://texts.example.com")
+def switchboardAppUrl = localProps.getProperty(
+    "SWITCHBOARD_APP_URL",
+    localProps.getProperty("TEXTING_APP_URL", "https://switchboard.example.com")
+)
 
 android {
     namespace "com.example.texting"
@@ -19,7 +22,7 @@ android {
         targetSdk 35
         versionCode 1
         versionName "0.1.0"
-        resValue "string", "app_url", textingAppUrl
+        resValue "string", "app_url", switchboardAppUrl
     }
 }
 

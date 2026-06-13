@@ -1,7 +1,7 @@
 {
   "version": "0.0.1",
   "services": {
-    "svc:texting-app": {
+    "svc:switchboard": {
       "endpoints": {
         "tcp:443": "http://127.0.0.1:8766"
       }

@@ -19,10 +19,15 @@ from .contacts import start_autosync, sync_contacts
 from .db import connect, conversation_key, ensure_conversation, from_json, init_db
 from .fastmail import FastmailError
 from .google_contacts import GoogleContactsError
+from .messaging import MessagingError, configured_messaging_providers
+from .messaging import send_message as send_provider_message
 from .phone import display_phone, normalize_phone
 from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values
-from .telnyx import TelnyxError, handle_webhook, send_message
+from .telnyx import TelnyxError
+from .telnyx import handle_webhook as handle_telnyx_webhook
 from .timeutil import now_est
+from .twilio import TwilioError
+from .twilio import handle_webhook as handle_twilio_webhook
 
 
 STATIC_DIR = config.ROOT / "static"
@@ -289,14 +294,25 @@ def _message_status_detail(status: str | None, raw_json: str | None) -> str:
     if _status_kind(status) not in {"failed", "warning"}:
         return ""
     payload = _as_payload(raw_json)
+    provider = "Twilio" if "twilio" in payload or "twilio_status" in payload else "Telnyx"
+    twilio_status = payload.get("twilio_status")
+    if isinstance(twilio_status, dict):
+        twilio_error = twilio_status.get("ErrorMessage") or twilio_status.get("ErrorCode")
+        if twilio_error:
+            return f"Twilio reported {status.replace('_', ' ')}: {twilio_error}."
     message_payload = payload.get("data", {}).get("payload", payload.get("data", payload))
+    if isinstance(message_payload, dict):
+        failure_reason = message_payload.get("failure_reason")
+        if failure_reason:
+            reason = str(failure_reason).replace("_", " ")
+            return f"{provider} reported {status.replace('_', ' ')}: {reason}."
     errors = message_payload.get("errors") if isinstance(message_payload, dict) else None
     if errors:
         return "; ".join(_error_text(error) for error in errors)
     if status == "delivery_unconfirmed":
         return "Telnyx did not receive carrier confirmation for this message."
     if status:
-        return f"Telnyx reported {status.replace('_', ' ')}."
+        return f"{provider} reported {status.replace('_', ' ')}."
     return ""
 
 
@@ -560,6 +576,96 @@ def mobile_notifications(query: dict[str, list[str]]) -> dict:
     }
 
 
+def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
+    def token_part(row, key: str) -> str:
+        value = row[key]
+        return "" if value is None else str(value)
+
+    list_row = conn.execute(
+        f"""
+        SELECT
+          (SELECT COUNT(*) FROM conversations) AS conversation_count,
+          (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 1) AS hidden_count,
+          (SELECT COUNT(*) FROM conversations c WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_count,
+          (SELECT COALESCE(MAX(updated_at), '') FROM conversations) AS conversations_updated_at,
+          (SELECT COUNT(*) FROM messages) AS message_count,
+          (SELECT COALESCE(MAX(updated_at), '') FROM messages) AS messages_updated_at,
+          (SELECT COUNT(*) FROM identities) AS identity_count,
+          (SELECT COALESCE(MAX(updated_at), '') FROM identities) AS identities_updated_at,
+          (SELECT COUNT(*) FROM contacts) AS contact_count,
+          (SELECT COALESCE(MAX(updated_at), '') FROM contacts) AS contacts_updated_at
+        """
+    ).fetchone()
+    tokens = {
+        "list": "|".join(
+            token_part(list_row, key)
+            for key in (
+                "conversation_count",
+                "hidden_count",
+                "unread_count",
+                "conversations_updated_at",
+                "message_count",
+                "messages_updated_at",
+            )
+        ),
+        "bootstrap": "|".join(
+            token_part(list_row, key)
+            for key in (
+                "identity_count",
+                "identities_updated_at",
+                "contact_count",
+                "contacts_updated_at",
+                "hidden_count",
+                "unread_count",
+            )
+        ),
+        "conversation": "",
+    }
+    if conversation_id:
+        row = conn.execute(
+            """
+            SELECT
+              c.updated_at AS conversation_updated_at,
+              COALESCE(c.dealt_with_at, '') AS dealt_with_at,
+              COALESCE(c.manual_unread_at, '') AS manual_unread_at,
+              COALESCE(c.last_message_at, '') AS last_message_at,
+              COUNT(m.id) AS message_count,
+              COALESCE(MAX(m.updated_at), '') AS messages_updated_at,
+              COALESCE(MAX(m.occurred_at), '') AS messages_occurred_at
+            FROM conversations c
+            LEFT JOIN messages m ON m.conversation_id = c.id
+            WHERE c.id = ?
+            GROUP BY c.id
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row:
+            tokens["conversation"] = "|".join(
+                token_part(row, key)
+                for key in (
+                    "conversation_updated_at",
+                    "dealt_with_at",
+                    "manual_unread_at",
+                    "last_message_at",
+                    "message_count",
+                    "messages_updated_at",
+                    "messages_occurred_at",
+                )
+            )
+    return tokens
+
+
+def refresh_state(query: dict[str, list[str]]) -> dict:
+    conversation_id_raw = (query.get("conversation_id") or ["0"])[0]
+    conversation_id = int(conversation_id_raw) if conversation_id_raw.isdigit() else None
+    conn = connect()
+    init_db(conn)
+    return {
+        "server_time": now_est(),
+        "tokens": _refresh_tokens(conn, conversation_id),
+    }
+
+
 def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
     conn = connect()
     init_db(conn)
@@ -661,12 +767,16 @@ def bootstrap() -> dict:
         ).fetchone()
     )
     providers = configured_providers()
+    messaging_providers = configured_messaging_providers()
     return {
         "identities": identities,
         "stats": stats,
         "server_time_et": server_time,
         "server_time_est": server_time,
         "telnyx_configured": bool(get_value("telnyx.api_key", config.TELNYX_API_KEY)),
+        "twilio_configured": messaging_providers.get("twilio", False),
+        "messaging_provider": get_value("messaging.provider", config.MESSAGING_PROVIDER),
+        "messaging_providers": messaging_providers,
         "fastmail_configured": providers.get("fastmail", False),
         "google_contacts_configured": providers.get("google", False),
         "contacts_provider": active_provider(),
@@ -828,7 +938,7 @@ def send_api_message(payload: dict) -> dict:
     media_urls = [str(x).strip() for x in payload.get("media_urls", []) if str(x).strip()]
     if not text and not media_urls:
         raise ValueError("Message text or media URL is required.")
-    result = send_message(
+    result = send_provider_message(
         from_number=payload.get("from_number"),
         to_numbers=to_numbers,
         text=text,
@@ -841,7 +951,7 @@ def send_api_message(payload: dict) -> dict:
 
 
 class TextingHandler(BaseHTTPRequestHandler):
-    server_version = "TextingApp/0.1"
+    server_version = "Switchboard/0.1"
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -852,7 +962,14 @@ class TextingHandler(BaseHTTPRequestHandler):
     def _send_headers(self, status: int, content_type: str, length: int | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        no_store_types = ("application/json", "text/html", "text/css", "application/javascript", "text/javascript")
+        no_store_types = (
+            "application/json",
+            "text/html",
+            "text/css",
+            "text/xml",
+            "application/javascript",
+            "text/javascript",
+        )
         cache_control = "no-store" if content_type.startswith(no_store_types) else "public, max-age=3600"
         self.send_header("Cache-Control", cache_control)
         if length is not None:
@@ -864,6 +981,11 @@ class TextingHandler(BaseHTTPRequestHandler):
         self._send_headers(status, "application/json; charset=utf-8", len(body))
         self.wfile.write(body)
 
+    def _send_xml(self, body: str, status: int = 200) -> None:
+        data = body.encode("utf-8")
+        self._send_headers(status, "text/xml; charset=utf-8", len(data))
+        self.wfile.write(data)
+
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
@@ -872,6 +994,13 @@ class TextingHandler(BaseHTTPRequestHandler):
     def _read_raw(self) -> bytes:
         length = int(self.headers.get("Content-Length", "0"))
         return self.rfile.read(length) if length else b""
+
+    def _request_url(self) -> str:
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
+        if not proto:
+            proto = "https" if self.headers.get("X-Forwarded-Ssl", "").lower() == "on" else "http"
+        host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",", 1)[0].strip()
+        return f"{proto}://{host}{self.path}" if host else self.path
 
     def _serve_file(self, path: Path) -> None:
         if not path.exists() or not path.is_file():
@@ -893,6 +1022,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(configured_values())
             elif path == "/api/mobile/notifications":
                 self._send_json(mobile_notifications(query))
+            elif path == "/api/refresh":
+                self._send_json(refresh_state(query))
             elif path == "/api/uploads/diagnostics":
                 self._send_json(upload_diagnostics())
             elif path == "/api/conversations":
@@ -962,10 +1093,24 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path == "/api/telnyx/webhook":
                 raw = self._read_raw()
                 headers = {key.lower(): value for key, value in self.headers.items()}
-                self._send_json(handle_webhook(raw, headers))
+                self._send_json(handle_telnyx_webhook(raw, headers))
+            elif path == "/api/twilio/webhook":
+                raw = self._read_raw()
+                headers = {key.lower(): value for key, value in self.headers.items()}
+                handle_twilio_webhook(raw, headers, self._request_url())
+                self._send_xml('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
             else:
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-        except (ValueError, SettingsError, TelnyxError, FastmailError, GoogleContactsError, ContactsError) as exc:
+        except (
+            ValueError,
+            SettingsError,
+            MessagingError,
+            TelnyxError,
+            TwilioError,
+            FastmailError,
+            GoogleContactsError,
+            ContactsError,
+        ) as exc:
             if path == "/api/uploads":
                 diagnostics = upload_diagnostics()
                 self.log_upload(
@@ -1012,5 +1157,5 @@ def run(host: str | None = None, port: int | None = None) -> None:
     conn.close()
     start_autosync()
     httpd = ThreadingHTTPServer((host, port), TextingHandler)
-    print(f"Texting app running at http://{host}:{port}", flush=True)
+    print(f"Switchboard running at http://{host}:{port}", flush=True)
     httpd.serve_forever()

@@ -325,7 +325,7 @@ def import_archive(archive: Path, db_path: Path | None = None, copy_media: bool 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Import old texting-app HTML archive into SQLite.")
+    parser = argparse.ArgumentParser(description="Import old text-message HTML archives into Switchboard.")
     parser.add_argument("archive")
     parser.add_argument("--db", default=str(config.DB_PATH))
     parser.add_argument("--no-media", action="store_true")

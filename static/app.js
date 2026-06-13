@@ -12,6 +12,10 @@ const state = {
   olderCount: 0,
   statusPollTimer: null,
   statusPollInFlight: false,
+  autoRefreshTimer: null,
+  autoRefreshInFlight: false,
+  autoRefreshSeconds: 15,
+  refreshTokens: null,
   foregroundRefreshInFlight: false,
   lastListRefreshAt: 0,
   lastThreadRefreshAt: 0,
@@ -26,6 +30,9 @@ const state = {
   columnWidths: { left: 340, right: 330 },
   uploadedMedia: [],
   isUploadingMedia: false,
+  language: "en",
+  hotkeysEnabled: true,
+  hotkeys: {},
 };
 
 const els = {
@@ -87,6 +94,7 @@ const COLUMN_WIDTHS_KEY = "textingColumnWidths";
 const THEME_KEY = "textingTheme";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
 const FOREGROUND_STALE_MS = 20_000;
+const MIN_AUTO_REFRESH_SECONDS = 5;
 const COLUMN_LIMITS = {
   leftMin: 260,
   leftMax: 560,
@@ -95,16 +103,367 @@ const COLUMN_LIMITS = {
   threadMin: 320,
   handleWidth: 6,
 };
+const HOTKEY_DEFAULTS = {
+  new_conversation: "n",
+  focus_search: "/",
+  focus_message: "m",
+  toggle_read: "r",
+  archive: "h",
+  toggle_details: "p",
+  next_thread: "j",
+  previous_thread: "k",
+};
+const HOTKEY_COMMANDS = {
+  new_conversation: () => startNewConversation(),
+  focus_search: () => focusAndSelect(els.conversationSearch),
+  focus_message: () => focusAndSelect(els.messageText),
+  toggle_read: () => toggleCurrentConversationRead(),
+  archive: () => {
+    if (!state.currentConversation) return;
+    setCurrentConversationArchived(!Boolean(state.currentConversation.is_archived));
+  },
+  toggle_details: () => setDetailsCollapsed(!document.body.classList.contains("details-collapsed")),
+  next_thread: () => openAdjacentConversation(1),
+  previous_thread: () => openAdjacentConversation(-1),
+};
+const I18N = {
+  en: {
+    "app.title": "Switchboard",
+    "settings.title": "Settings",
+    "settings.description": "Changes are saved locally and override matching .env values.",
+    "settings.close": "Close settings",
+    "settings.empty": "No settings are available.",
+    "settings.saved": "Settings saved.",
+    "common.save": "Save",
+    "common.cancel": "Cancel",
+    "common.remove": "Remove",
+    "common.saved": "Saved.",
+    "source.not_set": "Not set",
+    "source.saved": "Saved",
+    "source.env": ".env",
+    "source.default": "Default",
+    "theme.light": "Use light mode",
+    "theme.dark": "Use dark mode",
+    "search.placeholder": "Search",
+    "category.aria": "Thread category",
+    "category.inbox": "Inbox",
+    "category.unread": "Unread",
+    "category.hidden": "Hidden",
+    "category.hidden_count": "Hidden ({count})",
+    "category.unread_count": "Unread ({count})",
+    "stats.threads": "Threads",
+    "stats.texts": "Texts",
+    "stats.media": "Media",
+    "stats.people": "People",
+    "conversation.new": "New conversation",
+    "conversation.back": "Back to conversations",
+    "conversation.actions": "Conversation actions",
+    "conversation.read": "Read",
+    "conversation.unread": "Unread",
+    "conversation.hide": "Hide",
+    "conversation.unhide": "Unhide",
+    "conversation.unknown": "Unknown",
+    "conversation.you": "You: ",
+    "conversation.failed": "Failed: {detail}",
+    "conversation.could_not_deliver": "Could not deliver",
+    "conversation.loading_more": "Loading more...",
+    "conversation.first_imported": "First imported thread reached",
+    "conversation.archived": "Archived to Hidden.",
+    "conversation.unarchived": "Moved to Inbox.",
+    "conversation.marked_read": "Marked read.",
+    "conversation.marked_unread": "Marked unread.",
+    "conversation.existing_group": "Opened existing group.",
+    "thread.conversation": "Conversation",
+    "thread.select": "Select a thread",
+    "thread.new": "New",
+    "thread.group": "Group MMS",
+    "thread.direct": "Direct",
+    "panel.label": "Panel",
+    "panel.expand_label": "Panel ‹",
+    "panel.collapse_label": "Panel ›",
+    "panel.show": "Show sender identities and contacts",
+    "panel.hide": "Hide sender identities and contacts",
+    "contact.name": "Name",
+    "contact.rename": "Rename",
+    "contact.name_placeholder": "Contact name",
+    "contact.enter_name": "Enter a contact name.",
+    "contact.saved_synced": "Saved to contacts.",
+    "contact.saved_local": "Saved locally. Configure contact sync to publish changes.",
+    "recipient.add": "Add recipient",
+    "recipient.needs_phone": "Recipient needs a phone number.",
+    "recipient.add_one": "Add a recipient.",
+    "messages.aria": "Messages",
+    "messages.empty": "No messages yet.",
+    "messages.load_older": "Load older ({count})",
+    "message.send_failed": "Send failed",
+    "message.delivery_unconfirmed": "Delivery unconfirmed",
+    "composer.from": "From",
+    "composer.message": "Message",
+    "composer.media_urls": "Media URLs",
+    "composer.upload": "Upload media",
+    "composer.send": "Send",
+    "composer.requires_content": "Message text or media URL is required.",
+    "upload.default": "Upload",
+    "upload.one": "Media uploaded.",
+    "upload.many": "{count} files uploaded.",
+    "attachment.image": "Image",
+    "attachment.file": "Attachment",
+    "tabs.numbers": "Numbers",
+    "tabs.contacts": "Contacts",
+    "identities.heading": "Sender Identities",
+    "identities.label": "Identity label",
+    "identities.color": "Identity color",
+    "contacts.sync": "Sync",
+    "contacts.find": "Find contact",
+    "contacts.add": "Add",
+    "contacts.synced": "Synced {count} contacts.",
+    "lightbox.preview": "Image preview",
+    "lightbox.close": "Close image preview",
+    "lightbox.previous": "Previous image",
+    "lightbox.next": "Next image",
+    "lightbox.count": "{caption} ({current} of {total})",
+    "status.delivery_failed": "Failed",
+    "status.delivery_unconfirmed": "Unconfirmed",
+    "status.queued": "Queued",
+    "status.sending": "Sending",
+    "status.sent": "Sent",
+    "status.delivered": "Delivered",
+    "status.received": "Received",
+    "status.imported": "Imported",
+  },
+  es: {
+    "app.title": "Switchboard",
+    "settings.title": "Ajustes",
+    "settings.description": "Los cambios se guardan localmente y reemplazan los valores .env correspondientes.",
+    "settings.close": "Cerrar ajustes",
+    "settings.empty": "No hay ajustes disponibles.",
+    "settings.saved": "Ajustes guardados.",
+    "common.save": "Guardar",
+    "common.cancel": "Cancelar",
+    "common.remove": "Quitar",
+    "common.saved": "Guardado.",
+    "source.not_set": "Sin configurar",
+    "source.saved": "Guardado",
+    "source.env": ".env",
+    "source.default": "Predeterminado",
+    "theme.light": "Usar modo claro",
+    "theme.dark": "Usar modo oscuro",
+    "search.placeholder": "Buscar",
+    "category.aria": "Categoría de conversaciones",
+    "category.inbox": "Entrada",
+    "category.unread": "No leídos",
+    "category.hidden": "Ocultos",
+    "category.hidden_count": "Ocultos ({count})",
+    "category.unread_count": "No leídos ({count})",
+    "stats.threads": "Hilos",
+    "stats.texts": "Mensajes",
+    "stats.media": "Media",
+    "stats.people": "Personas",
+    "conversation.new": "Nueva conversación",
+    "conversation.back": "Volver a conversaciones",
+    "conversation.actions": "Acciones de conversación",
+    "conversation.read": "Leído",
+    "conversation.unread": "No leído",
+    "conversation.hide": "Ocultar",
+    "conversation.unhide": "Mostrar",
+    "conversation.unknown": "Desconocido",
+    "conversation.you": "Tú: ",
+    "conversation.failed": "Falló: {detail}",
+    "conversation.could_not_deliver": "No se pudo entregar",
+    "conversation.loading_more": "Cargando más...",
+    "conversation.first_imported": "Primer hilo importado alcanzado",
+    "conversation.archived": "Archivado en Ocultos.",
+    "conversation.unarchived": "Movido a Entrada.",
+    "conversation.marked_read": "Marcado como leído.",
+    "conversation.marked_unread": "Marcado como no leído.",
+    "conversation.existing_group": "Grupo existente abierto.",
+    "thread.conversation": "Conversación",
+    "thread.select": "Selecciona un hilo",
+    "thread.new": "Nuevo",
+    "thread.group": "MMS grupal",
+    "thread.direct": "Directo",
+    "panel.label": "Panel",
+    "panel.expand_label": "Panel ‹",
+    "panel.collapse_label": "Panel ›",
+    "panel.show": "Mostrar identidades y contactos",
+    "panel.hide": "Ocultar identidades y contactos",
+    "contact.name": "Nombre",
+    "contact.rename": "Renombrar",
+    "contact.name_placeholder": "Nombre del contacto",
+    "contact.enter_name": "Escribe un nombre de contacto.",
+    "contact.saved_synced": "Guardado en contactos.",
+    "contact.saved_local": "Guardado localmente. Configura sincronización de contactos para publicarlo.",
+    "recipient.add": "Agregar destinatario",
+    "recipient.needs_phone": "El destinatario necesita un número de teléfono.",
+    "recipient.add_one": "Agrega un destinatario.",
+    "messages.aria": "Mensajes",
+    "messages.empty": "Aún no hay mensajes.",
+    "messages.load_older": "Cargar anteriores ({count})",
+    "message.send_failed": "Envío fallido",
+    "message.delivery_unconfirmed": "Entrega sin confirmar",
+    "composer.from": "De",
+    "composer.message": "Mensaje",
+    "composer.media_urls": "URLs de media",
+    "composer.upload": "Subir media",
+    "composer.send": "Enviar",
+    "composer.requires_content": "Se requiere texto o URL de media.",
+    "upload.default": "Subida",
+    "upload.one": "Media subida.",
+    "upload.many": "{count} archivos subidos.",
+    "attachment.image": "Imagen",
+    "attachment.file": "Adjunto",
+    "tabs.numbers": "Números",
+    "tabs.contacts": "Contactos",
+    "identities.heading": "Identidades de envío",
+    "identities.label": "Etiqueta de identidad",
+    "identities.color": "Color de identidad",
+    "contacts.sync": "Sincronizar",
+    "contacts.find": "Buscar contacto",
+    "contacts.add": "Agregar",
+    "contacts.synced": "{count} contactos sincronizados.",
+    "lightbox.preview": "Vista de imagen",
+    "lightbox.close": "Cerrar vista de imagen",
+    "lightbox.previous": "Imagen anterior",
+    "lightbox.next": "Imagen siguiente",
+    "lightbox.count": "{caption} ({current} de {total})",
+    "status.delivery_failed": "Falló",
+    "status.delivery_unconfirmed": "Sin confirmar",
+    "status.queued": "En cola",
+    "status.sending": "Enviando",
+    "status.sent": "Enviado",
+    "status.delivered": "Entregado",
+    "status.received": "Recibido",
+    "status.imported": "Importado",
+  },
+  fr: {
+    "app.title": "Switchboard",
+    "settings.title": "Réglages",
+    "settings.description": "Les changements sont enregistrés localement et remplacent les valeurs .env correspondantes.",
+    "settings.close": "Fermer les réglages",
+    "settings.empty": "Aucun réglage disponible.",
+    "settings.saved": "Réglages enregistrés.",
+    "common.save": "Enregistrer",
+    "common.cancel": "Annuler",
+    "common.remove": "Supprimer",
+    "common.saved": "Enregistré.",
+    "source.not_set": "Non défini",
+    "source.saved": "Enregistré",
+    "source.env": ".env",
+    "source.default": "Défaut",
+    "theme.light": "Utiliser le mode clair",
+    "theme.dark": "Utiliser le mode sombre",
+    "search.placeholder": "Rechercher",
+    "category.aria": "Catégorie de fils",
+    "category.inbox": "Boîte",
+    "category.unread": "Non lus",
+    "category.hidden": "Masqués",
+    "category.hidden_count": "Masqués ({count})",
+    "category.unread_count": "Non lus ({count})",
+    "stats.threads": "Fils",
+    "stats.texts": "Messages",
+    "stats.media": "Médias",
+    "stats.people": "Personnes",
+    "conversation.new": "Nouvelle conversation",
+    "conversation.back": "Retour aux conversations",
+    "conversation.actions": "Actions de conversation",
+    "conversation.read": "Lu",
+    "conversation.unread": "Non lu",
+    "conversation.hide": "Masquer",
+    "conversation.unhide": "Afficher",
+    "conversation.unknown": "Inconnu",
+    "conversation.you": "Vous : ",
+    "conversation.failed": "Échec : {detail}",
+    "conversation.could_not_deliver": "Impossible de livrer",
+    "conversation.loading_more": "Chargement...",
+    "conversation.first_imported": "Premier fil importé atteint",
+    "conversation.archived": "Archivé dans Masqués.",
+    "conversation.unarchived": "Déplacé vers la boîte.",
+    "conversation.marked_read": "Marqué comme lu.",
+    "conversation.marked_unread": "Marqué comme non lu.",
+    "conversation.existing_group": "Groupe existant ouvert.",
+    "thread.conversation": "Conversation",
+    "thread.select": "Sélectionnez un fil",
+    "thread.new": "Nouveau",
+    "thread.group": "MMS de groupe",
+    "thread.direct": "Direct",
+    "panel.label": "Panneau",
+    "panel.expand_label": "Panneau ‹",
+    "panel.collapse_label": "Panneau ›",
+    "panel.show": "Afficher les identités et contacts",
+    "panel.hide": "Masquer les identités et contacts",
+    "contact.name": "Nom",
+    "contact.rename": "Renommer",
+    "contact.name_placeholder": "Nom du contact",
+    "contact.enter_name": "Entrez un nom de contact.",
+    "contact.saved_synced": "Enregistré dans les contacts.",
+    "contact.saved_local": "Enregistré localement. Configurez la synchronisation pour publier les changements.",
+    "recipient.add": "Ajouter un destinataire",
+    "recipient.needs_phone": "Le destinataire doit avoir un numéro de téléphone.",
+    "recipient.add_one": "Ajoutez un destinataire.",
+    "messages.aria": "Messages",
+    "messages.empty": "Aucun message pour le moment.",
+    "messages.load_older": "Charger les anciens ({count})",
+    "message.send_failed": "Envoi échoué",
+    "message.delivery_unconfirmed": "Livraison non confirmée",
+    "composer.from": "De",
+    "composer.message": "Message",
+    "composer.media_urls": "URL de médias",
+    "composer.upload": "Téléverser un média",
+    "composer.send": "Envoyer",
+    "composer.requires_content": "Un message ou une URL de média est requis.",
+    "upload.default": "Téléversement",
+    "upload.one": "Média téléversé.",
+    "upload.many": "{count} fichiers téléversés.",
+    "attachment.image": "Image",
+    "attachment.file": "Pièce jointe",
+    "tabs.numbers": "Numéros",
+    "tabs.contacts": "Contacts",
+    "identities.heading": "Identités d'envoi",
+    "identities.label": "Libellé d'identité",
+    "identities.color": "Couleur d'identité",
+    "contacts.sync": "Synchroniser",
+    "contacts.find": "Trouver un contact",
+    "contacts.add": "Ajouter",
+    "contacts.synced": "{count} contacts synchronisés.",
+    "lightbox.preview": "Aperçu de l'image",
+    "lightbox.close": "Fermer l'aperçu",
+    "lightbox.previous": "Image précédente",
+    "lightbox.next": "Image suivante",
+    "lightbox.count": "{caption} ({current} sur {total})",
+    "status.delivery_failed": "Échec",
+    "status.delivery_unconfirmed": "Non confirmé",
+    "status.queued": "En attente",
+    "status.sending": "Envoi",
+    "status.sent": "Envoyé",
+    "status.delivered": "Livré",
+    "status.received": "Reçu",
+    "status.imported": "Importé",
+  },
+};
+
+function t(key, replacements = {}) {
+  const messages = I18N[state.language] || I18N.en;
+  const fallback = I18N.en[key] || key;
+  return String(messages[key] || fallback).replace(/\{(\w+)\}/g, (_match, name) =>
+    Object.prototype.hasOwnProperty.call(replacements, name) ? replacements[name] : `{${name}}`,
+  );
+}
+
+function localizedStatusLabel(status, fallback = "") {
+  if (!status) return fallback || "";
+  const key = `status.${String(status).toLowerCase()}`;
+  return I18N.en[key] ? t(key) : fallback;
+}
 
 function setDetailsCollapsed(collapsed) {
   document.body.classList.toggle("details-collapsed", collapsed);
-  els.toggleDetailsButton.textContent = "Panel";
+  els.toggleDetailsButton.textContent = collapsed ? t("panel.expand_label") : t("panel.collapse_label");
   els.toggleDetailsButton.setAttribute("aria-pressed", collapsed ? "true" : "false");
   els.toggleDetailsButton.setAttribute(
     "aria-label",
-    collapsed ? "Show sender identities and contacts" : "Hide sender identities and contacts",
+    collapsed ? t("panel.show") : t("panel.hide"),
   );
-  els.toggleDetailsButton.title = collapsed ? "Show sender identities and contacts" : "Hide sender identities and contacts";
+  els.toggleDetailsButton.title = collapsed ? t("panel.show") : t("panel.hide");
   localStorage.setItem("detailsCollapsedDefaultHidden", collapsed ? "1" : "0");
   applyColumnWidths();
 }
@@ -117,7 +476,7 @@ function applyTheme(theme, { persist = true } = {}) {
   }
   if (els.themeToggle) {
     els.themeToggle.textContent = nextTheme === "dark" ? "☀" : "☾";
-    els.themeToggle.title = nextTheme === "dark" ? "Use light mode" : "Use dark mode";
+    els.themeToggle.title = nextTheme === "dark" ? t("theme.light") : t("theme.dark");
     els.themeToggle.setAttribute("aria-label", els.themeToggle.title);
     els.themeToggle.setAttribute("aria-pressed", nextTheme === "dark" ? "true" : "false");
   }
@@ -267,6 +626,122 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function bootstrapSettingValue(key, fallback = "") {
+  const sections = state.bootstrap?.settings?.sections || [];
+  for (const section of sections) {
+    const field = (section.fields || []).find((item) => item.key === key);
+    if (field) return field.value ?? fallback;
+  }
+  return fallback;
+}
+
+function resolveLanguage(value) {
+  const raw = String(value || "auto").toLowerCase();
+  if (["en", "es", "fr"].includes(raw)) return raw;
+  const browser = String(navigator.language || "en").toLowerCase();
+  if (browser.startsWith("es")) return "es";
+  if (browser.startsWith("fr")) return "fr";
+  return "en";
+}
+
+function applyStaticTranslations() {
+  document.documentElement.lang = state.language;
+  document.title = t("app.title");
+  document.querySelectorAll("[data-i18n]").forEach((element) => {
+    element.textContent = t(element.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
+    element.setAttribute("placeholder", t(element.dataset.i18nPlaceholder));
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((element) => {
+    element.setAttribute("title", t(element.dataset.i18nTitle));
+  });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
+    element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
+  });
+}
+
+function normalizeHotkey(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const aliases = {
+    cmd: "meta",
+    command: "meta",
+    option: "alt",
+    control: "ctrl",
+    return: "enter",
+    esc: "escape",
+    spacebar: "space",
+    " ": "space",
+  };
+  const parts = raw
+    .split("+")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => aliases[part] || part);
+  const modifiers = new Set();
+  let key = "";
+  for (const part of parts) {
+    if (["meta", "ctrl", "alt", "shift"].includes(part)) {
+      modifiers.add(part);
+    } else {
+      key = aliases[part] || part;
+    }
+  }
+  if (!key) return "";
+  const ordered = ["meta", "ctrl", "alt", "shift"].filter((modifier) => modifiers.has(modifier));
+  ordered.push(key);
+  return ordered.join("+");
+}
+
+function hotkeyFromEvent(event) {
+  const modifiers = [];
+  if (event.metaKey) modifiers.push("meta");
+  if (event.ctrlKey) modifiers.push("ctrl");
+  if (event.altKey) modifiers.push("alt");
+  if (event.shiftKey) modifiers.push("shift");
+  let key = event.key === " " ? "space" : String(event.key || "").toLowerCase();
+  if (key === "arrowup") key = "up";
+  if (key === "arrowdown") key = "down";
+  if (key === "arrowleft") key = "left";
+  if (key === "arrowright") key = "right";
+  return normalizeHotkey([...modifiers, key].join("+"));
+}
+
+function configureHotkeys() {
+  state.hotkeysEnabled = String(bootstrapSettingValue("hotkeys.enabled", "1")) === "1";
+  state.hotkeys = {};
+  for (const [command, fallback] of Object.entries(HOTKEY_DEFAULTS)) {
+    const normalized = normalizeHotkey(bootstrapSettingValue(`hotkeys.${command}`, fallback));
+    if (normalized) state.hotkeys[normalized] = command;
+  }
+}
+
+function configureAutoRefresh() {
+  const rawSeconds = Number(bootstrapSettingValue("behavior.auto_refresh_seconds", "15"));
+  if (!Number.isFinite(rawSeconds) || rawSeconds <= 0) {
+    state.autoRefreshSeconds = 0;
+    clearAutoRefresh();
+    return;
+  }
+  state.autoRefreshSeconds = Math.max(MIN_AUTO_REFRESH_SECONDS, Math.round(rawSeconds));
+  scheduleAutoRefresh();
+}
+
+function applyRuntimeSettings() {
+  state.language = resolveLanguage(bootstrapSettingValue("ui.language", "auto"));
+  configureHotkeys();
+  configureAutoRefresh();
+  applyStaticTranslations();
+  applyTheme(document.documentElement.dataset.theme || "light", { persist: false });
+}
+
+function focusAndSelect(element) {
+  if (!element) return;
+  element.focus();
+  element.select?.();
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -287,16 +762,16 @@ function toast(message) {
 }
 
 function settingSourceLabel(field) {
-  if (!field.has_value) return "Not set";
-  if (field.source === "saved") return "Saved";
-  if (field.source === "env") return ".env";
-  return "Default";
+  if (!field.has_value) return t("source.not_set");
+  if (field.source === "saved") return t("source.saved");
+  if (field.source === "env") return t("source.env");
+  return t("source.default");
 }
 
 function renderSettings(payload = state.bootstrap?.settings) {
   const sections = payload?.sections || [];
   if (!sections.length) {
-    els.settingsSections.innerHTML = `<div class="empty-state">No settings are available.</div>`;
+    els.settingsSections.innerHTML = `<div class="empty-state">${escapeHtml(t("settings.empty"))}</div>`;
     return;
   }
   els.settingsSections.innerHTML = sections
@@ -439,11 +914,14 @@ async function saveSettings(event) {
       state.bootstrap.settings = payload;
     }
     state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
     renderBootstrap();
     renderThreadHeader();
+    renderConversations();
+    renderMessages(state.messages, "preserve");
     renderSettings(state.bootstrap.settings);
     closeSettings();
-    toast("Settings saved.");
+    toast(t("settings.saved"));
   } catch (error) {
     toast(error.message);
   } finally {
@@ -505,8 +983,8 @@ function renderUploadedMedia() {
     .map(
       (item, index) => `
         <span class="upload-chip" title="${escapeHtml(item.url)}">
-          <span>${escapeHtml(item.original_filename || item.filename || "Upload")}</span>
-          <button type="button" data-remove-upload="${index}" title="Remove" aria-label="Remove">×</button>
+          <span>${escapeHtml(item.original_filename || item.filename || t("upload.default"))}</span>
+          <button type="button" data-remove-upload="${index}" title="${escapeHtml(t("common.remove"))}" aria-label="${escapeHtml(t("common.remove"))}">×</button>
         </span>`,
     )
     .join("");
@@ -541,7 +1019,7 @@ async function uploadSelectedMedia(files) {
       state.uploadedMedia.push(uploaded);
       renderUploadedMedia();
     }
-    toast(selected.length === 1 ? "Media uploaded." : `${selected.length} files uploaded.`);
+    toast(selected.length === 1 ? t("upload.one") : t("upload.many", { count: selected.length }));
   } catch (error) {
     showComposerError(error.message);
     toast(error.message);
@@ -603,27 +1081,53 @@ function localTimeParts(value) {
   };
 }
 
+function localeForLanguage() {
+  if (state.language === "es") return "es";
+  if (state.language === "fr") return "fr";
+  return "en";
+}
+
+function dateForDisplay(parts) {
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour || 0, parts.minute || 0));
+}
+
+function isBeforeCurrentYear(parts) {
+  return Number(parts?.year) < new Date().getFullYear();
+}
+
 function formatClock(parts) {
-  const hour12 = parts.hour % 12 || 12;
-  const suffix = parts.hour >= 12 ? "PM" : "AM";
-  return `${hour12}:${String(parts.minute).padStart(2, "0")} ${suffix}`;
+  return new Intl.DateTimeFormat(localeForLanguage(), {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: state.language === "en",
+    timeZone: "UTC",
+  }).format(dateForDisplay(parts));
 }
 
 function formatTime(value, compact = false) {
   if (!value) return "";
   const parts = localTimeParts(value);
   if (!parts) return "";
-  const month = compact ? MONTH_SHORT[parts.month - 1] : MONTH_LONG[parts.month - 1];
-  const separator = compact ? ", " : " at ";
-  return `${month} ${parts.day}${separator}${formatClock(parts)}`;
+  const includeYear = isBeforeCurrentYear(parts);
+  const month = new Intl.DateTimeFormat(localeForLanguage(), {
+    month: compact ? "short" : "long",
+    day: "numeric",
+    ...(includeYear ? { year: "numeric" } : {}),
+    timeZone: "UTC",
+  }).format(dateForDisplay(parts));
+  return compact ? `${month}, ${formatClock(parts)}` : `${month} ${formatClock(parts)}`;
 }
 
 function formatDay(value) {
   const parts = localTimeParts(value);
   if (!parts) return "";
-  const noonUtc = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12));
-  const weekday = WEEKDAY_SHORT[noonUtc.getUTCDay()];
-  return `${weekday}, ${MONTH_SHORT[parts.month - 1]} ${parts.day}, ${parts.year}`;
+  return new Intl.DateTimeFormat(localeForLanguage(), {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(dateForDisplay({ ...parts, hour: 12, minute: 0 }));
 }
 
 function initials(name) {
@@ -716,13 +1220,44 @@ function activeIdentity() {
   return state.bootstrap?.identities?.find((identity) => identity.phone_number === phone);
 }
 
+function activeIdentityPhones() {
+  return new Set((state.bootstrap?.identities || []).filter((identity) => identity.is_active).map((identity) => identity.phone_number));
+}
+
+function selectFromNumber(phone) {
+  if (!phone) return;
+  const activePhones = activeIdentityPhones();
+  if (activePhones.has(phone)) {
+    els.fromNumber.value = phone;
+  }
+}
+
+function preferredReplyIdentity(conversation = state.currentConversation, messages = state.messages) {
+  const activePhones = activeIdentityPhones();
+  if (!activePhones.size) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.direction !== "inbound") continue;
+    for (const phone of message.to_numbers || []) {
+      if (activePhones.has(phone)) return phone;
+    }
+  }
+  const selfParticipant = (conversation?.participants || []).find(
+    (participant) => participant.role === "self" && activePhones.has(participant.phone_number),
+  );
+  if (selfParticipant) return selfParticipant.phone_number;
+  if (activePhones.has(els.fromNumber.value)) return els.fromNumber.value;
+  return state.bootstrap?.default_identity || [...activePhones][0] || "";
+}
+
 function renderBootstrap() {
   const stats = state.bootstrap.stats || {};
+  const previousFromNumber = els.fromNumber.value;
   els.statStrip.innerHTML = [
-    ["Threads", stats.conversations],
-    ["Texts", stats.messages],
-    ["Media", stats.attachments],
-    ["People", stats.contacts],
+    [t("stats.threads"), stats.conversations],
+    [t("stats.texts"), stats.messages],
+    [t("stats.media"), stats.attachments],
+    [t("stats.people"), stats.contacts],
   ]
     .map(([label, value]) => `<div class="stat"><strong>${value ?? 0}</strong><span>${label}</span></div>`)
     .join("");
@@ -736,9 +1271,7 @@ function renderBootstrap() {
         )}</option>`,
     )
     .join("");
-  if (state.bootstrap.default_identity) {
-    els.fromNumber.value = state.bootstrap.default_identity;
-  }
+  selectFromNumber(previousFromNumber || preferredReplyIdentity());
 
   renderIdentities();
   renderCategoryTabs();
@@ -752,11 +1285,11 @@ function renderCategoryTabs() {
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", active ? "true" : "false");
     if (tab.dataset.category === "hidden") {
-      tab.textContent = `Hidden (${hiddenCount})`;
+      tab.textContent = t("category.hidden_count", { count: hiddenCount });
     } else if (tab.dataset.category === "unread") {
-      tab.textContent = `Unread (${unreadCount})`;
+      tab.textContent = t("category.unread_count", { count: unreadCount });
     } else {
-      tab.textContent = "Inbox";
+      tab.textContent = t("category.inbox");
     }
   });
 }
@@ -766,13 +1299,14 @@ function renderIdentities() {
     .map(
       (identity) => `
         <article class="identity-card" data-id="${identity.id}">
-          <div class="swatch" style="background:${escapeHtml(identity.color)}"></div>
+          <label class="swatch color-swatch" style="background:${escapeHtml(identity.color)}" title="${escapeHtml(t("identities.color"))}">
+            <input class="identity-color" type="color" value="${escapeHtml(identity.color)}" aria-label="${escapeHtml(t("identities.color"))}" />
+          </label>
           <div class="identity-main">
-            <input class="identity-label" value="${escapeHtml(identity.label)}" aria-label="Identity label" />
+            <input class="identity-label" value="${escapeHtml(identity.label)}" aria-label="${escapeHtml(t("identities.label"))}" />
             <div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div>
-            <input class="identity-color" type="color" value="${escapeHtml(identity.color)}" aria-label="Identity color" />
           </div>
-          <button class="icon-button save-identity" title="Save" aria-label="Save">✓</button>
+          <button class="icon-button save-identity" title="${escapeHtml(t("common.save"))}" aria-label="${escapeHtml(t("common.save"))}">✓</button>
         </article>`,
     )
     .join("");
@@ -785,13 +1319,16 @@ function renderConversations() {
       const hasNewMessage = Boolean(conversation.needs_attention) && state.conversationCategory !== "hidden";
       const newMessageClass = hasNewMessage ? "new-message" : "";
       const failedClass = conversation.last_status_kind === "failed" ? "failed-message" : "";
-      const title = conversation.title || "Unknown";
-      const previewPrefix = conversation.last_direction === "outbound" ? "You: " : "";
+      const title = conversation.title || t("conversation.unknown");
+      const previewPrefix = conversation.last_direction === "outbound" ? t("conversation.you") : "";
+      const lastStatusLabel = localizedStatusLabel(conversation.last_status, conversation.last_status_label);
       const failedPreview =
         conversation.last_status_kind === "failed"
-          ? `Failed: ${conversation.last_status_detail || conversation.last_status_label || "Could not deliver"}`
+          ? t("conversation.failed", {
+              detail: conversation.last_status_detail || lastStatusLabel || t("conversation.could_not_deliver"),
+            })
           : "";
-      const preview = failedPreview || conversation.last_text || (conversation.last_status_label ? conversation.last_status_label : "");
+      const preview = failedPreview || conversation.last_text || (lastStatusLabel ? lastStatusLabel : "");
       return `
         <button class="conversation-item ${active} ${newMessageClass} ${failedClass}" data-id="${conversation.id}">
           <div class="avatar">${escapeHtml(initials(title))}</div>
@@ -807,11 +1344,51 @@ function renderConversations() {
     .join("");
   const status =
     state.isLoadingConversations && state.conversations.length
-      ? `<div class="conversation-status">Loading more...</div>`
+      ? `<div class="conversation-status">${escapeHtml(t("conversation.loading_more"))}</div>`
       : !state.hasMoreConversations && state.conversations.length
-        ? `<div class="conversation-status">First imported thread reached</div>`
+        ? `<div class="conversation-status">${escapeHtml(t("conversation.first_imported"))}</div>`
         : "";
   els.conversationList.innerHTML = items + status;
+}
+
+function renderConversationsPreservingScroll() {
+  const previousScrollTop = els.conversationList.scrollTop;
+  renderConversations();
+  els.conversationList.scrollTop = previousScrollTop;
+}
+
+function mergeConversationIntoList(conversation) {
+  if (!conversation?.id) return;
+  const index = state.conversations.findIndex((item) => item.id === conversation.id);
+  if (index >= 0) {
+    state.conversations[index] = { ...state.conversations[index], ...conversation };
+  }
+}
+
+function applyIdentityToLoadedState(identity) {
+  if (!identity?.phone_number) return;
+  state.messages = state.messages.map((message) => {
+    if (message.from_number !== identity.phone_number) return message;
+    return {
+      ...message,
+      from_display: identity.label || message.from_display,
+      identity_label: identity.label,
+      identity_color: identity.color,
+    };
+  });
+  const updateParticipants = (conversation) => {
+    if (!conversation?.participants) return conversation;
+    return {
+      ...conversation,
+      participants: conversation.participants.map((participant) =>
+        participant.phone_number === identity.phone_number
+          ? { ...participant, display: identity.label || participant.display, color: identity.color }
+          : participant,
+      ),
+    };
+  };
+  state.currentConversation = updateParticipants(state.currentConversation);
+  state.conversations = state.conversations.map(updateParticipants);
 }
 
 function renderRecipientDraft() {
@@ -820,7 +1397,7 @@ function renderRecipientDraft() {
       (phone) => `
         <span class="chip" title="${escapeHtml(phoneDisplay(phone))}">
           <span>${escapeHtml(draftRecipientDisplay(phone))}</span>
-          <button data-remove-recipient="${escapeHtml(phone)}" title="Remove" aria-label="Remove">×</button>
+          <button data-remove-recipient="${escapeHtml(phone)}" title="${escapeHtml(t("common.remove"))}" aria-label="${escapeHtml(t("common.remove"))}">×</button>
         </span>`,
     )
     .join("");
@@ -909,8 +1486,8 @@ async function searchRecipientSuggestions() {
 
 function renderThreadHeader() {
   if (!state.currentConversation) {
-    els.threadKind.textContent = "New";
-    els.threadTitle.textContent = "New conversation";
+    els.threadKind.textContent = t("thread.new");
+    els.threadTitle.textContent = t("conversation.new");
     els.threadTitle.classList.remove("thread-title-clickable");
     els.threadTitle.removeAttribute("role");
     els.threadTitle.removeAttribute("tabindex");
@@ -922,16 +1499,16 @@ function renderThreadHeader() {
     els.threadPane.classList.add("recipients-visible");
     els.dealtButton.disabled = true;
     els.archiveButton.disabled = true;
-    els.dealtButton.textContent = "Read";
-    els.archiveButton.textContent = "Hide";
+    els.dealtButton.textContent = t("conversation.read");
+    els.archiveButton.textContent = t("conversation.hide");
     els.archiveButton.classList.add("danger-button");
     renderRecipientDraft();
     return;
   }
   const conversation = state.currentConversation;
   const archived = Boolean(conversation.is_archived);
-  els.threadKind.textContent = conversation.kind === "group" ? "Group MMS" : "Direct";
-  els.threadTitle.textContent = conversation.title || "Conversation";
+  els.threadKind.textContent = conversation.kind === "group" ? t("thread.group") : t("thread.direct");
+  els.threadTitle.textContent = conversation.title || t("thread.conversation");
   els.participantLine.textContent = (conversation.participants || [])
     .filter((p) => p.role === "participant")
     .map(participantDisplay)
@@ -941,21 +1518,21 @@ function renderThreadHeader() {
   if (participant) {
     els.threadTitle.setAttribute("role", "button");
     els.threadTitle.setAttribute("tabindex", "0");
-    els.threadTitle.title = "Rename contact";
+    els.threadTitle.title = t("contact.rename");
   } else {
     els.threadTitle.removeAttribute("role");
     els.threadTitle.removeAttribute("tabindex");
     els.threadTitle.removeAttribute("title");
   }
-  els.contactNameToggle.hidden = !participant;
-  els.contactNameToggle.textContent = participantSavedName(participant) ? "Rename" : "Name";
+  els.contactNameToggle.hidden = !participant || Boolean(participantSavedName(participant));
+  els.contactNameToggle.textContent = t("contact.name");
   if (!participant) setContactNameEditor(false);
   els.recipientBar.classList.add("hidden");
   els.threadPane.classList.remove("recipients-visible");
   els.dealtButton.disabled = false;
   els.archiveButton.disabled = false;
-  els.dealtButton.textContent = conversationIsRead(conversation) ? "Unread" : "Read";
-  els.archiveButton.textContent = archived ? "Unhide" : "Hide";
+  els.dealtButton.textContent = conversationIsRead(conversation) ? t("conversation.unread") : t("conversation.read");
+  els.archiveButton.textContent = archived ? t("conversation.unhide") : t("conversation.hide");
   els.archiveButton.classList.toggle("danger-button", !archived);
 }
 
@@ -980,7 +1557,7 @@ function renderAttachment(attachment) {
   if (!url) return "";
   const contentType = attachment.content_type || "";
   if (isImageAttachment(attachment, url)) {
-    const caption = attachment.filename || "Image";
+    const caption = attachment.filename || t("attachment.image");
     return `<a href="${escapeHtml(url)}" class="image-attachment" data-lightbox-src="${escapeHtml(url)}" data-lightbox-caption="${escapeHtml(caption)}" target="_blank"><img src="${escapeHtml(url)}" alt="" loading="lazy" /></a>`;
   }
   if (contentType.startsWith("video/")) {
@@ -990,14 +1567,14 @@ function renderAttachment(attachment) {
     return `<audio src="${escapeHtml(url)}" controls preload="metadata"></audio>`;
   }
   return `<a class="attachment-link" href="${escapeHtml(url)}" target="_blank">${escapeHtml(
-    attachment.filename || "Attachment",
+    attachment.filename || t("attachment.file"),
   )}</a>`;
 }
 
 function renderMessages(messages, scrollMode = "bottom") {
   const wasNearBottom = isNearMessageBottom();
   if (!messages.length) {
-    els.messages.innerHTML = `<div class="empty-state">No messages yet.</div>`;
+    els.messages.innerHTML = `<div class="empty-state">${escapeHtml(t("messages.empty"))}</div>`;
     updateComposerOffset();
     watchMessageMediaForBottomStick(scrollMode, wasNearBottom);
     return;
@@ -1006,7 +1583,7 @@ function renderMessages(messages, scrollMode = "bottom") {
   const oldScrollTop = els.messages.scrollTop;
   let lastDay = "";
   const loadOlder = state.hasMoreMessages
-    ? `<div class="older-row"><button class="small-button" id="loadOlderButton">Load older (${state.olderCount})</button></div>`
+    ? `<div class="older-row"><button class="small-button" id="loadOlderButton">${escapeHtml(t("messages.load_older", { count: state.olderCount }))}</button></div>`
     : "";
   els.messages.innerHTML =
     loadOlder +
@@ -1017,18 +1594,22 @@ function renderMessages(messages, scrollMode = "bottom") {
       lastDay = day;
       const attachments = (message.attachments || []).map(renderAttachment).join("");
       const statusKind = message.status_kind || "neutral";
-      const statusLabel = message.status_label || message.status || "";
+      const statusLabel = localizedStatusLabel(message.status, message.status_label || message.status || "");
       const statusDetail = message.status_detail || "";
+      const bubbleStyle =
+        message.direction === "outbound" && message.identity_color
+          ? ` style="--message-out:${escapeHtml(message.identity_color)}"`
+          : "";
       const failureDetail =
         statusKind === "failed" || statusKind === "warning"
           ? `<div class="message-error ${statusKind}">
-              <strong>${statusKind === "failed" ? "Send failed" : "Delivery unconfirmed"}</strong>
+              <strong>${statusKind === "failed" ? escapeHtml(t("message.send_failed")) : escapeHtml(t("message.delivery_unconfirmed"))}</strong>
               <span>${escapeHtml(statusDetail || statusLabel)}</span>
             </div>`
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind}">
+        <article class="message-row ${message.direction} ${statusKind}"${bubbleStyle}>
           <div class="message-bubble">
             ${attachments ? `<div class="attachment-grid">${attachments}</div>` : ""}
             ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
@@ -1074,7 +1655,7 @@ function watchMessageMediaForBottomStick(scrollMode, wasNearBottom = false) {
 function collectLightboxImages() {
   state.lightboxImages = [...els.messages.querySelectorAll("[data-lightbox-src]")].map((link) => ({
     src: link.dataset.lightboxSrc,
-    caption: link.dataset.lightboxCaption || "Image",
+    caption: link.dataset.lightboxCaption || t("attachment.image"),
   }));
 }
 
@@ -1084,7 +1665,11 @@ function renderLightbox() {
   els.lightboxImage.src = current.src;
   els.lightboxCaption.textContent =
     state.lightboxImages.length > 1
-      ? `${current.caption} (${state.lightboxIndex + 1} of ${state.lightboxImages.length})`
+      ? t("lightbox.count", {
+          caption: current.caption,
+          current: state.lightboxIndex + 1,
+          total: state.lightboxImages.length,
+        })
       : current.caption;
   els.lightboxPrev.hidden = state.lightboxImages.length <= 1;
   els.lightboxNext.hidden = state.lightboxImages.length <= 1;
@@ -1146,6 +1731,23 @@ function scrollMessagesWithArrowKey(event) {
   return true;
 }
 
+function hotkeyCanRunInTarget(event) {
+  if (!isEditableKeyTarget(event.target)) return true;
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+
+function runHotkey(event) {
+  if (!state.hotkeysEnabled || event.defaultPrevented) return false;
+  if (!hotkeyCanRunInTarget(event)) return false;
+  const command = state.hotkeys[hotkeyFromEvent(event)];
+  if (!command) return false;
+  const handler = HOTKEY_COMMANDS[command];
+  if (!handler) return false;
+  event.preventDefault();
+  Promise.resolve(handler()).catch((error) => toast(error.message));
+  return true;
+}
+
 function handleGlobalKeydown(event) {
   const settingsOpen = !els.settingsModal.classList.contains("hidden");
   if (settingsOpen) {
@@ -1165,6 +1767,7 @@ function handleGlobalKeydown(event) {
     }
     return;
   }
+  if (runHotkey(event)) return;
   scrollMessagesWithArrowKey(event);
 }
 
@@ -1187,6 +1790,60 @@ function scheduleStatusPoll() {
   state.statusPollTimer = setTimeout(() => {
     refreshCurrentConversationStatus().catch((error) => toast(error.message));
   }, 5000);
+}
+
+function clearAutoRefresh() {
+  if (state.autoRefreshTimer) {
+    clearTimeout(state.autoRefreshTimer);
+    state.autoRefreshTimer = null;
+  }
+}
+
+function scheduleAutoRefresh() {
+  clearAutoRefresh();
+  if (!state.bootstrap || !state.autoRefreshSeconds || document.hidden) return;
+  state.autoRefreshTimer = setTimeout(() => {
+    pollForChanges().catch((error) => toast(error.message));
+  }, state.autoRefreshSeconds * 1000);
+}
+
+function refreshQuery() {
+  return state.currentConversationId ? `?conversation_id=${encodeURIComponent(state.currentConversationId)}` : "";
+}
+
+async function pollForChanges({ prime = false, force = false } = {}) {
+  if (!state.bootstrap || state.autoRefreshInFlight || document.hidden) return;
+  state.autoRefreshInFlight = true;
+  try {
+    const conversationId = state.currentConversationId;
+    const payload = await api(`/api/refresh${refreshQuery()}`);
+    const previous = state.refreshTokens || {};
+    state.refreshTokens = payload.tokens || {};
+    if (prime || (!Object.keys(previous).length && !force)) return;
+
+    const listChanged = force || previous.bootstrap !== state.refreshTokens.bootstrap || previous.list !== state.refreshTokens.list;
+    const conversationChanged =
+      Boolean(conversationId) &&
+      state.currentConversationId === conversationId &&
+      (force || previous.conversation !== state.refreshTokens.conversation);
+
+    if (listChanged) {
+      state.bootstrap = await api("/api/bootstrap");
+      applyRuntimeSettings();
+      renderBootstrap();
+      await loadConversations({
+        append: false,
+        preserveScroll: true,
+        limit: Math.max(80, state.conversations.length || 0),
+      });
+    }
+    if (conversationChanged && state.currentConversationId === conversationId) {
+      await refreshCurrentConversationStatus();
+    }
+  } finally {
+    state.autoRefreshInFlight = false;
+    scheduleAutoRefresh();
+  }
 }
 
 async function refreshCurrentConversationStatus() {
@@ -1229,6 +1886,7 @@ async function refreshForegroundData({ force = false } = {}) {
   try {
     if (listIsStale) {
       state.bootstrap = await api("/api/bootstrap");
+      applyRuntimeSettings();
       renderBootstrap();
       await loadConversations({ append: false, preserveScroll: true });
     }
@@ -1311,7 +1969,7 @@ function bindColumnResizers() {
   window.visualViewport?.addEventListener("resize", updateComposerOffset);
 }
 
-async function loadConversations({ append = false, preserveScroll = false } = {}) {
+async function loadConversations({ append = false, preserveScroll = false, limit = 80 } = {}) {
   if (append && state.isLoadingConversations) return;
   if (append && !state.hasMoreConversations) return;
   const requestSeq = ++state.conversationRequestSeq;
@@ -1322,8 +1980,9 @@ async function loadConversations({ append = false, preserveScroll = false } = {}
   const hidden = state.conversationCategory === "hidden" ? "1" : "0";
   const unread = state.conversationCategory === "unread" ? "1" : "0";
   const cursor = append ? conversationCursor() : "";
+  const pageLimit = clamp(Math.round(Number(limit) || 80), 80, 200);
   try {
-    const payload = await api(`/api/conversations?limit=80&hidden=${hidden}&unread=${unread}&search=${query}${cursor}`);
+    const payload = await api(`/api/conversations?limit=${pageLimit}&hidden=${hidden}&unread=${unread}&search=${query}${cursor}`);
     if (requestSeq !== state.conversationRequestSeq) return;
     if (append) {
       const existing = new Set(state.conversations.map((conversation) => conversation.id));
@@ -1362,12 +2021,25 @@ async function openConversation(id, options = {}) {
   state.hasMoreMessages = payload.has_more;
   state.olderCount = payload.older_count;
   state.lastThreadRefreshAt = Date.now();
+  selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
   renderConversations();
   renderThreadHeader();
   renderMessages(state.messages, "bottom");
   scheduleStatusPoll();
+  pollForChanges({ prime: true }).catch((error) => toast(error.message));
   if (state.bootstrap?.mark_read_on_open && !conversationIsRead(state.currentConversation)) {
     setCurrentConversationRead(true, { silent: true }).catch((error) => toast(error.message));
+  }
+}
+
+async function openAdjacentConversation(offset) {
+  if (!state.conversations.length) return;
+  const currentIndex = state.conversations.findIndex((conversation) => conversation.id === state.currentConversationId);
+  const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+  const nextIndex = clamp(baseIndex + offset, 0, state.conversations.length - 1);
+  const next = state.conversations[nextIndex];
+  if (next && next.id !== state.currentConversationId) {
+    await openConversation(next.id);
   }
 }
 
@@ -1380,6 +2052,7 @@ async function setCurrentConversationArchived(archived) {
       body: JSON.stringify({ archived }),
     });
     state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
     renderBootstrap();
     await loadConversations({ append: false });
     const next = state.conversations[0];
@@ -1388,7 +2061,7 @@ async function setCurrentConversationArchived(archived) {
     } else {
       startNewConversation();
     }
-    toast(archived ? "Archived to Hidden." : "Moved to Inbox.");
+    toast(archived ? t("conversation.archived") : t("conversation.unarchived"));
   } catch (error) {
     toast(error.message);
     renderThreadHeader();
@@ -1415,6 +2088,7 @@ async function setCurrentConversationRead(dealt, { silent = false } = {}) {
       current.needs_attention = payload.conversation.needs_attention;
     }
     state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
     renderBootstrap();
     if (state.conversationCategory === "unread" && dealt) {
       state.conversations = state.conversations.filter((conversation) => conversation.id !== conversationId);
@@ -1424,7 +2098,7 @@ async function setCurrentConversationRead(dealt, { silent = false } = {}) {
       renderThreadHeader();
     }
     if (!silent) {
-      toast(dealt ? "Marked read." : "Marked unread.");
+      toast(dealt ? t("conversation.marked_read") : t("conversation.marked_unread"));
     }
   } catch (error) {
     toast(error.message);
@@ -1471,6 +2145,7 @@ function startNewConversation(options = {}) {
   state.draftMatchSeq += 1;
   els.messageText.value = "";
   els.mediaUrls.value = "";
+  selectFromNumber(els.fromNumber.value || state.bootstrap?.default_identity);
   renderUploadedMedia();
   updateMessageCounter();
   showComposerError("");
@@ -1493,7 +2168,7 @@ async function matchExistingGroupDraft() {
       recipients.length === state.recipientDraft.length &&
       recipients.every((phone, index) => phone === state.recipientDraft[index]);
     if (unchanged && payload.conversation?.id) {
-      toast("Opened existing group.");
+      toast(t("conversation.existing_group"));
       await openConversation(payload.conversation.id);
     }
   } catch (error) {
@@ -1504,7 +2179,7 @@ async function matchExistingGroupDraft() {
 function addRecipient(raw, displayName = "") {
   const phone = normalizeDraftPhone(raw);
   if (!phone.startsWith("+") || phone.length < 8) {
-    toast("Recipient needs a phone number.");
+    toast(t("recipient.needs_phone"));
     return;
   }
   const label = usefulContactName(phone, displayName);
@@ -1539,7 +2214,12 @@ async function sendCurrentMessage() {
   mediaUrls.push(...state.uploadedMedia.map((item) => item.url).filter(Boolean));
   const toNumbers = currentRecipients();
   if (!toNumbers.length) {
-    toast("Add a recipient.");
+    toast(t("recipient.add_one"));
+    return;
+  }
+  if (!text && !mediaUrls.length) {
+    showComposerError(t("composer.requires_content"));
+    toast(t("composer.requires_content"));
     return;
   }
   showComposerError("");
@@ -1586,9 +2266,12 @@ async function saveIdentity(card) {
     });
     const index = state.bootstrap.identities.findIndex((item) => item.id === payload.identity.id);
     if (index >= 0) state.bootstrap.identities[index] = payload.identity;
+    applyIdentityToLoadedState(payload.identity);
     renderBootstrap();
-    await loadConversations();
-    toast("Saved.");
+    renderThreadHeader();
+    renderMessages(state.messages, "preserve");
+    renderConversationsPreservingScroll();
+    toast(t("common.saved"));
   } catch (error) {
     toast(error.message);
   }
@@ -1608,7 +2291,7 @@ async function searchContacts() {
               class="small-button"
               data-contact-phone="${escapeHtml(contact.phone_number)}"
               data-contact-name="${escapeHtml(contact.display_name)}"
-            >Add</button>
+            >${escapeHtml(t("contacts.add"))}</button>
           </article>`,
       )
       .join("");
@@ -1622,7 +2305,7 @@ async function saveCurrentContactName() {
   const displayName = els.contactNameInput.value.trim();
   if (!participant) return;
   if (!displayName) {
-    toast("Enter a contact name.");
+    toast(t("contact.enter_name"));
     return;
   }
   const controls = els.contactNameForm.querySelectorAll("input, button");
@@ -1640,18 +2323,20 @@ async function saveCurrentContactName() {
     });
     if (payload.conversation) {
       state.currentConversation = payload.conversation;
+      mergeConversationIntoList(payload.conversation);
     }
+    state.messages = state.messages.map((message) =>
+      message.from_number === participant.phone_number ? { ...message, from_display: displayName } : message,
+    );
     setContactNameEditor(false);
     state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
     renderBootstrap();
-    await loadConversations({ append: false });
-    if (state.currentConversationId) {
-      await openConversation(state.currentConversationId);
-    } else {
-      renderThreadHeader();
-    }
+    renderConversationsPreservingScroll();
+    renderThreadHeader();
+    renderMessages(state.messages, "preserve");
     searchContacts();
-    toast(payload.synced ? "Saved to contacts." : "Saved locally. Configure contact sync to publish changes.");
+    toast(payload.synced ? t("contact.saved_synced") : t("contact.saved_local"));
   } catch (error) {
     toast(error.message);
   } finally {
@@ -1832,8 +2517,10 @@ function bindEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       clearStatusPoll();
+      clearAutoRefresh();
     } else {
       scheduleStatusPoll();
+      scheduleAutoRefresh();
       refreshForegroundData().catch((error) => toast(error.message));
     }
   });
@@ -1864,12 +2551,19 @@ function bindEvents() {
       addRecipient(contactButton.dataset.contactPhone, contactButton.dataset.contactName || "");
     }
   });
+  document.querySelector(".detail-rail").addEventListener("input", (event) => {
+    const colorInput = event.target.closest(".identity-color");
+    if (!colorInput) return;
+    const swatch = colorInput.closest(".color-swatch");
+    if (swatch) swatch.style.background = colorInput.value;
+  });
   els.syncContactsButton.addEventListener("click", async () => {
     els.syncContactsButton.disabled = true;
     try {
       const payload = await api("/api/contacts/sync", { method: "POST", body: "{}" });
-      toast(`Synced ${payload.synced.contacts} contacts.`);
+      toast(t("contacts.synced", { count: payload.synced.contacts }));
       state.bootstrap = await api("/api/bootstrap");
+      applyRuntimeSettings();
       renderBootstrap();
       searchContacts();
     } catch (error) {
@@ -1896,6 +2590,7 @@ async function init() {
   const savedCategory = localStorage.getItem("conversationCategory");
   state.conversationCategory = ["inbox", "unread", "hidden"].includes(savedCategory) ? savedCategory : "inbox";
   state.bootstrap = await api("/api/bootstrap");
+  applyRuntimeSettings();
   const savedDetailsState = localStorage.getItem("detailsCollapsedDefaultHidden");
   const detailsDefault = state.bootstrap.details_collapsed_default ?? true;
   setDetailsCollapsed(savedDetailsState === null ? Boolean(detailsDefault) : savedDetailsState === "1");
@@ -1911,6 +2606,7 @@ async function init() {
   } else {
     setMobileThreadOpen(false);
   }
+  pollForChanges({ prime: true }).catch((error) => toast(error.message));
   searchContacts();
 }
 

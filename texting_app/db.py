@@ -129,10 +129,19 @@ CREATE TABLE IF NOT EXISTS telnyx_events (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS provider_message_refs (
+  provider TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(provider, provider_message_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_time ON messages(conversation_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_messages_telnyx_id ON messages(telnyx_id);
 CREATE INDEX IF NOT EXISTS idx_contact_phones_phone ON contact_phones(phone_number);
 CREATE INDEX IF NOT EXISTS idx_conversations_last ON conversations(last_message_at DESC);
+CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id);
 """
 
 
@@ -171,6 +180,18 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_message_refs (
+          provider TEXT NOT NULL,
+          provider_message_id TEXT NOT NULL,
+          message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(provider, provider_message_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id)")
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
     if "is_archived" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0")
@@ -418,3 +439,40 @@ def add_attachment(
         """,
         (message_id, local_path, remote_url, content_type, size, sha256, filename, source),
     )
+
+
+def add_provider_message_ref(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    provider_message_id: str | None,
+    message_id: int,
+) -> None:
+    provider = str(provider or "").strip().lower()
+    provider_message_id = str(provider_message_id or "").strip()
+    if not provider or not provider_message_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO provider_message_refs(provider, provider_message_id, message_id, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(provider, provider_message_id) DO UPDATE SET message_id = excluded.message_id
+        """,
+        (provider, provider_message_id, message_id, now_est()),
+    )
+
+
+def message_id_for_provider_ref(conn: sqlite3.Connection, provider: str, provider_message_id: str | None) -> int | None:
+    provider = str(provider or "").strip().lower()
+    provider_message_id = str(provider_message_id or "").strip()
+    if not provider or not provider_message_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT message_id
+        FROM provider_message_refs
+        WHERE provider = ? AND provider_message_id = ?
+        """,
+        (provider, provider_message_id),
+    ).fetchone()
+    return int(row["message_id"]) if row else None

@@ -122,7 +122,7 @@ final class MobileNotificationClient {
             connection.setConnectTimeout(12000);
             connection.setReadTimeout(20000);
             connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("User-Agent", "TextsAndroid/0.1");
+            connection.setRequestProperty("User-Agent", "SwitchboardAndroid/0.1");
             String authorization = AuthStore.authorizationForAppUrl(context);
             if (!authorization.isEmpty()) {
                 connection.setRequestProperty("Authorization", authorization);

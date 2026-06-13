@@ -50,7 +50,7 @@ def exchange_code(client_id: str, client_secret: str, redirect_uri: str, code: s
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create a Google Contacts refresh token for the texting app.")
+    parser = argparse.ArgumentParser(description="Create a Google Contacts refresh token for Switchboard.")
     parser.add_argument("--client-id", default=os.environ.get("GOOGLE_CLIENT_ID", ""))
     parser.add_argument("--client-secret", default=os.environ.get("GOOGLE_CLIENT_SECRET", ""))
     parser.add_argument("--redirect-uri", default=os.environ.get("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8767/callback"))
