@@ -50,6 +50,11 @@ Important settings:
 - `TELNYX_API_KEY`: required for sending texts.
 - `TELNYX_PUBLIC_KEY`: enables Telnyx webhook signature verification.
 - `NTFY_ENDPOINT`: optional HTTPS ntfy topic URL for inbound message notifications.
+- `TEXTING_NATIVE_NOTIFICATIONS_ENABLED`: optional Android app native notifications. Defaults off.
+- `TEXTING_NATIVE_NOTIFICATION_INTERVAL_MINUTES`: Android app notification check interval. Android periodic checks have a 15 minute minimum.
+- `TEXTING_PUBLIC_UPLOAD_DIR`: local directory where uploaded outbound MMS files are staged.
+- `TEXTING_PUBLIC_UPLOAD_BASE_URL`: public URL that maps to the upload directory so Telnyx can fetch files.
+- `TEXTING_UPLOAD_MAX_FILE_MB`: maximum upload size accepted by the app.
 - `CONTACTS_PROVIDER`: `auto`, `fastmail`, `google`, or `none`.
   `auto` uses Fastmail when configured, otherwise Google when configured.
 
@@ -68,6 +73,12 @@ On Debian/Ubuntu servers, install the optional fax preview dependency with:
 ```bash
 sudo apt install poppler-utils
 ```
+
+### Outbound Media Uploads
+
+The composer can upload image, video, audio, or PDF files and attach their public URLs to an outbound MMS. Configure `TEXTING_PUBLIC_UPLOAD_DIR` as a writable directory outside the checkout, then expose that directory at `TEXTING_PUBLIC_UPLOAD_BASE_URL`.
+
+Telnyx must be able to fetch the uploaded file without browser login. If the main app is behind Basic Auth, expose only the upload directory without auth and keep uploads limited to random generated filenames.
 
 ## Importing Old Texts
 
@@ -136,6 +147,8 @@ ProxyPass / http://127.0.0.1:8766/
 ProxyPassReverse / http://127.0.0.1:8766/
 RequestHeader set X-Forwarded-Proto "https"
 
+Alias /mms-uploads/ /var/lib/texting-app/public-uploads/
+
 <Location />
     AuthType Basic
     AuthName "Texts"
@@ -146,9 +159,14 @@ RequestHeader set X-Forwarded-Proto "https"
 <Location /api/telnyx/webhook>
     Require all granted
 </Location>
+
+<Directory /var/lib/texting-app/public-uploads>
+    Options -Indexes
+    Require all granted
+</Directory>
 ```
 
-Keep the database writable by the service user and outside the web root.
+Keep the database writable by the service user and outside the web root. If you use the upload alias above, set `TEXTING_PUBLIC_UPLOAD_BASE_URL=https://your-domain.example/mms-uploads`.
 
 ## Android Wrapper
 
@@ -163,10 +181,14 @@ Then build:
 
 ```bash
 cd mobile/android
-gradle assembleDebug
+ANDROID_HOME=/usr/lib/android-sdk gradle assembleDebug
 ```
 
 Install the generated debug APK with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
+
+The Android app can optionally show native notifications for incoming texts. Enable `Phone app native notifications` in Settings if you want this in addition to, or instead of, ntfy. The app checks `/api/mobile/notifications`, stores a private cursor on the phone so old messages are not replayed, and opens the matching conversation when a notification is tapped. On Android 13 and newer, allow the notification permission when prompted. If Apache Basic Auth protects the app, sign in through the app once so the native poller can reuse those credentials for the notification API.
+
+This is poll-based, not Firebase push: Android runs an immediate check when the app starts/resumes and a persisted background job at the interval set in Settings. Android enforces a 15 minute minimum and can still batch work for battery scheduling.
 
 ## Tailscale
 

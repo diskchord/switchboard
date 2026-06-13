@@ -98,9 +98,15 @@
 
         <footer class="composer">
           <textarea id="messageText" placeholder="Message" rows="2"></textarea>
+          <div class="composer-meta">
+            <span id="messageCounter">0/160</span>
+          </div>
           <div class="composer-error hidden" id="composerError" role="alert"></div>
+          <div class="upload-list hidden" id="uploadList"></div>
           <div class="composer-tools">
             <input id="mediaUrls" type="text" placeholder="Media URLs" autocomplete="off" />
+            <label class="icon-button upload-button" for="mediaFiles" title="Upload media" aria-label="Upload media">📎</label>
+            <input id="mediaFiles" class="hidden-file-input" type="file" accept="image/*,video/*,audio/*,application/pdf" multiple />
             <button class="icon-button send-button" id="sendButton" title="Send" aria-label="Send">➤</button>
           </div>
         </footer>

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
+import secrets
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import config
 from .contacts import ContactsError, active_provider, configured_providers
@@ -16,13 +20,15 @@ from .db import connect, conversation_key, ensure_conversation, from_json, init_
 from .fastmail import FastmailError
 from .google_contacts import GoogleContactsError
 from .phone import display_phone, normalize_phone
-from .settings import SettingsError, configured_values, get_bool, get_value, update_values
+from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values
 from .telnyx import TelnyxError, handle_webhook, send_message
 from .timeutil import now_est
 
 
 STATIC_DIR = config.ROOT / "static"
 MESSAGE_PAGE_SIZE = 80
+UPLOAD_CONTENT_PREFIXES = ("image/", "video/", "audio/")
+UPLOAD_CONTENT_TYPES = {"application/pdf"}
 
 
 def _json_default(value):
@@ -31,6 +37,163 @@ def _json_default(value):
 
 def _row_dict(row) -> dict:
     return dict(row) if row else {}
+
+
+def _configured_upload_dir() -> Path:
+    raw = get_value("uploads.public_directory", str(config.PUBLIC_UPLOAD_DIR)).strip()
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else config.ROOT / path
+
+
+def _configured_upload_base_url() -> str:
+    return get_value("uploads.public_base_url", config.PUBLIC_UPLOAD_BASE_URL).strip().rstrip("/")
+
+
+def _upload_max_bytes() -> int:
+    return max(get_int("uploads.max_file_mb", config.UPLOAD_MAX_FILE_MB), 1) * 1024 * 1024
+
+
+def _upload_allowed(content_type: str) -> bool:
+    content_type = (content_type or "").lower()
+    return content_type in UPLOAD_CONTENT_TYPES or any(content_type.startswith(prefix) for prefix in UPLOAD_CONTENT_PREFIXES)
+
+
+def _upload_extension(filename: str, content_type: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,12}", ext):
+        return ext
+    guessed = mimetypes.guess_extension(content_type or "") or ".bin"
+    return guessed.lower()
+
+
+def _parse_upload(content_type: str, body: bytes) -> tuple[str, str, bytes]:
+    if "multipart/form-data" not in content_type:
+        raise ValueError("Upload must use multipart/form-data.")
+    header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    message = BytesParser(policy=email_policy).parsebytes(header + body)
+    if not message.is_multipart():
+        raise ValueError("Upload did not include a file.")
+    for part in message.iter_parts():
+        if part.get_param("name", header="content-disposition") != "file":
+            continue
+        data = part.get_payload(decode=True) or b""
+        filename = part.get_filename() or "upload"
+        part_type = part.get_content_type() or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        return filename, part_type, data
+    raise ValueError("Upload did not include a file.")
+
+
+def save_uploaded_media(content_type: str, body: bytes) -> dict:
+    base_url = _configured_upload_base_url()
+    if not base_url:
+        raise ValueError("Set Uploads > Public upload base URL before uploading media.")
+    upload_dir = _configured_upload_dir()
+    source_name, file_type, data = _parse_upload(content_type, body)
+    if not data:
+        raise ValueError("Uploaded file is empty.")
+    if len(data) > _upload_max_bytes():
+        raise ValueError(f"Uploaded file is larger than {get_int('uploads.max_file_mb', config.UPLOAD_MAX_FILE_MB)} MB.")
+    if not _upload_allowed(file_type):
+        raise ValueError("Upload must be an image, video, audio file, or PDF.")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{secrets.token_urlsafe(16)}{_upload_extension(source_name, file_type)}"
+    target = upload_dir / filename
+    target.write_bytes(data)
+    public_url = f"{base_url}/{quote(filename)}"
+    return {
+        "filename": filename,
+        "original_filename": source_name,
+        "content_type": file_type,
+        "size": len(data),
+        "local_path": str(target),
+        "url": public_url,
+        "local_url": f"/uploads/{quote(filename)}",
+    }
+
+
+def upload_diagnostics() -> dict:
+    upload_dir = _configured_upload_dir()
+    base_url = _configured_upload_base_url()
+    recent_files = []
+    if upload_dir.is_dir():
+        found = []
+        for item in upload_dir.iterdir():
+            try:
+                stat = item.stat()
+            except OSError:
+                continue
+            if item.is_file():
+                found.append(
+                    {
+                        "name": item.name,
+                        "path": str(item),
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    }
+                )
+        recent_files = sorted(found, key=lambda item: item["mtime"], reverse=True)[:20]
+    return {
+        "directory": str(upload_dir),
+        "resolved_directory": str(upload_dir.resolve(strict=False)),
+        "directory_exists": upload_dir.exists(),
+        "directory_is_dir": upload_dir.is_dir(),
+        "directory_writable": os.access(upload_dir, os.W_OK) if upload_dir.exists() else os.access(upload_dir.parent, os.W_OK),
+        "base_url": base_url,
+        "max_file_mb": get_int("uploads.max_file_mb", config.UPLOAD_MAX_FILE_MB),
+        "cwd": os.getcwd(),
+        "process_uid": os.getuid(),
+        "process_gid": os.getgid(),
+        "recent_files": recent_files,
+    }
+
+
+def _local_upload_path_for_remote_url(remote_url: str | None) -> Path | None:
+    if not remote_url:
+        return None
+    filename = Path(unquote(urlparse(remote_url).path)).name
+    if not filename:
+        return None
+    candidate = _configured_upload_dir() / filename
+    return candidate if candidate.is_file() else None
+
+
+def _attachment_dict(row) -> dict:
+    attachment = _row_dict(row)
+    if not attachment.get("local_path"):
+        local_path = _local_upload_path_for_remote_url(attachment.get("remote_url"))
+        if local_path:
+            attachment["local_path"] = str(local_path)
+            attachment["source"] = "upload"
+    return attachment
+
+
+def _mark_uploaded_attachments_local(message_id: int, media_urls: list[str]) -> None:
+    if not media_urls:
+        return
+    conn = connect()
+    init_db(conn)
+    try:
+        for url in media_urls:
+            local_path = _local_upload_path_for_remote_url(url)
+            if not local_path:
+                continue
+            content_type = mimetypes.guess_type(local_path.name)[0]
+            size = local_path.stat().st_size
+            conn.execute(
+                """
+                UPDATE attachments
+                SET local_path = ?,
+                    content_type = COALESCE(content_type, ?),
+                    size = COALESCE(size, ?),
+                    source = 'upload'
+                WHERE message_id = ?
+                  AND remote_url = ?
+                """,
+                (str(local_path), content_type, size, message_id, url),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 FAILURE_STATUSES = {"delivery_failed", "failed", "undelivered", "rejected", "expired"}
@@ -303,6 +466,100 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
     return {"conversations": conversations, "has_more": has_more}
 
 
+def _notification_key(row) -> str:
+    if not row:
+        return ""
+    return f"{row['occurred_at']}|{row['id']}"
+
+
+def _parse_notification_key(value: str) -> tuple[str, int]:
+    occurred_at, separator, message_id = str(value or "").rpartition("|")
+    if not separator or not message_id.isdigit():
+        return "", 0
+    return occurred_at, int(message_id)
+
+
+def mobile_notifications(query: dict[str, list[str]]) -> dict:
+    conn = connect()
+    init_db(conn)
+    enabled = get_bool("notifications.native_enabled", config.NATIVE_NOTIFICATIONS_ENABLED)
+    interval_minutes = max(get_int("notifications.native_interval_minutes", config.NATIVE_NOTIFICATION_INTERVAL_MINUTES), 15)
+    limit = min(int((query.get("limit") or ["20"])[0]), 50)
+    since_at, since_id = _parse_notification_key((query.get("since") or [""])[0])
+    rows = []
+    if enabled and since_at:
+        rows = conn.execute(
+            f"""
+            SELECT m.id,
+              m.conversation_id,
+              m.text,
+              m.message_type,
+              m.occurred_at,
+              m.from_number,
+              c.dealt_with_at,
+              c.manual_unread_at,
+              (
+                SELECT COUNT(*)
+                FROM attachments a
+                WHERE a.message_id = m.id
+              ) AS attachment_count
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.direction = 'inbound'
+              AND COALESCE(c.is_archived, 0) = 0
+              AND (m.occurred_at > ? OR (m.occurred_at = ? AND m.id > ?))
+              AND (
+                c.manual_unread_at IS NOT NULL
+                OR c.dealt_with_at IS NULL
+                OR m.occurred_at > c.dealt_with_at
+              )
+            ORDER BY m.occurred_at ASC, m.id ASC
+            LIMIT ?
+            """,
+            (since_at, since_at, since_id, limit),
+        ).fetchall()
+    latest = rows[-1] if rows else conn.execute(
+        """
+        SELECT m.id, m.occurred_at
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.direction = 'inbound'
+          AND COALESCE(c.is_archived, 0) = 0
+        ORDER BY m.occurred_at DESC, m.id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    notifications = []
+    for row in rows:
+        text = str(row["text"] or "").strip()
+        attachment_count = int(row["attachment_count"] or 0)
+        if not text and attachment_count:
+            text = f"{attachment_count} attachment{'s' if attachment_count != 1 else ''}"
+        elif not text:
+            text = "New text message"
+        title = _conversation_title(conn, row["conversation_id"])
+        notifications.append(
+            {
+                "notification_key": _notification_key(row),
+                "message_id": row["id"],
+                "conversation_id": row["conversation_id"],
+                "title": title,
+                "from_number": row["from_number"],
+                "from_display": _contact_name(conn, row["from_number"]),
+                "text": text,
+                "attachment_count": attachment_count,
+                "occurred_at": row["occurred_at"],
+            }
+        )
+    return {
+        "enabled": enabled,
+        "poll_interval_minutes": interval_minutes,
+        "server_time": now_est(),
+        "latest_key": _notification_key(latest),
+        "notifications": notifications,
+    }
+
+
 def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
     conn = connect()
     init_db(conn)
@@ -335,7 +592,7 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
         message["cc_numbers"] = from_json(row["cc_numbers"], [])
         message["from_display"] = row["identity_label"] or _contact_name(conn, row["from_number"])
         message["attachments"] = [
-            _row_dict(a)
+            _attachment_dict(a)
             for a in conn.execute("SELECT * FROM attachments WHERE message_id = ?", (row["id"],)).fetchall()
         ]
         messages.append(_decorate_message_status(message))
@@ -571,13 +828,16 @@ def send_api_message(payload: dict) -> dict:
     media_urls = [str(x).strip() for x in payload.get("media_urls", []) if str(x).strip()]
     if not text and not media_urls:
         raise ValueError("Message text or media URL is required.")
-    return send_message(
+    result = send_message(
         from_number=payload.get("from_number"),
         to_numbers=to_numbers,
         text=text,
         media_urls=media_urls,
         conversation_id=int(conversation_id) if conversation_id else None,
     )
+    if result.get("message_id"):
+        _mark_uploaded_attachments_local(int(result["message_id"]), media_urls)
+    return result
 
 
 class TextingHandler(BaseHTTPRequestHandler):
@@ -585,6 +845,9 @@ class TextingHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)
+
+    def log_upload(self, fmt: str, *args) -> None:
+        self.log_message("upload " + fmt, *args)
 
     def _send_headers(self, status: int, content_type: str, length: int | None = None) -> None:
         self.send_response(status)
@@ -628,6 +891,10 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(bootstrap())
             elif path == "/api/settings":
                 self._send_json(configured_values())
+            elif path == "/api/mobile/notifications":
+                self._send_json(mobile_notifications(query))
+            elif path == "/api/uploads/diagnostics":
+                self._send_json(upload_diagnostics())
             elif path == "/api/conversations":
                 self._send_json(list_conversations(query))
             elif path == "/api/conversations/match":
@@ -639,6 +906,9 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path.startswith("/media/"):
                 name = Path(unquote(path.removeprefix("/media/"))).name
                 self._serve_file(config.MEDIA_DIR / name)
+            elif path.startswith("/uploads/"):
+                name = Path(unquote(path.removeprefix("/uploads/"))).name
+                self._serve_file(_configured_upload_dir() / name)
             elif path.startswith("/static/"):
                 rel = Path(unquote(path.removeprefix("/static/")))
                 self._serve_file(STATIC_DIR / rel.name)
@@ -671,6 +941,24 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(save_contact_name(self._read_json()))
             elif path == "/api/settings":
                 self._send_json(update_values(self._read_json()))
+            elif path == "/api/uploads":
+                diagnostics = upload_diagnostics()
+                self.log_upload(
+                    "attempt directory=%s exists=%s base_url=%s",
+                    diagnostics["directory"],
+                    diagnostics["directory_exists"],
+                    diagnostics["base_url"] or "(blank)",
+                )
+                payload = save_uploaded_media(self.headers.get("Content-Type", ""), self._read_raw())
+                self.log_upload(
+                    "saved original=%s filename=%s directory=%s url=%s size=%s",
+                    payload["original_filename"],
+                    payload["filename"],
+                    diagnostics["directory"],
+                    payload["url"],
+                    payload["size"],
+                )
+                self._send_json(payload)
             elif path == "/api/telnyx/webhook":
                 raw = self._read_raw()
                 headers = {key.lower(): value for key, value in self.headers.items()}
@@ -678,8 +966,26 @@ class TextingHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except (ValueError, SettingsError, TelnyxError, FastmailError, GoogleContactsError, ContactsError) as exc:
+            if path == "/api/uploads":
+                diagnostics = upload_diagnostics()
+                self.log_upload(
+                    "failed directory=%s exists=%s base_url=%s error=%s",
+                    diagnostics["directory"],
+                    diagnostics["directory_exists"],
+                    diagnostics["base_url"] or "(blank)",
+                    exc,
+                )
             self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
+            if path == "/api/uploads":
+                diagnostics = upload_diagnostics()
+                self.log_upload(
+                    "error directory=%s exists=%s base_url=%s error=%s",
+                    diagnostics["directory"],
+                    diagnostics["directory_exists"],
+                    diagnostics["base_url"] or "(blank)",
+                    exc,
+                )
             self._send_json({"error": str(exc)}, 500)
 
     def do_PUT(self) -> None:

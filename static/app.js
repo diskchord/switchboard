@@ -12,6 +12,9 @@ const state = {
   olderCount: 0,
   statusPollTimer: null,
   statusPollInFlight: false,
+  foregroundRefreshInFlight: false,
+  lastListRefreshAt: 0,
+  lastThreadRefreshAt: 0,
   lightboxImages: [],
   lightboxIndex: 0,
   recipientDraft: [],
@@ -21,6 +24,8 @@ const state = {
   recipientSuggestionSeq: 0,
   draftMatchSeq: 0,
   columnWidths: { left: 340, right: 330 },
+  uploadedMedia: [],
+  isUploadingMedia: false,
 };
 
 const els = {
@@ -54,7 +59,10 @@ const els = {
   messages: document.querySelector("#messages"),
   composer: document.querySelector(".composer"),
   messageText: document.querySelector("#messageText"),
+  messageCounter: document.querySelector("#messageCounter"),
   mediaUrls: document.querySelector("#mediaUrls"),
+  mediaFiles: document.querySelector("#mediaFiles"),
+  uploadList: document.querySelector("#uploadList"),
   composerError: document.querySelector("#composerError"),
   sendButton: document.querySelector("#sendButton"),
   dealtButton: document.querySelector("#dealtButton"),
@@ -78,6 +86,7 @@ const els = {
 const COLUMN_WIDTHS_KEY = "textingColumnWidths";
 const THEME_KEY = "textingTheme";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
+const FOREGROUND_STALE_MS = 20_000;
 const COLUMN_LIMITS = {
   leftMin: 260,
   leftMax: 560,
@@ -184,6 +193,18 @@ function handleNavigationPop(event) {
 
 window.textingCloseThreadForNativeBack = () => {
   closeMobileThread();
+  return true;
+};
+
+window.textingOpenConversationFromNative = (id) => {
+  const conversationId = Number(id);
+  if (!conversationId) return false;
+  openConversation(conversationId, { updateHistory: false }).catch((error) => toast(error.message));
+  return true;
+};
+
+window.textingRefreshIfStaleFromNative = () => {
+  refreshForegroundData().catch((error) => toast(error.message));
   return true;
 };
 
@@ -438,6 +459,121 @@ function showComposerError(message) {
   requestAnimationFrame(updateComposerOffset);
 }
 
+const GSM_BASIC =
+  "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ" +
+  " !\"#¤%&'()*+,-./0123456789:;<=>?" +
+  "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+const GSM_EXTENDED = "^{}\\[~]|€";
+
+function smsSegmentInfo(text) {
+  let units = 0;
+  let gsm = true;
+  for (const char of text) {
+    if (GSM_BASIC.includes(char)) {
+      units += 1;
+    } else if (GSM_EXTENDED.includes(char)) {
+      units += 2;
+    } else {
+      gsm = false;
+      break;
+    }
+  }
+  if (!gsm) {
+    units = text.length;
+  }
+  const singleLimit = gsm ? 160 : 70;
+  const multiLimit = gsm ? 153 : 67;
+  const segments = units === 0 ? 0 : units <= singleLimit ? 1 : Math.ceil(units / multiLimit);
+  const currentLimit = segments <= 1 ? singleLimit : multiLimit * segments;
+  return { units, segments, currentLimit, encoding: gsm ? "GSM" : "Unicode" };
+}
+
+function updateMessageCounter() {
+  const { units, segments, currentLimit, encoding } = smsSegmentInfo(els.messageText.value || "");
+  const segmentLabel = segments <= 1 ? "1 SMS" : `${segments} SMS`;
+  els.messageCounter.textContent = units === 0 ? `0/${currentLimit}` : `${units}/${currentLimit} · ${segmentLabel}`;
+  els.messageCounter.title = `${encoding} text encoding`;
+}
+
+function renderUploadedMedia() {
+  if (!state.uploadedMedia.length) {
+    els.uploadList.classList.add("hidden");
+    els.uploadList.innerHTML = "";
+    return;
+  }
+  els.uploadList.innerHTML = state.uploadedMedia
+    .map(
+      (item, index) => `
+        <span class="upload-chip" title="${escapeHtml(item.url)}">
+          <span>${escapeHtml(item.original_filename || item.filename || "Upload")}</span>
+          <button type="button" data-remove-upload="${index}" title="Remove" aria-label="Remove">×</button>
+        </span>`,
+    )
+    .join("");
+  els.uploadList.classList.remove("hidden");
+  requestAnimationFrame(updateComposerOffset);
+}
+
+async function uploadMediaFile(file) {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch("/api/uploads", {
+    method: "POST",
+    body: form,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Upload failed: ${response.status}`);
+  }
+  return payload;
+}
+
+async function uploadSelectedMedia(files) {
+  const selected = [...files];
+  if (!selected.length) return;
+  state.isUploadingMedia = true;
+  els.mediaFiles.disabled = true;
+  els.sendButton.disabled = true;
+  showComposerError("");
+  try {
+    for (const file of selected) {
+      const uploaded = await uploadMediaFile(file);
+      state.uploadedMedia.push(uploaded);
+      renderUploadedMedia();
+    }
+    toast(selected.length === 1 ? "Media uploaded." : `${selected.length} files uploaded.`);
+  } catch (error) {
+    showComposerError(error.message);
+    toast(error.message);
+  } finally {
+    state.isUploadingMedia = false;
+    els.mediaFiles.disabled = false;
+    els.sendButton.disabled = false;
+    els.mediaFiles.value = "";
+    updateComposerOffset();
+  }
+}
+
+function initialConversationIdFromLocation() {
+  const params = new URLSearchParams(window.location.search);
+  const queryValue = Number(params.get("conversation") || params.get("conversation_id") || "0");
+  if (queryValue) return queryValue;
+  const hash = String(window.location.hash || "").replace(/^#/, "");
+  const hashParams = new URLSearchParams(hash);
+  return Number(hashParams.get("conversation") || hashParams.get("conversation_id") || "0");
+}
+
+function clearInitialConversationUrl(conversationId) {
+  if (!conversationId || !history.replaceState) return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("conversation");
+  url.searchParams.delete("conversation_id");
+  if (url.hash.includes("conversation")) {
+    url.hash = "";
+  }
+  history.replaceState({ textingApp: true, view: "thread", conversationId }, "", url.pathname + url.search + url.hash);
+}
+
 const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_LONG = [
   "January",
@@ -491,11 +627,12 @@ function formatDay(value) {
 }
 
 function initials(name) {
-  if (String(name || "").trim().startsWith("+")) {
-    const digits = String(name).replace(/\D/g, "");
-    return digits.slice(-2) || "?";
+  const value = String(name || "").trim();
+  const digits = value.replace(/\D/g, "");
+  if (digits.length >= 7 && !/[A-Za-z]/.test(value)) {
+    return "?";
   }
-  const parts = String(name || "?").trim().split(/\s+/).slice(0, 2);
+  const parts = (value || "?").split(/\s+/).slice(0, 2);
   return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "?";
 }
 
@@ -566,6 +703,12 @@ function setContactNameEditor(visible) {
   els.contactNameForm.classList.remove("hidden");
   els.contactNameInput.focus();
   els.contactNameInput.select();
+}
+
+function openContactRename() {
+  const participant = currentDirectParticipant();
+  if (!participant) return;
+  setContactNameEditor(true);
 }
 
 function activeIdentity() {
@@ -768,6 +911,10 @@ function renderThreadHeader() {
   if (!state.currentConversation) {
     els.threadKind.textContent = "New";
     els.threadTitle.textContent = "New conversation";
+    els.threadTitle.classList.remove("thread-title-clickable");
+    els.threadTitle.removeAttribute("role");
+    els.threadTitle.removeAttribute("tabindex");
+    els.threadTitle.removeAttribute("title");
     els.participantLine.textContent = state.recipientDraft.map((phone) => draftRecipientDisplay(phone, { includePhone: true })).join(", ");
     els.contactNameToggle.hidden = true;
     setContactNameEditor(false);
@@ -790,6 +937,16 @@ function renderThreadHeader() {
     .map(participantDisplay)
     .join(", ");
   const participant = currentDirectParticipant(conversation);
+  els.threadTitle.classList.toggle("thread-title-clickable", Boolean(participant));
+  if (participant) {
+    els.threadTitle.setAttribute("role", "button");
+    els.threadTitle.setAttribute("tabindex", "0");
+    els.threadTitle.title = "Rename contact";
+  } else {
+    els.threadTitle.removeAttribute("role");
+    els.threadTitle.removeAttribute("tabindex");
+    els.threadTitle.removeAttribute("title");
+  }
   els.contactNameToggle.hidden = !participant;
   els.contactNameToggle.textContent = participantSavedName(participant) ? "Rename" : "Name";
   if (!participant) setContactNameEditor(false);
@@ -805,6 +962,9 @@ function renderThreadHeader() {
 function mediaUrl(attachment) {
   if (attachment.local_path) {
     const filename = attachment.local_path.split("/").pop();
+    if (attachment.source === "upload") {
+      return `/uploads/${encodeURIComponent(filename)}`;
+    }
     return `/media/${encodeURIComponent(filename)}`;
   }
   return attachment.remote_url;
@@ -1034,13 +1194,15 @@ async function refreshCurrentConversationStatus() {
   state.statusPollInFlight = true;
   const conversationId = state.currentConversationId;
   const shouldStickToBottom = isNearMessageBottom();
+  const limit = Math.max(80, state.messages.length || 0);
   try {
-    const payload = await api(`/api/conversations/${conversationId}/messages?limit=80`);
+    const payload = await api(`/api/conversations/${conversationId}/messages?limit=${limit}`);
     if (state.currentConversationId !== conversationId) return;
     state.currentConversation = payload.conversation;
     state.messages = payload.messages;
     state.hasMoreMessages = payload.has_more;
     state.olderCount = payload.older_count;
+    state.lastThreadRefreshAt = Date.now();
     renderThreadHeader();
     renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
     const current = state.conversations.find((conversation) => conversation.id === conversationId);
@@ -1053,6 +1215,28 @@ async function refreshCurrentConversationStatus() {
   } finally {
     state.statusPollInFlight = false;
     scheduleStatusPoll();
+  }
+}
+
+async function refreshForegroundData({ force = false } = {}) {
+  if (!state.bootstrap || state.foregroundRefreshInFlight || document.hidden) return;
+  const now = Date.now();
+  const listIsStale = force || now - state.lastListRefreshAt > FOREGROUND_STALE_MS;
+  const threadIsStale =
+    Boolean(state.currentConversationId) && (force || now - state.lastThreadRefreshAt > FOREGROUND_STALE_MS);
+  if (!listIsStale && !threadIsStale) return;
+  state.foregroundRefreshInFlight = true;
+  try {
+    if (listIsStale) {
+      state.bootstrap = await api("/api/bootstrap");
+      renderBootstrap();
+      await loadConversations({ append: false, preserveScroll: true });
+    }
+    if (threadIsStale && state.currentConversationId) {
+      await refreshCurrentConversationStatus();
+    }
+  } finally {
+    state.foregroundRefreshInFlight = false;
   }
 }
 
@@ -1127,11 +1311,12 @@ function bindColumnResizers() {
   window.visualViewport?.addEventListener("resize", updateComposerOffset);
 }
 
-async function loadConversations({ append = false } = {}) {
+async function loadConversations({ append = false, preserveScroll = false } = {}) {
   if (append && state.isLoadingConversations) return;
   if (append && !state.hasMoreConversations) return;
   const requestSeq = ++state.conversationRequestSeq;
   state.isLoadingConversations = true;
+  const previousScrollTop = els.conversationList.scrollTop;
   if (append) renderConversations();
   const query = encodeURIComponent(els.conversationSearch.value || "");
   const hidden = state.conversationCategory === "hidden" ? "1" : "0";
@@ -1148,13 +1333,16 @@ async function loadConversations({ append = false } = {}) {
       ];
     } else {
       state.conversations = payload.conversations;
-      els.conversationList.scrollTop = 0;
+      state.lastListRefreshAt = Date.now();
     }
     state.hasMoreConversations = payload.has_more;
   } finally {
     if (requestSeq === state.conversationRequestSeq) {
       state.isLoadingConversations = false;
       renderConversations();
+      if (!append) {
+        els.conversationList.scrollTop = preserveScroll ? previousScrollTop : 0;
+      }
     }
   }
 }
@@ -1173,6 +1361,7 @@ async function openConversation(id, options = {}) {
   state.messages = payload.messages;
   state.hasMoreMessages = payload.has_more;
   state.olderCount = payload.older_count;
+  state.lastThreadRefreshAt = Date.now();
   renderConversations();
   renderThreadHeader();
   renderMessages(state.messages, "bottom");
@@ -1277,10 +1466,13 @@ function startNewConversation(options = {}) {
   state.olderCount = 0;
   state.recipientDraft = [];
   state.recipientDraftLabels = {};
+  state.uploadedMedia = [];
   clearRecipientSuggestions();
   state.draftMatchSeq += 1;
   els.messageText.value = "";
   els.mediaUrls.value = "";
+  renderUploadedMedia();
+  updateMessageCounter();
   showComposerError("");
   renderConversations();
   renderThreadHeader();
@@ -1344,6 +1536,7 @@ async function sendCurrentMessage() {
     .split(/[\n,]+/)
     .map((x) => x.trim())
     .filter(Boolean);
+  mediaUrls.push(...state.uploadedMedia.map((item) => item.url).filter(Boolean));
   const toNumbers = currentRecipients();
   if (!toNumbers.length) {
     toast("Add a recipient.");
@@ -1364,6 +1557,9 @@ async function sendCurrentMessage() {
     });
     els.messageText.value = "";
     els.mediaUrls.value = "";
+    state.uploadedMedia = [];
+    renderUploadedMedia();
+    updateMessageCounter();
     await loadConversations();
     if (state.currentConversationId) {
       await openConversation(state.currentConversationId);
@@ -1515,6 +1711,13 @@ function bindEvents() {
     }
   });
   els.newConversationButton.addEventListener("click", startNewConversation);
+  els.threadTitle.addEventListener("click", openContactRename);
+  els.threadTitle.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key)) return;
+    if (!currentDirectParticipant()) return;
+    event.preventDefault();
+    openContactRename();
+  });
   els.contactNameToggle.addEventListener("click", () => setContactNameEditor(true));
   els.contactNameCancel.addEventListener("click", () => setContactNameEditor(false));
   els.contactNameForm.addEventListener("submit", (event) => {
@@ -1596,8 +1799,18 @@ function bindEvents() {
       sendCurrentMessage();
     }
   });
-  els.messageText.addEventListener("input", () => showComposerError(""));
+  els.messageText.addEventListener("input", () => {
+    updateMessageCounter();
+    showComposerError("");
+  });
   els.mediaUrls.addEventListener("input", () => showComposerError(""));
+  els.mediaFiles.addEventListener("change", () => uploadSelectedMedia(els.mediaFiles.files));
+  els.uploadList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-upload]");
+    if (!button) return;
+    state.uploadedMedia.splice(Number(button.dataset.removeUpload), 1);
+    renderUploadedMedia();
+  });
   els.messages.addEventListener("click", (event) => {
     if (event.target.closest("#loadOlderButton")) {
       loadOlderMessages().catch((error) => toast(error.message));
@@ -1621,7 +1834,14 @@ function bindEvents() {
       clearStatusPoll();
     } else {
       scheduleStatusPoll();
+      refreshForegroundData().catch((error) => toast(error.message));
     }
+  });
+  window.addEventListener("focus", () => {
+    refreshForegroundData().catch((error) => toast(error.message));
+  });
+  window.addEventListener("pageshow", (event) => {
+    refreshForegroundData({ force: Boolean(event.persisted) }).catch((error) => toast(error.message));
   });
   window.addEventListener("popstate", handleNavigationPop);
   els.toggleDetailsButton.addEventListener("click", () => {
@@ -1668,9 +1888,11 @@ function bindEvents() {
 async function init() {
   initializeTheme();
   loadColumnWidths();
+  const initialConversationId = initialConversationIdFromLocation();
   replaceNavigationState("list");
   bindEvents();
   updateComposerOffset();
+  updateMessageCounter();
   const savedCategory = localStorage.getItem("conversationCategory");
   state.conversationCategory = ["inbox", "unread", "hidden"].includes(savedCategory) ? savedCategory : "inbox";
   state.bootstrap = await api("/api/bootstrap");
@@ -1679,7 +1901,10 @@ async function init() {
   setDetailsCollapsed(savedDetailsState === null ? Boolean(detailsDefault) : savedDetailsState === "1");
   renderBootstrap();
   await loadConversations();
-  if (isDesktopLayout() && state.conversations[0]) {
+  if (initialConversationId) {
+    await openConversation(initialConversationId, { updateHistory: false });
+    clearInitialConversationUrl(initialConversationId);
+  } else if (isDesktopLayout() && state.conversations[0]) {
     await openConversation(state.conversations[0].id);
   } else if (!state.conversations[0]) {
     startNewConversation();

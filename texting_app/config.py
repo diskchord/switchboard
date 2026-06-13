@@ -84,6 +84,9 @@ _DB_ENV = os.environ.get("TEXTING_DB", "")
 DATA_DIR = Path(os.environ.get("TEXTING_DATA_DIR") or (Path(_DB_ENV).parent if _DB_ENV else DEFAULT_DATA_DIR))
 MEDIA_DIR = Path(os.environ.get("TEXTING_MEDIA_DIR", DATA_DIR / "media"))
 DB_PATH = Path(_DB_ENV or DATA_DIR / "texting.sqlite")
+PUBLIC_UPLOAD_DIR = Path(os.environ.get("TEXTING_PUBLIC_UPLOAD_DIR", DATA_DIR / "public-uploads"))
+PUBLIC_UPLOAD_BASE_URL = os.environ.get("TEXTING_PUBLIC_UPLOAD_BASE_URL", "")
+UPLOAD_MAX_FILE_MB = _int_env("TEXTING_UPLOAD_MAX_FILE_MB", 25)
 
 HOST = os.environ.get("TEXTING_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TEXTING_PORT", "8766"))
@@ -116,6 +119,8 @@ TELNYX_API_BASE = os.environ.get("TELNYX_API_BASE", "https://api.telnyx.com/v2")
 
 NTFY_ENDPOINT = os.environ.get("NTFY_ENDPOINT", "")
 NTFY_ENABLED = _bool_env("NTFY_ENABLED", bool(NTFY_ENDPOINT)) and bool(NTFY_ENDPOINT)
+NATIVE_NOTIFICATIONS_ENABLED = _bool_env("TEXTING_NATIVE_NOTIFICATIONS_ENABLED", False)
+NATIVE_NOTIFICATION_INTERVAL_MINUTES = _int_env("TEXTING_NATIVE_NOTIFICATION_INTERVAL_MINUTES", 15)
 
 FASTMAIL_API_TOKEN = os.environ.get("FASTMAIL_API_TOKEN", "")
 FASTMAIL_USERNAME = os.environ.get("FASTMAIL_USERNAME", "") or os.environ.get("FASTMAIL_EMAIL", "")
