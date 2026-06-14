@@ -68,6 +68,37 @@ Important settings:
 
 The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values for behavior, language, hotkeys, notifications, messaging provider selection, Telnyx, Twilio, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. On a public server, keep Apache or another auth layer in front of the app before enabling browser-editable settings.
 
+### Bring Your Own Numbers
+
+Switchboard does not ship with sender phone numbers or provider credentials. Add numbers that you own or control in your Telnyx or Twilio account:
+
+```env
+TEXTING_PERSONAL_NUMBERS=+15551230001,+15551230002
+TEXTING_IDENTITY_LABELS={"+15551230001":"Personal","+15551230002":"Work"}
+```
+
+If every sender number uses the same provider, set the default provider:
+
+```env
+TEXTING_MESSAGING_PROVIDER=telnyx
+```
+
+If you mix Telnyx and Twilio sender numbers, map each sender number explicitly:
+
+```env
+TEXTING_PROVIDER_BY_NUMBER={"+15551230001":"telnyx","+15551230002":"twilio"}
+```
+
+Then fill in only the credentials for the providers you use:
+
+```env
+TELNYX_API_KEY=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+```
+
+Restarting the server seeds any new `TEXTING_PERSONAL_NUMBERS` into the local sender identity table. In the web UI, the Numbers panel can rename and recolor those sender identities. Settings > Messaging can adjust the default provider and per-number provider map without editing source.
+
 The Telnyx webhook endpoint is:
 
 ```text
@@ -80,6 +111,12 @@ On Debian/Ubuntu servers, install the optional fax preview dependency with:
 
 ```bash
 sudo apt install poppler-utils
+```
+
+Some inbound phone videos arrive as `.3gp` / `video/3gpp`, which most browsers cannot play inline. When `ffmpeg` is installed, Switchboard automatically converts local 3GP attachments to browser-friendly MP4 the first time the message is loaded, then stores the converted attachment path for future views:
+
+```bash
+sudo apt install ffmpeg
 ```
 
 The Twilio webhook endpoint is:
@@ -215,14 +252,20 @@ Keep the database writable by the service user and outside the web root. If you 
 
 ## Android Wrapper
 
-The sideload wrapper is in `mobile/android`. Set the private server URL in ignored local properties:
+The sideload wrapper is in `mobile/android`. The packaged APK includes the server URL you build it with, so do not commit or publish a build made with your private URL unless that is intentional. Set the private server URL in ignored local properties:
 
 ```properties
 # mobile/android/local.properties
 SWITCHBOARD_APP_URL=https://switchboard.example.com
 ```
 
-Existing local files that still use `TEXTING_APP_URL` continue to work.
+You can also start from the checked-in template:
+
+```bash
+cp mobile/android/local.properties.example mobile/android/local.properties
+```
+
+The Android build fails if `SWITCHBOARD_APP_URL` is missing, which keeps a packaged app from silently embedding a stale personal URL.
 
 Then build:
 

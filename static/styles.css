@@ -289,6 +289,47 @@ button:disabled:hover {
   padding: 0 18px 12px;
 }
 
+.search-control {
+  position: relative;
+}
+
+.search-control input {
+  padding-right: 42px;
+}
+
+.search-control input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-clear-button {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+
+.search-clear-button:hover,
+.search-clear-button:focus-visible {
+  background: var(--chip-bg);
+  color: var(--ink);
+  outline: 0;
+}
+
+.search-clear-button[hidden] {
+  display: none;
+}
+
 input,
 textarea,
 select {
@@ -745,6 +786,18 @@ select:focus {
   justify-content: flex-end;
 }
 
+.message-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: min(680px, 76%);
+  min-width: 0;
+}
+
+.message-row.outbound .message-stack {
+  align-items: flex-end;
+}
+
 .message-row.failed .message-bubble {
   border-color: var(--danger-line);
   box-shadow: 0 0 0 1px rgba(190, 18, 60, 0.18), 0 8px 22px rgba(190, 18, 60, 0.14);
@@ -755,7 +808,8 @@ select:focus {
 }
 
 .message-bubble {
-  max-width: min(680px, 76%);
+  max-width: 100%;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bubble-in);
@@ -780,6 +834,43 @@ select:focus {
 
 .outbound .message-meta {
   color: rgba(255, 255, 255, 0.78);
+}
+
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: -6px;
+  padding: 0 8px;
+  position: relative;
+  z-index: 1;
+}
+
+.message-row.outbound .message-reactions {
+  justify-content: flex-end;
+}
+
+.message-reaction {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.16);
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 15px;
+  font-weight: 800;
+  gap: 3px;
+  min-height: 26px;
+  min-width: 28px;
+  padding: 2px 7px;
+  justify-content: center;
+  line-height: 1;
+}
+
+.message-reaction-count {
+  font-size: 11px;
+  line-height: 1;
 }
 
 .message-text {
@@ -1585,8 +1676,12 @@ select:focus {
     scroll-padding-bottom: calc(var(--mobile-composer-height) + 20px);
   }
 
-  .message-bubble {
+  .message-stack {
     max-width: 88%;
+  }
+
+  .message-bubble {
+    max-width: 100%;
   }
 
   .pdf-attachment-viewer {

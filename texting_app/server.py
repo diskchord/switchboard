@@ -5,6 +5,8 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
+import subprocess
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http import HTTPStatus
@@ -34,6 +36,8 @@ STATIC_DIR = config.ROOT / "static"
 MESSAGE_PAGE_SIZE = 80
 UPLOAD_CONTENT_PREFIXES = ("image/", "video/", "audio/")
 UPLOAD_CONTENT_TYPES = {"application/pdf"}
+CONVERTIBLE_VIDEO_EXTENSIONS = {".3gp", ".3gpp"}
+CONVERTIBLE_VIDEO_TYPES = {"video/3gpp", "video/3gp"}
 
 
 def _json_default(value):
@@ -162,13 +166,117 @@ def _local_upload_path_for_remote_url(remote_url: str | None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _attachment_dict(row) -> dict:
+def _attachment_local_path(attachment: dict) -> Path | None:
+    raw = str(attachment.get("local_path") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute():
+        return path if path.is_file() else None
+    candidate = config.MEDIA_DIR / path.name
+    return candidate if candidate.is_file() else None
+
+
+def _stored_local_path(path: Path) -> str:
+    try:
+        if path.resolve().parent == config.MEDIA_DIR.resolve():
+            return f"media/{path.name}"
+    except OSError:
+        pass
+    return str(path)
+
+
+def _is_convertible_video_attachment(attachment: dict) -> bool:
+    content_type = str(attachment.get("content_type") or "").split(";", 1)[0].strip().lower()
+    names = [
+        str(attachment.get("filename") or ""),
+        str(attachment.get("local_path") or ""),
+        str(attachment.get("remote_url") or ""),
+    ]
+    return content_type in CONVERTIBLE_VIDEO_TYPES or any(Path(unquote(urlparse(name).path)).suffix.lower() in CONVERTIBLE_VIDEO_EXTENSIONS for name in names)
+
+
+def _convert_attachment_video(conn, attachment: dict) -> dict:
+    if not _is_convertible_video_attachment(attachment):
+        return attachment
+    source = _attachment_local_path(attachment)
+    ffmpeg = shutil.which("ffmpeg")
+    if not source or not ffmpeg:
+        return attachment
+    target = source.with_suffix(".mp4")
+    if not target.exists() or target.stat().st_size == 0:
+        temp = target.with_suffix(".tmp.mp4")
+        try:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-map",
+                    "0:v:0?",
+                    "-map",
+                    "0:a:0?",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-preset",
+                    "veryfast",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-movflags",
+                    "+faststart",
+                    str(temp),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+            )
+            temp.replace(target)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return attachment
+
+    stored_path = _stored_local_path(target)
+    filename = target.name
+    size = target.stat().st_size
+    conn.execute(
+        """
+        UPDATE attachments
+        SET local_path = ?,
+            content_type = 'video/mp4',
+            size = ?,
+            filename = ?,
+            source = ?
+        WHERE id = ?
+        """,
+        (stored_path, size, filename, attachment.get("source") or "converted", attachment["id"]),
+    )
+    conn.commit()
+    return {
+        **attachment,
+        "local_path": stored_path,
+        "content_type": "video/mp4",
+        "size": size,
+        "filename": filename,
+    }
+
+
+def _attachment_dict(conn, row) -> dict:
     attachment = _row_dict(row)
     if not attachment.get("local_path"):
         local_path = _local_upload_path_for_remote_url(attachment.get("remote_url"))
         if local_path:
             attachment["local_path"] = str(local_path)
             attachment["source"] = "upload"
+    attachment = _convert_attachment_video(conn, attachment)
     return attachment
 
 
@@ -698,7 +806,7 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
         message["cc_numbers"] = from_json(row["cc_numbers"], [])
         message["from_display"] = row["identity_label"] or _contact_name(conn, row["from_number"])
         message["attachments"] = [
-            _attachment_dict(a)
+            _attachment_dict(conn, a)
             for a in conn.execute("SELECT * FROM attachments WHERE message_id = ?", (row["id"],)).fetchall()
         ]
         messages.append(_decorate_message_status(message))

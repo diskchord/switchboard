@@ -131,11 +131,11 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
     ),
     SettingDef(
         "messaging.provider_by_number",
-        "Provider by number",
+        "Provider by sender number",
         "Messaging",
         "text",
         json.dumps(config.MESSAGING_PROVIDER_BY_NUMBER, separators=(",", ":")),
-        help='JSON object such as {"+15551230001":"twilio","+15551230002":"telnyx"}.',
+        help='Use when Telnyx and Twilio sender numbers are mixed. Example: {"+15551230001":"twilio","+15551230002":"telnyx"}.',
         env_names=("TEXTING_PROVIDER_BY_NUMBER",),
     ),
     SettingDef(

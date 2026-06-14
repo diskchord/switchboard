@@ -1,0 +1,8 @@
+# Copy this file to mobile/android/local.properties before building the Android wrapper.
+# Do not commit mobile/android/local.properties; it can contain your private server URL.
+
+# Android SDK path for local builds.
+sdk.dir=/path/to/android-sdk
+
+# Public HTTPS URL for your Switchboard server.
+SWITCHBOARD_APP_URL=https://switchboard.example.com

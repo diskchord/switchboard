@@ -20,6 +20,7 @@ const state = {
   lastListRefreshAt: 0,
   lastThreadRefreshAt: 0,
   threadNavigationInFlight: false,
+  searchTimer: null,
   lightboxImages: [],
   lightboxIndex: 0,
   recipientDraft: [],
@@ -41,6 +42,7 @@ const els = {
   threadPane: document.querySelector(".thread-pane"),
   conversationList: document.querySelector("#conversationList"),
   conversationSearch: document.querySelector("#conversationSearch"),
+  conversationSearchClear: document.querySelector("#conversationSearchClear"),
   statStrip: document.querySelector("#statStrip"),
   categoryTabs: document.querySelectorAll(".category-tab"),
   themeToggle: document.querySelector("#themeToggle"),
@@ -96,6 +98,17 @@ const THEME_KEY = "textingTheme";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
 const FOREGROUND_STALE_MS = 20_000;
 const MIN_AUTO_REFRESH_SECONDS = 5;
+const REACTION_INVISIBLE_PATTERN = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
+const REACTION_SPACING_PATTERN = /[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]/g;
+const REACTION_WORDS = new Map([
+  ["liked", "👍"],
+  ["loved", "❤️"],
+  ["disliked", "👎"],
+  ["laughed at", "😂"],
+  ["emphasized", "‼️"],
+  ["questioned", "❓"],
+]);
+const REACTION_SYMBOLS = new Set(["👍", "👎", "❤️", "❤", "😂", "🤣", "😆", "‼️", "!!", "?", "❓"]);
 const COLUMN_LIMITS = {
   leftMin: 260,
   leftMax: 560,
@@ -146,6 +159,7 @@ const I18N = {
     "theme.light": "Use light mode",
     "theme.dark": "Use dark mode",
     "search.placeholder": "Search",
+    "search.clear": "Clear search",
     "category.aria": "Thread category",
     "category.inbox": "Inbox",
     "category.unread": "Unread",
@@ -196,6 +210,8 @@ const I18N = {
     "messages.aria": "Messages",
     "messages.empty": "No messages yet.",
     "messages.load_older": "Load older ({count})",
+    "message.reaction_preview": "Reacted {icon}",
+    "message.reaction_title": "{name} reacted {icon}",
     "message.send_failed": "Send failed",
     "message.delivery_unconfirmed": "Delivery unconfirmed",
     "composer.from": "From",
@@ -251,6 +267,7 @@ const I18N = {
     "theme.light": "Usar modo claro",
     "theme.dark": "Usar modo oscuro",
     "search.placeholder": "Buscar",
+    "search.clear": "Borrar búsqueda",
     "category.aria": "Categoría de conversaciones",
     "category.inbox": "Entrada",
     "category.unread": "No leídos",
@@ -301,6 +318,8 @@ const I18N = {
     "messages.aria": "Mensajes",
     "messages.empty": "Aún no hay mensajes.",
     "messages.load_older": "Cargar anteriores ({count})",
+    "message.reaction_preview": "Reaccionó {icon}",
+    "message.reaction_title": "{name} reaccionó {icon}",
     "message.send_failed": "Envío fallido",
     "message.delivery_unconfirmed": "Entrega sin confirmar",
     "composer.from": "De",
@@ -356,6 +375,7 @@ const I18N = {
     "theme.light": "Utiliser le mode clair",
     "theme.dark": "Utiliser le mode sombre",
     "search.placeholder": "Rechercher",
+    "search.clear": "Effacer la recherche",
     "category.aria": "Catégorie de fils",
     "category.inbox": "Boîte",
     "category.unread": "Non lus",
@@ -406,6 +426,8 @@ const I18N = {
     "messages.aria": "Messages",
     "messages.empty": "Aucun message pour le moment.",
     "messages.load_older": "Charger les anciens ({count})",
+    "message.reaction_preview": "Réaction {icon}",
+    "message.reaction_title": "{name} a réagi {icon}",
     "message.send_failed": "Envoi échoué",
     "message.delivery_unconfirmed": "Livraison non confirmée",
     "composer.from": "De",
@@ -1152,6 +1174,92 @@ function phoneDisplay(phone) {
   return phone;
 }
 
+function cleanReactionText(value) {
+  return String(value || "")
+    .normalize("NFC")
+    .replace(REACTION_INVISIBLE_PATTERN, "")
+    .replace(REACTION_SPACING_PATTERN, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/[ \t\f\v]*\n[ \t\f\v]*/g, "\n")
+    .trim();
+}
+
+function hasEmojiLikeSymbol(value) {
+  return [...String(value || "")].some((char) => {
+    const code = char.codePointAt(0);
+    return (
+      (code >= 0x1f000 && code <= 0x1faff) ||
+      (code >= 0x2600 && code <= 0x27bf) ||
+      code === 0x203c ||
+      code === 0x2049
+    );
+  });
+}
+
+function normalizeReactionIcon(value) {
+  const icon = cleanReactionText(value);
+  const wordIcon = REACTION_WORDS.get(icon.toLowerCase());
+  if (wordIcon) return wordIcon;
+  if (icon === "❤") return "❤️";
+  if (REACTION_SYMBOLS.has(icon) || hasEmojiLikeSymbol(icon)) return icon;
+  return "";
+}
+
+function parseMessageReaction(message) {
+  if (!message?.text || (message.attachments || []).length) return null;
+  const text = cleanReactionText(message.text);
+  let match = text.match(/^(.{1,18}?)\s+to\s+[“"]([\s\S]+)[”"]$/iu);
+  if (match) {
+    const icon = normalizeReactionIcon(match[1]);
+    const targetText = cleanReactionText(match[2]);
+    if (icon && targetText) return { icon, targetText };
+  }
+  match = text.match(/^(liked|loved|disliked|laughed at|emphasized|questioned)\s+[“"]([\s\S]+)[”"]$/iu);
+  if (match) {
+    const icon = normalizeReactionIcon(match[1]);
+    const targetText = cleanReactionText(match[2]);
+    if (icon && targetText) return { icon, targetText };
+  }
+  return null;
+}
+
+function reactionComparableText(value) {
+  return cleanReactionText(value).toLowerCase();
+}
+
+function findReactionTargetMessage(messages, reactionMessage, targetText) {
+  const comparableTarget = reactionComparableText(targetText);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if (!candidate?.text) continue;
+    if (candidate.from_number && reactionMessage.from_number && candidate.from_number === reactionMessage.from_number) {
+      continue;
+    }
+    if (reactionComparableText(candidate.text) === comparableTarget) return candidate;
+  }
+  return null;
+}
+
+function messagesWithInlineReactions(messages) {
+  const visibleMessages = [];
+  messages.forEach((rawMessage) => {
+    const reaction = parseMessageReaction(rawMessage);
+    const target = reaction ? findReactionTargetMessage(visibleMessages, rawMessage, reaction.targetText) : null;
+    if (target) {
+      target.inline_reactions.push({
+        ...reaction,
+        id: rawMessage.id,
+        from_display: rawMessage.from_display,
+        from_number: rawMessage.from_number,
+      });
+      return;
+    }
+    visibleMessages.push({ ...rawMessage, inline_reactions: [...(rawMessage.inline_reactions || [])] });
+  });
+  return visibleMessages;
+}
+
 function participantDisplay(participant) {
   const phone = phoneDisplay(participant.phone_number);
   if (!participant.display || participant.display === phone || participant.display === participant.phone_number) {
@@ -1298,6 +1406,32 @@ function renderCategoryTabs() {
   });
 }
 
+function updateConversationSearchClear() {
+  els.conversationSearchClear.hidden = !els.conversationSearch.value;
+}
+
+function scheduleConversationSearchLoad() {
+  clearTimeout(state.searchTimer);
+  updateConversationSearchClear();
+  state.searchTimer = setTimeout(() => {
+    loadConversations({ append: false }).catch((error) => toast(error.message));
+  }, 180);
+}
+
+function clearConversationSearch({ focus = false } = {}) {
+  if (!els.conversationSearch.value) {
+    updateConversationSearchClear();
+    if (focus) els.conversationSearch.focus();
+    return false;
+  }
+  clearTimeout(state.searchTimer);
+  els.conversationSearch.value = "";
+  updateConversationSearchClear();
+  loadConversations({ append: false }).catch((error) => toast(error.message));
+  if (focus) els.conversationSearch.focus();
+  return true;
+}
+
 function renderIdentities() {
   els.identityList.innerHTML = (state.bootstrap.identities || [])
     .map(
@@ -1332,7 +1466,7 @@ function renderConversations() {
               detail: conversation.last_status_detail || lastStatusLabel || t("conversation.could_not_deliver"),
             })
           : "";
-      const preview = failedPreview || conversation.last_text || (lastStatusLabel ? lastStatusLabel : "");
+      const preview = failedPreview || reactionPreviewText(conversation.last_text) || (lastStatusLabel ? lastStatusLabel : "");
       return `
         <button class="conversation-item ${active} ${newMessageClass} ${failedClass}" data-id="${conversation.id}">
           <div class="avatar">${escapeHtml(initials(title))}</div>
@@ -1610,9 +1744,51 @@ function renderAttachment(attachment) {
   )}</a>`;
 }
 
+function reactionActorName(reaction) {
+  return reaction.from_display || phoneDisplay(reaction.from_number) || t("conversation.unknown");
+}
+
+function groupedReactions(reactions) {
+  const groups = new Map();
+  reactions.forEach((reaction) => {
+    const key = reaction.icon;
+    if (!groups.has(key)) groups.set(key, { icon: reaction.icon, count: 0, names: new Set() });
+    const group = groups.get(key);
+    group.count += 1;
+    group.names.add(reactionActorName(reaction));
+  });
+  return [...groups.values()];
+}
+
+function reactionGroupName(group) {
+  const names = [...group.names];
+  if (names.length <= 2) return names.join(", ");
+  return `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+}
+
+function renderMessageReactions(message) {
+  const reactions = message.inline_reactions || [];
+  if (!reactions.length) return "";
+  return `<div class="message-reactions">${groupedReactions(reactions)
+    .map((group) => {
+      const title = t("message.reaction_title", { name: reactionGroupName(group), icon: group.icon });
+      return `<span class="message-reaction" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+        <span class="message-reaction-icon">${escapeHtml(group.icon)}</span>
+        ${group.count > 1 ? `<span class="message-reaction-count">${escapeHtml(group.count)}</span>` : ""}
+      </span>`;
+    })
+    .join("")}</div>`;
+}
+
+function reactionPreviewText(text) {
+  const reaction = parseMessageReaction({ text, attachments: [] });
+  return reaction ? t("message.reaction_preview", { icon: reaction.icon }) : text;
+}
+
 function renderMessages(messages, scrollMode = "bottom") {
   const wasNearBottom = isNearMessageBottom();
-  if (!messages.length) {
+  const visibleMessages = messagesWithInlineReactions(messages);
+  if (!visibleMessages.length) {
     els.messages.innerHTML = `<div class="empty-state">${escapeHtml(t("messages.empty"))}</div>`;
     updateComposerOffset();
     watchMessageMediaForBottomStick(scrollMode, wasNearBottom);
@@ -1626,12 +1802,13 @@ function renderMessages(messages, scrollMode = "bottom") {
     : "";
   els.messages.innerHTML =
     loadOlder +
-    messages
+    visibleMessages
       .map((message) => {
       const day = formatDay(message.occurred_at);
       const divider = day !== lastDay ? `<div class="day-divider">${escapeHtml(day)}</div>` : "";
       lastDay = day;
       const attachments = (message.attachments || []).map(renderAttachment).join("");
+      const reactions = renderMessageReactions(message);
       const statusKind = message.status_kind || "neutral";
       const statusLabel = localizedStatusLabel(message.status, message.status_label || message.status || "");
       const statusDetail = message.status_detail || "";
@@ -1649,15 +1826,18 @@ function renderMessages(messages, scrollMode = "bottom") {
       return `
         ${divider}
         <article class="message-row ${message.direction} ${statusKind}"${bubbleStyle}>
-          <div class="message-bubble">
-            ${attachments ? `<div class="attachment-grid">${attachments}</div>` : ""}
-            ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
-            ${failureDetail}
-            <div class="message-meta">
-              <span>${escapeHtml(message.from_display || phoneDisplay(message.from_number))}</span>
-              <time>${escapeHtml(formatTime(message.occurred_at))}</time>
-              <span class="message-status ${escapeHtml(statusKind)}" title="${escapeHtml(statusDetail)}">${escapeHtml(statusLabel)}</span>
+          <div class="message-stack">
+            <div class="message-bubble">
+              ${attachments ? `<div class="attachment-grid">${attachments}</div>` : ""}
+              ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
+              ${failureDetail}
+              <div class="message-meta">
+                <span>${escapeHtml(message.from_display || phoneDisplay(message.from_number))}</span>
+                <time>${escapeHtml(formatTime(message.occurred_at))}</time>
+                <span class="message-status ${escapeHtml(statusKind)}" title="${escapeHtml(statusDetail)}">${escapeHtml(statusLabel)}</span>
+              </div>
             </div>
+            ${reactions}
           </div>
         </article>`;
       })
@@ -1811,6 +1991,11 @@ function handleGlobalKeydown(event) {
     if (["Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
     }
+    return;
+  }
+  if (event.key === "Escape" && els.conversationSearch.value && !isEditableKeyTarget(event.target)) {
+    clearConversationSearch();
+    event.preventDefault();
     return;
   }
   if (navigateThreadsWithArrowKey(event)) return;
@@ -2413,10 +2598,18 @@ function bindEvents() {
     const button = event.target.closest(".conversation-item");
     if (button) openConversation(button.dataset.id).catch((error) => toast(error.message));
   });
-  let searchTimer;
   els.conversationSearch.addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => loadConversations({ append: false }).catch((error) => toast(error.message)), 180);
+    scheduleConversationSearchLoad();
+  });
+  els.conversationSearch.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (clearConversationSearch()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
+  els.conversationSearchClear.addEventListener("click", () => {
+    clearConversationSearch({ focus: true });
   });
   els.categoryTabs.forEach((tab) => {
     tab.addEventListener("click", async () => {
@@ -2634,6 +2827,7 @@ async function init() {
   bindEvents();
   updateComposerOffset();
   updateMessageCounter();
+  updateConversationSearchClear();
   const savedCategory = localStorage.getItem("conversationCategory");
   state.conversationCategory = ["inbox", "unread", "hidden"].includes(savedCategory) ? savedCategory : "inbox";
   state.bootstrap = await api("/api/bootstrap");

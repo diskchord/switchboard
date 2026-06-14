@@ -7,10 +7,21 @@ def localPropsFile = rootProject.file("local.properties")
 if (localPropsFile.exists()) {
     localPropsFile.withInputStream { localProps.load(it) }
 }
-def switchboardAppUrl = localProps.getProperty(
-    "SWITCHBOARD_APP_URL",
-    localProps.getProperty("TEXTING_APP_URL", "https://switchboard.example.com")
-)
+def switchboardAppUrl = (
+    localProps.getProperty("SWITCHBOARD_APP_URL")
+        ?: project.findProperty("SWITCHBOARD_APP_URL")
+        ?: System.getenv("SWITCHBOARD_APP_URL")
+        ?: ""
+).trim()
+if (!switchboardAppUrl) {
+    throw new GradleException(
+        "Set SWITCHBOARD_APP_URL in mobile/android/local.properties, " +
+            "as a Gradle property, or in the environment before building the Android app."
+    )
+}
+if (!switchboardAppUrl.startsWith("https://") && !switchboardAppUrl.startsWith("http://10.") && !switchboardAppUrl.startsWith("http://192.168.")) {
+    throw new GradleException("SWITCHBOARD_APP_URL should be an HTTPS URL, or a private LAN HTTP URL for local testing.")
+}
 
 android {
     namespace "com.example.texting"

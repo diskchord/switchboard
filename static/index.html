@@ -32,7 +32,21 @@
           </div>
         </header>
         <div class="search-row">
-          <input id="conversationSearch" type="search" placeholder="Search" autocomplete="off" data-i18n-placeholder="search.placeholder" />
+          <div class="search-control">
+            <input id="conversationSearch" type="search" placeholder="Search" autocomplete="off" data-i18n-placeholder="search.placeholder" />
+            <button
+              class="search-clear-button"
+              id="conversationSearchClear"
+              type="button"
+              title="Clear search"
+              aria-label="Clear search"
+              data-i18n-title="search.clear"
+              data-i18n-aria-label="search.clear"
+              hidden
+            >
+              &times;
+            </button>
+          </div>
         </div>
         <div class="stat-strip" id="statStrip"></div>
         <div class="category-tabs" role="tablist" aria-label="Thread category" data-i18n-aria-label="category.aria">
