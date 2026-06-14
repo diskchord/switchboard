@@ -535,13 +535,15 @@ select:focus {
 }
 
 .thread-action-row {
-  align-items: end;
+  align-items: center;
   display: flex;
   gap: 6px;
   justify-content: end;
+  min-height: 42px;
 }
 
 .thread-action-row .small-button {
+  min-height: 42px;
   min-width: 68px;
   padding: 0 10px;
 }
@@ -857,6 +859,30 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.pdf-attachment {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 640px);
+}
+
+.pdf-attachment-link {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.pdf-attachment-viewer {
+  display: block;
+  width: 100%;
+  height: min(68vh, 620px);
+  min-height: 360px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
 .composer {
   border-top: 1px solid var(--line);
   background: var(--panel-2);
@@ -1080,6 +1106,25 @@ select:focus {
 }
 
 .panel-button {
+  color: var(--accent);
+}
+
+.thread-action-row .archive-button {
+  align-self: center;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  font-size: 21px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.archive-button.unarchive-button {
+  border-color: var(--line);
   color: var(--accent);
 }
 
@@ -1517,6 +1562,14 @@ select:focus {
     padding: 0 10px;
   }
 
+  .thread-action-row .archive-button {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    min-height: 38px;
+    padding: 0;
+  }
+
   h2 {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1534,6 +1587,11 @@ select:focus {
 
   .message-bubble {
     max-width: 88%;
+  }
+
+  .pdf-attachment-viewer {
+    height: min(58vh, 460px);
+    min-height: 280px;
   }
 
   .composer {

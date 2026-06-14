@@ -19,6 +19,7 @@ const state = {
   foregroundRefreshInFlight: false,
   lastListRefreshAt: 0,
   lastThreadRefreshAt: 0,
+  threadNavigationInFlight: false,
   lightboxImages: [],
   lightboxIndex: 0,
   recipientDraft: [],
@@ -208,6 +209,7 @@ const I18N = {
     "upload.many": "{count} files uploaded.",
     "attachment.image": "Image",
     "attachment.file": "Attachment",
+    "attachment.pdf": "PDF",
     "tabs.numbers": "Numbers",
     "tabs.contacts": "Contacts",
     "identities.heading": "Sender Identities",
@@ -312,6 +314,7 @@ const I18N = {
     "upload.many": "{count} archivos subidos.",
     "attachment.image": "Imagen",
     "attachment.file": "Adjunto",
+    "attachment.pdf": "PDF",
     "tabs.numbers": "Números",
     "tabs.contacts": "Contactos",
     "identities.heading": "Identidades de envío",
@@ -416,6 +419,7 @@ const I18N = {
     "upload.many": "{count} fichiers téléversés.",
     "attachment.image": "Image",
     "attachment.file": "Pièce jointe",
+    "attachment.pdf": "PDF",
     "tabs.numbers": "Numéros",
     "tabs.contacts": "Contacts",
     "identities.heading": "Identités d'envoi",
@@ -1357,6 +1361,13 @@ function renderConversationsPreservingScroll() {
   els.conversationList.scrollTop = previousScrollTop;
 }
 
+function scrollActiveConversationIntoView() {
+  requestAnimationFrame(() => {
+    const active = els.conversationList.querySelector(".conversation-item.active");
+    active?.scrollIntoView({ block: "nearest" });
+  });
+}
+
 function mergeConversationIntoList(conversation) {
   if (!conversation?.id) return;
   const index = state.conversations.findIndex((item) => item.id === conversation.id);
@@ -1401,6 +1412,15 @@ function renderRecipientDraft() {
         </span>`,
     )
     .join("");
+}
+
+function renderArchiveButton(archived = false) {
+  const label = archived ? t("conversation.unhide") : t("conversation.hide");
+  els.archiveButton.textContent = archived ? "↩" : "×";
+  els.archiveButton.title = label;
+  els.archiveButton.setAttribute("aria-label", label);
+  els.archiveButton.classList.toggle("danger-button", !archived);
+  els.archiveButton.classList.toggle("unarchive-button", archived);
 }
 
 function clearRecipientSuggestions() {
@@ -1500,8 +1520,7 @@ function renderThreadHeader() {
     els.dealtButton.disabled = true;
     els.archiveButton.disabled = true;
     els.dealtButton.textContent = t("conversation.read");
-    els.archiveButton.textContent = t("conversation.hide");
-    els.archiveButton.classList.add("danger-button");
+    renderArchiveButton(false);
     renderRecipientDraft();
     return;
   }
@@ -1532,8 +1551,7 @@ function renderThreadHeader() {
   els.dealtButton.disabled = false;
   els.archiveButton.disabled = false;
   els.dealtButton.textContent = conversationIsRead(conversation) ? t("conversation.unread") : t("conversation.read");
-  els.archiveButton.textContent = archived ? t("conversation.unhide") : t("conversation.hide");
-  els.archiveButton.classList.toggle("danger-button", !archived);
+  renderArchiveButton(archived);
 }
 
 function mediaUrl(attachment) {
@@ -1552,6 +1570,15 @@ function isImageAttachment(attachment, url) {
   return contentType.startsWith("image/") || /\.(avif|gif|heic|heif|jpe?g|png|webp)(\?.*)?$/i.test(url || "");
 }
 
+function isPdfAttachment(attachment, url) {
+  const contentType = (attachment.content_type || "").split(";", 1)[0].trim().toLowerCase();
+  return contentType === "application/pdf" || /\.pdf([?#].*)?$/i.test(url || attachment.filename || "");
+}
+
+function pdfViewerUrl(url) {
+  return `${url}${String(url).includes("#") ? "&" : "#"}toolbar=1&navpanes=0`;
+}
+
 function renderAttachment(attachment) {
   const url = mediaUrl(attachment);
   if (!url) return "";
@@ -1565,6 +1592,18 @@ function renderAttachment(attachment) {
   }
   if (contentType.startsWith("audio/")) {
     return `<audio src="${escapeHtml(url)}" controls preload="metadata"></audio>`;
+  }
+  if (isPdfAttachment(attachment, url)) {
+    const filename = attachment.filename || t("attachment.pdf");
+    const safeUrl = escapeHtml(url);
+    const safeViewerUrl = escapeHtml(pdfViewerUrl(url));
+    const safeFilename = escapeHtml(filename);
+    return `<div class="pdf-attachment">
+      <a class="pdf-attachment-link" href="${safeUrl}" target="_blank" rel="noopener">${safeFilename}</a>
+      <object class="pdf-attachment-viewer" data="${safeViewerUrl}" type="application/pdf" aria-label="${safeFilename}">
+        <a class="attachment-link" href="${safeUrl}" target="_blank" rel="noopener">${safeFilename}</a>
+      </object>
+    </div>`;
   }
   return `<a class="attachment-link" href="${escapeHtml(url)}" target="_blank">${escapeHtml(
     attachment.filename || t("attachment.file"),
@@ -1716,18 +1755,25 @@ function isEditableKeyTarget(target) {
   return Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true'], [contenteditable='plaintext-only']"));
 }
 
-function scrollMessagesWithArrowKey(event) {
+function navigateThreadsWithArrowKey(event) {
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return false;
   if (!["ArrowUp", "ArrowDown"].includes(event.key)) return false;
   if (isEditableKeyTarget(event.target)) return false;
-  if (!els.messages || els.messages.clientHeight <= 0 || els.messages.scrollHeight <= els.messages.clientHeight) return false;
-  const direction = event.key === "ArrowDown" ? 1 : -1;
-  const amount = Math.max(72, Math.round(els.messages.clientHeight * 0.16));
-  els.messages.scrollBy({
-    top: direction * amount,
-    behavior: event.repeat ? "auto" : "smooth",
-  });
+  if (!state.currentConversationId || !state.conversations.length) return false;
   event.preventDefault();
+  if (state.threadNavigationInFlight) return true;
+  const offset = event.key === "ArrowDown" ? 1 : -1;
+  const currentIndex = state.conversations.findIndex((conversation) => conversation.id === state.currentConversationId);
+  const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+  const nextIndex = clamp(baseIndex + offset, 0, state.conversations.length - 1);
+  const next = state.conversations[nextIndex];
+  if (!next || next.id === state.currentConversationId) return true;
+  state.threadNavigationInFlight = true;
+  openConversation(next.id)
+    .catch((error) => toast(error.message))
+    .finally(() => {
+      state.threadNavigationInFlight = false;
+    });
   return true;
 }
 
@@ -1767,8 +1813,8 @@ function handleGlobalKeydown(event) {
     }
     return;
   }
-  if (runHotkey(event)) return;
-  scrollMessagesWithArrowKey(event);
+  if (navigateThreadsWithArrowKey(event)) return;
+  runHotkey(event);
 }
 
 function hasPendingOutboundMessages() {
@@ -2023,6 +2069,7 @@ async function openConversation(id, options = {}) {
   state.lastThreadRefreshAt = Date.now();
   selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
   renderConversations();
+  scrollActiveConversationIntoView();
   renderThreadHeader();
   renderMessages(state.messages, "bottom");
   scheduleStatusPoll();

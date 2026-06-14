@@ -436,10 +436,98 @@ def _fax_message_text(payload: dict[str, Any], event_type: str) -> str:
     return "Fax received"
 
 
-def _store_fax_event(conn, event: dict[str, Any]) -> int | None:
+def _looks_like_fax_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(payload.get(key) for key in ("fax_id", "connection_id", "media_url", "failure_reason"))
+
+
+def _infer_fax_event_type(payload: dict[str, Any], explicit: Any = None) -> str:
+    event_type = str(explicit or "").strip()
+    if event_type.startswith("fax."):
+        return event_type
+    status = str(payload.get("status") or "").strip().lower()
+    if _fax_failed(payload, event_type):
+        return "fax.failed"
+    if status in {"received", "delivered", "completed", "success", "succeeded"} or payload.get("media_url"):
+        return "fax.received"
+    return "fax.status"
+
+
+def _fax_payload_timestamp(payload: dict[str, Any]) -> Any:
+    return (
+        payload.get("completed_at")
+        or payload.get("failed_at")
+        or payload.get("received_at")
+        or payload.get("created_at")
+    )
+
+
+def _root_event_id(root: dict[str, Any], payload: dict[str, Any]) -> str | None:
+    for key in ("event_id", "webhook_id"):
+        value = root.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    root_id = root.get("id")
+    fax_id = payload.get("fax_id")
+    if isinstance(root_id, str) and root_id.strip() and root_id != fax_id:
+        return root_id.strip()
+    return None
+
+
+def _normalize_webhook_event(event: dict[str, Any]) -> dict[str, Any]:
+    data = event.get("data")
+    if isinstance(data, dict) and isinstance(data.get("payload"), dict):
+        payload = data["payload"]
+        if data.get("event_type") or not _looks_like_fax_payload(payload):
+            return event
+        normalized_data = dict(data)
+        normalized_data["id"] = normalized_data.get("id") or _root_event_id(event, payload)
+        normalized_data["event_type"] = _infer_fax_event_type(payload, event.get("event_type") or event.get("type"))
+        normalized_data["occurred_at"] = (
+            normalized_data.get("occurred_at") or event.get("occurred_at") or _fax_payload_timestamp(payload)
+        )
+        return {**event, "data": normalized_data}
+
+    if isinstance(data, dict) and _looks_like_fax_payload(data):
+        return {
+            "data": {
+                "id": _root_event_id(event, data),
+                "event_type": _infer_fax_event_type(data, event.get("event_type") or data.get("event_type")),
+                "occurred_at": event.get("occurred_at") or data.get("occurred_at") or _fax_payload_timestamp(data),
+                "payload": data,
+            }
+        }
+
+    payload = event.get("payload")
+    if isinstance(payload, dict) and _looks_like_fax_payload(payload):
+        return {
+            "data": {
+                "id": _root_event_id(event, payload),
+                "event_type": _infer_fax_event_type(payload, event.get("event_type") or event.get("type")),
+                "occurred_at": event.get("occurred_at") or _fax_payload_timestamp(payload),
+                "payload": payload,
+            }
+        }
+
+    if _looks_like_fax_payload(event):
+        return {
+            "data": {
+                "id": _root_event_id(event, event),
+                "event_type": _infer_fax_event_type(event, event.get("event_type") or event.get("type")),
+                "occurred_at": event.get("occurred_at") or _fax_payload_timestamp(event),
+                "payload": event,
+            }
+        }
+
+    return event
+
+
+def _store_fax_event(conn, event: dict[str, Any], raw_event: dict[str, Any] | None = None) -> int | None:
     data = event.get("data", {})
     payload = data.get("payload", {})
     event_type = str(data.get("event_type") or "")
+    stored_event = raw_event if raw_event is not None else event
     if not event_type.startswith("fax."):
         return None
     if payload.get("direction") and str(payload.get("direction")).lower() != "inbound":
@@ -469,7 +557,7 @@ def _store_fax_event(conn, event: dict[str, Any]) -> int | None:
                 SET text = ?, status = ?, telnyx_event_id = ?, raw_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (text, status, data.get("id"), as_json(event), now_est(), row["id"]),
+                (text, status, data.get("id"), as_json(stored_event), now_est(), row["id"]),
             )
             add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=int(row["id"]))
             return int(row["id"])
@@ -488,7 +576,7 @@ def _store_fax_event(conn, event: dict[str, Any]) -> int | None:
         source="telnyx-fax",
         telnyx_id=telnyx_id or None,
         telnyx_event_id=data.get("id"),
-        raw_json=event,
+        raw_json=stored_event,
     )
     add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
 
@@ -532,10 +620,11 @@ def _store_fax_event(conn, event: dict[str, Any]) -> int | None:
     return message_id
 
 
-def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
+def _store_webhook_message(conn, event: dict[str, Any], raw_event: dict[str, Any] | None = None) -> int | None:
     data = event.get("data", {})
     payload = data.get("payload", {})
     event_type = data.get("event_type", "")
+    stored_event = raw_event if raw_event is not None else event
     telnyx_id = payload.get("id")
     occurred_at = normalize_iso_timestamp(
         payload.get("received_at")
@@ -548,7 +637,7 @@ def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
         if updated_id:
             return updated_id
     if str(event_type).startswith("fax."):
-        return _store_fax_event(conn, event)
+        return _store_fax_event(conn, event, raw_event=stored_event)
     if event_type not in {"message.received", "message.sent"}:
         return None
 
@@ -571,7 +660,7 @@ def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
                 SET status = ?, telnyx_event_id = ?, raw_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (status, data.get("id"), as_json(event), now_est(), row["id"]),
+                (status, data.get("id"), as_json(stored_event), now_est(), row["id"]),
             )
             return int(row["id"])
     message_id = upsert_message(
@@ -588,7 +677,7 @@ def _store_webhook_message(conn, event: dict[str, Any]) -> int | None:
         source="telnyx",
         telnyx_id=telnyx_id,
         telnyx_event_id=data.get("id"),
-        raw_json=event,
+        raw_json=stored_event,
     )
     media_items = payload.get("media") or []
     for media in media_items:
@@ -623,7 +712,8 @@ def handle_webhook(raw_body: bytes, headers: dict[str, str]) -> dict[str, Any]:
     timestamp = headers.get("telnyx-timestamp")
     if not verify_signature(raw_body, signature, timestamp):
         raise TelnyxError("Telnyx webhook signature verification failed.")
-    event = json.loads(raw_body.decode("utf-8"))
+    raw_event = json.loads(raw_body.decode("utf-8"))
+    event = _normalize_webhook_event(raw_event)
     data = event.get("data", {})
     event_id = data.get("id")
     event_type = data.get("event_type", "unknown")
@@ -638,11 +728,11 @@ def handle_webhook(raw_body: bytes, headers: dict[str, str]) -> dict[str, Any]:
                 INSERT INTO telnyx_events(event_id, event_type, occurred_at, raw_json, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (event_id, event_type, occurred_at, as_json(event), now_est()),
+                (event_id, event_type, occurred_at, as_json(raw_event), now_est()),
             )
         except sqlite3.IntegrityError:
             conn.rollback()
             return {"duplicate": True, "event_id": event_id}
-    message_id = _store_webhook_message(conn, event)
+    message_id = _store_webhook_message(conn, event, raw_event=raw_event)
     conn.commit()
     return {"event_id": event_id, "event_type": event_type, "message_id": message_id}

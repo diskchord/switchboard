@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#e6e8eb" id="themeColor" />
     <title data-i18n="app.title">Switchboard</title>
+    <link rel="icon" href="/static/favicon.ico" sizes="any" />
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
     <link rel="manifest" href="/static/manifest.webmanifest" />
     <script>
       (() => {
@@ -72,8 +75,8 @@
             </label>
             <div class="thread-action-row" role="group" aria-label="Conversation actions" data-i18n-aria-label="conversation.actions">
               <button class="small-button done-button" id="dealtButton" disabled data-i18n="conversation.read">Read</button>
-              <button class="small-button danger-button" id="archiveButton" disabled data-i18n="conversation.hide">Hide</button>
               <button class="small-button panel-button" id="toggleDetailsButton" aria-pressed="false" data-i18n="panel.label">Panel</button>
+              <button class="small-button archive-button danger-button" id="archiveButton" disabled title="Hide" aria-label="Hide">&times;</button>
             </div>
           </div>
         </header>

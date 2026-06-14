@@ -1040,6 +1040,8 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path.startswith("/uploads/"):
                 name = Path(unquote(path.removeprefix("/uploads/"))).name
                 self._serve_file(_configured_upload_dir() / name)
+            elif path in {"/favicon.ico", "/favicon.svg", "/apple-touch-icon.png"}:
+                self._serve_file(STATIC_DIR / path.removeprefix("/"))
             elif path.startswith("/static/"):
                 rel = Path(unquote(path.removeprefix("/static/")))
                 self._serve_file(STATIC_DIR / rel.name)
