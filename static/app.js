@@ -5,6 +5,7 @@ const state = {
   hasMoreConversations: true,
   isLoadingConversations: false,
   conversationRequestSeq: 0,
+  openConversationSeq: 0,
   currentConversationId: null,
   currentConversation: null,
   messages: [],
@@ -32,6 +33,15 @@ const state = {
   columnWidths: { left: 340, right: 330 },
   uploadedMedia: [],
   isUploadingMedia: false,
+  selectedConversationIds: new Set(),
+  conversationPressTimer: null,
+  conversationPressTargetId: null,
+  conversationSwipe: null,
+  suppressConversationClickUntil: 0,
+  sendPressTimer: null,
+  sendHoldTriggered: false,
+  pullRefresh: null,
+  isRefreshingFromPull: false,
   language: "en",
   hotkeysEnabled: true,
   hotkeys: {},
@@ -43,6 +53,7 @@ const els = {
   conversationList: document.querySelector("#conversationList"),
   conversationSearch: document.querySelector("#conversationSearch"),
   conversationSearchClear: document.querySelector("#conversationSearchClear"),
+  pullRefreshIndicator: document.querySelector("#pullRefreshIndicator"),
   statStrip: document.querySelector("#statStrip"),
   categoryTabs: document.querySelectorAll(".category-tab"),
   themeToggle: document.querySelector("#themeToggle"),
@@ -52,6 +63,10 @@ const els = {
   settingsSections: document.querySelector("#settingsSections"),
   settingsClose: document.querySelector("#settingsClose"),
   settingsCancel: document.querySelector("#settingsCancel"),
+  statsButton: document.querySelector("#statsButton"),
+  statsModal: document.querySelector("#statsModal"),
+  statsBody: document.querySelector("#statsBody"),
+  statsClose: document.querySelector("#statsClose"),
   themeColor: document.querySelector("#themeColor"),
   fromNumber: document.querySelector("#fromNumber"),
   threadKind: document.querySelector("#threadKind"),
@@ -62,6 +77,16 @@ const els = {
   contactNameForm: document.querySelector("#contactNameForm"),
   contactNameInput: document.querySelector("#contactNameInput"),
   contactNameCancel: document.querySelector("#contactNameCancel"),
+  contactNameModal: document.querySelector("#contactNameModal"),
+  contactNameModalForm: document.querySelector("#contactNameModalForm"),
+  contactNameModalInput: document.querySelector("#contactNameModalInput"),
+  contactNameModalClose: document.querySelector("#contactNameModalClose"),
+  contactNameModalCancel: document.querySelector("#contactNameModalCancel"),
+  scheduleModal: document.querySelector("#scheduleModal"),
+  scheduleForm: document.querySelector("#scheduleForm"),
+  scheduleTime: document.querySelector("#scheduleTime"),
+  scheduleClose: document.querySelector("#scheduleClose"),
+  scheduleCancel: document.querySelector("#scheduleCancel"),
   recipientBar: document.querySelector("#recipientBar"),
   recipientChips: document.querySelector("#recipientChips"),
   recipientInput: document.querySelector("#recipientInput"),
@@ -78,7 +103,10 @@ const els = {
   dealtButton: document.querySelector("#dealtButton"),
   archiveButton: document.querySelector("#archiveButton"),
   newConversationButton: document.querySelector("#newConversationButton"),
+  mobilePanelButton: document.querySelector("#mobilePanelButton"),
   toggleDetailsButton: document.querySelector("#toggleDetailsButton"),
+  detailRail: document.querySelector(".detail-rail"),
+  mobileDetailCloseButton: document.querySelector("#mobileDetailCloseButton"),
   identityList: document.querySelector("#identityList"),
   contactSearch: document.querySelector("#contactSearch"),
   contactResults: document.querySelector("#contactResults"),
@@ -90,14 +118,24 @@ const els = {
   lightboxPrev: document.querySelector("#lightboxPrev"),
   lightboxNext: document.querySelector("#lightboxNext"),
   columnResizers: document.querySelectorAll(".column-resizer"),
+  selectionToolbar: document.querySelector("#selectionToolbar"),
+  selectionCount: document.querySelector("#selectionCount"),
+  bulkReadButton: document.querySelector("#bulkReadButton"),
+  bulkUnreadButton: document.querySelector("#bulkUnreadButton"),
+  bulkHideButton: document.querySelector("#bulkHideButton"),
+  selectionCancelButton: document.querySelector("#selectionCancelButton"),
   toast: document.querySelector("#toast"),
 };
 
 const COLUMN_WIDTHS_KEY = "textingColumnWidths";
 const THEME_KEY = "textingTheme";
+const SCHEDULE_TIME_KEY = "textingScheduleTime";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
 const FOREGROUND_STALE_MS = 20_000;
 const MIN_AUTO_REFRESH_SECONDS = 5;
+const SEND_HOLD_MS = 550;
+const SEND_NOW_SYMBOL = "➤";
+const SCHEDULE_SEND_SYMBOL = "◷";
 const REACTION_INVISIBLE_PATTERN = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
 const REACTION_SPACING_PATTERN = /[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]/g;
 const REACTION_WORDS = new Map([
@@ -136,7 +174,7 @@ const HOTKEY_COMMANDS = {
     if (!state.currentConversation) return;
     setCurrentConversationArchived(!Boolean(state.currentConversation.is_archived));
   },
-  toggle_details: () => setDetailsCollapsed(!document.body.classList.contains("details-collapsed")),
+  toggle_details: () => toggleDetailsPanel(),
   next_thread: () => openAdjacentConversation(1),
   previous_thread: () => openAdjacentConversation(-1),
 };
@@ -170,6 +208,30 @@ const I18N = {
     "stats.texts": "Texts",
     "stats.media": "Media",
     "stats.people": "People",
+    "stats.title": "Stats",
+    "stats.description": "Message and conversation totals.",
+    "stats.close": "Close stats",
+    "stats.loading": "Loading stats...",
+    "stats.totals": "Totals",
+    "stats.by_status": "By status",
+    "stats.by_source": "By source",
+    "stats.recent": "Recent days",
+    "stats.inbox_conversations": "Inbox",
+    "stats.hidden_conversations": "Hidden",
+    "stats.unread_conversations": "Unread",
+    "stats.inbound_messages": "Inbound",
+    "stats.outbound_messages": "Outbound",
+    "stats.voicemails": "Voicemails",
+    "stats.failed_messages": "Failed",
+    "stats.pending_messages": "Pending",
+    "refresh.pull": "Pull to refresh",
+    "refresh.release": "Release to refresh",
+    "refresh.refreshing": "Refreshing...",
+    "refresh.updated": "Updated.",
+    "selection.actions": "Selection actions",
+    "selection.count": "{count} selected",
+    "selection.none": "Select at least one thread.",
+    "selection.updated": "{count} updated.",
     "conversation.new": "New conversation",
     "conversation.back": "Back to conversations",
     "conversation.actions": "Conversation actions",
@@ -198,6 +260,7 @@ const I18N = {
     "panel.collapse_label": "Panel ›",
     "panel.show": "Show sender identities and contacts",
     "panel.hide": "Hide sender identities and contacts",
+    "panel.close": "Close panel",
     "contact.name": "Name",
     "contact.rename": "Rename",
     "contact.name_placeholder": "Contact name",
@@ -214,12 +277,22 @@ const I18N = {
     "message.reaction_title": "{name} reacted {icon}",
     "message.send_failed": "Send failed",
     "message.delivery_unconfirmed": "Delivery unconfirmed",
+    "message.voicemail": "Voicemail",
     "composer.from": "From",
     "composer.message": "Message",
     "composer.media_urls": "Media URLs",
     "composer.upload": "Upload media",
     "composer.send": "Send",
     "composer.requires_content": "Message text or media URL is required.",
+    "schedule.title": "Schedule send",
+    "schedule.send_at": "Send at",
+    "schedule.queue": "Queue",
+    "schedule.queued": "Message queued.",
+    "schedule.queued_for": "Queued for {time}",
+    "schedule.cancel": "Cancel",
+    "schedule.cancelled": "Scheduled message canceled.",
+    "schedule.choose_time": "Choose a send time.",
+    "schedule.future_time": "Choose a future time.",
     "upload.default": "Upload",
     "upload.one": "Media uploaded.",
     "upload.many": "{count} files uploaded.",
@@ -231,6 +304,25 @@ const I18N = {
     "identities.heading": "Sender Identities",
     "identities.label": "Identity label",
     "identities.color": "Identity color",
+    "identities.autoreply": "Vacation reply",
+    "identities.autoreply_enabled": "Enable",
+    "identities.autoreply_message": "Auto-reply message",
+    "identities.autoreply_placeholder": "Thanks for reaching out. I'm away right now and will reply when I can.",
+    "identities.autoreply_cooldown": "Cooldown hours",
+    "identities.autoreply_on": "On",
+    "identities.autoreply_off": "Off",
+    "identities.discard_confirm": "Discard unsaved number changes?",
+    "voice.heading": "Calls",
+    "voice.forwarding": "Call forwarding",
+    "voice.forward_calls": "Forward incoming calls",
+    "voice.forward_to": "Forward to",
+    "voice.forward_timeout": "Ring seconds",
+    "voice.voicemail": "Record voicemail",
+    "voice.voicemail_heading": "Voicemail",
+    "voice.greeting": "Voicemail greeting",
+    "voice.greeting_recording": "Greeting recording",
+    "voice.upload_greeting": "Upload recording",
+    "voice.greeting_uploaded": "Greeting recording uploaded.",
     "contacts.sync": "Sync",
     "contacts.find": "Find contact",
     "contacts.add": "Add",
@@ -243,6 +335,7 @@ const I18N = {
     "status.delivery_failed": "Failed",
     "status.delivery_unconfirmed": "Unconfirmed",
     "status.queued": "Queued",
+    "status.scheduled": "Scheduled",
     "status.sending": "Sending",
     "status.sent": "Sent",
     "status.delivered": "Delivered",
@@ -278,6 +371,30 @@ const I18N = {
     "stats.texts": "Mensajes",
     "stats.media": "Media",
     "stats.people": "Personas",
+    "stats.title": "Estadísticas",
+    "stats.description": "Totales de mensajes y conversaciones.",
+    "stats.close": "Cerrar estadísticas",
+    "stats.loading": "Cargando estadísticas...",
+    "stats.totals": "Totales",
+    "stats.by_status": "Por estado",
+    "stats.by_source": "Por origen",
+    "stats.recent": "Días recientes",
+    "stats.inbox_conversations": "Entrada",
+    "stats.hidden_conversations": "Ocultos",
+    "stats.unread_conversations": "No leídos",
+    "stats.inbound_messages": "Entrantes",
+    "stats.outbound_messages": "Salientes",
+    "stats.voicemails": "Buzones de voz",
+    "stats.failed_messages": "Fallidos",
+    "stats.pending_messages": "Pendientes",
+    "refresh.pull": "Tira para actualizar",
+    "refresh.release": "Suelta para actualizar",
+    "refresh.refreshing": "Actualizando...",
+    "refresh.updated": "Actualizado.",
+    "selection.actions": "Acciones de selección",
+    "selection.count": "{count} seleccionados",
+    "selection.none": "Selecciona al menos un hilo.",
+    "selection.updated": "{count} actualizados.",
     "conversation.new": "Nueva conversación",
     "conversation.back": "Volver a conversaciones",
     "conversation.actions": "Acciones de conversación",
@@ -306,6 +423,7 @@ const I18N = {
     "panel.collapse_label": "Panel ›",
     "panel.show": "Mostrar identidades y contactos",
     "panel.hide": "Ocultar identidades y contactos",
+    "panel.close": "Cerrar panel",
     "contact.name": "Nombre",
     "contact.rename": "Renombrar",
     "contact.name_placeholder": "Nombre del contacto",
@@ -322,12 +440,22 @@ const I18N = {
     "message.reaction_title": "{name} reaccionó {icon}",
     "message.send_failed": "Envío fallido",
     "message.delivery_unconfirmed": "Entrega sin confirmar",
+    "message.voicemail": "Buzón de voz",
     "composer.from": "De",
     "composer.message": "Mensaje",
     "composer.media_urls": "URLs de media",
     "composer.upload": "Subir media",
     "composer.send": "Enviar",
     "composer.requires_content": "Se requiere texto o URL de media.",
+    "schedule.title": "Programar envío",
+    "schedule.send_at": "Enviar a las",
+    "schedule.queue": "Encolar",
+    "schedule.queued": "Mensaje encolado.",
+    "schedule.queued_for": "En cola para {time}",
+    "schedule.cancel": "Cancelar",
+    "schedule.cancelled": "Mensaje programado cancelado.",
+    "schedule.choose_time": "Elige una hora de envío.",
+    "schedule.future_time": "Elige una hora futura.",
     "upload.default": "Subida",
     "upload.one": "Media subida.",
     "upload.many": "{count} archivos subidos.",
@@ -339,6 +467,25 @@ const I18N = {
     "identities.heading": "Identidades de envío",
     "identities.label": "Etiqueta de identidad",
     "identities.color": "Color de identidad",
+    "identities.autoreply": "Respuesta de ausencia",
+    "identities.autoreply_enabled": "Activar",
+    "identities.autoreply_message": "Mensaje automático",
+    "identities.autoreply_placeholder": "Gracias por escribir. Estoy ausente ahora y responderé cuando pueda.",
+    "identities.autoreply_cooldown": "Horas de espera",
+    "identities.autoreply_on": "Activa",
+    "identities.autoreply_off": "Inactiva",
+    "identities.discard_confirm": "¿Descartar los cambios no guardados del número?",
+    "voice.heading": "Llamadas",
+    "voice.forwarding": "Reenvío de llamadas",
+    "voice.forward_calls": "Reenviar llamadas entrantes",
+    "voice.forward_to": "Reenviar a",
+    "voice.forward_timeout": "Segundos de timbre",
+    "voice.voicemail": "Grabar buzón de voz",
+    "voice.voicemail_heading": "Buzón de voz",
+    "voice.greeting": "Saludo del buzón",
+    "voice.greeting_recording": "Grabación del saludo",
+    "voice.upload_greeting": "Subir grabación",
+    "voice.greeting_uploaded": "Grabación del saludo subida.",
     "contacts.sync": "Sincronizar",
     "contacts.find": "Buscar contacto",
     "contacts.add": "Agregar",
@@ -351,6 +498,7 @@ const I18N = {
     "status.delivery_failed": "Falló",
     "status.delivery_unconfirmed": "Sin confirmar",
     "status.queued": "En cola",
+    "status.scheduled": "Programado",
     "status.sending": "Enviando",
     "status.sent": "Enviado",
     "status.delivered": "Entregado",
@@ -386,6 +534,30 @@ const I18N = {
     "stats.texts": "Messages",
     "stats.media": "Médias",
     "stats.people": "Personnes",
+    "stats.title": "Stats",
+    "stats.description": "Totaux des messages et conversations.",
+    "stats.close": "Fermer les stats",
+    "stats.loading": "Chargement des stats...",
+    "stats.totals": "Totaux",
+    "stats.by_status": "Par statut",
+    "stats.by_source": "Par source",
+    "stats.recent": "Jours récents",
+    "stats.inbox_conversations": "Boîte",
+    "stats.hidden_conversations": "Masqués",
+    "stats.unread_conversations": "Non lus",
+    "stats.inbound_messages": "Entrants",
+    "stats.outbound_messages": "Sortants",
+    "stats.voicemails": "Messages vocaux",
+    "stats.failed_messages": "Échecs",
+    "stats.pending_messages": "En attente",
+    "refresh.pull": "Tirez pour actualiser",
+    "refresh.release": "Relâchez pour actualiser",
+    "refresh.refreshing": "Actualisation...",
+    "refresh.updated": "Actualisé.",
+    "selection.actions": "Actions de sélection",
+    "selection.count": "{count} sélectionnés",
+    "selection.none": "Sélectionnez au moins un fil.",
+    "selection.updated": "{count} mis à jour.",
     "conversation.new": "Nouvelle conversation",
     "conversation.back": "Retour aux conversations",
     "conversation.actions": "Actions de conversation",
@@ -414,6 +586,7 @@ const I18N = {
     "panel.collapse_label": "Panneau ›",
     "panel.show": "Afficher les identités et contacts",
     "panel.hide": "Masquer les identités et contacts",
+    "panel.close": "Fermer le panneau",
     "contact.name": "Nom",
     "contact.rename": "Renommer",
     "contact.name_placeholder": "Nom du contact",
@@ -430,12 +603,22 @@ const I18N = {
     "message.reaction_title": "{name} a réagi {icon}",
     "message.send_failed": "Envoi échoué",
     "message.delivery_unconfirmed": "Livraison non confirmée",
+    "message.voicemail": "Messagerie vocale",
     "composer.from": "De",
     "composer.message": "Message",
     "composer.media_urls": "URL de médias",
     "composer.upload": "Téléverser un média",
     "composer.send": "Envoyer",
     "composer.requires_content": "Un message ou une URL de média est requis.",
+    "schedule.title": "Programmer l'envoi",
+    "schedule.send_at": "Envoyer à",
+    "schedule.queue": "Mettre en file",
+    "schedule.queued": "Message mis en file.",
+    "schedule.queued_for": "En file pour {time}",
+    "schedule.cancel": "Annuler",
+    "schedule.cancelled": "Message programmé annulé.",
+    "schedule.choose_time": "Choisissez une heure d'envoi.",
+    "schedule.future_time": "Choisissez une heure future.",
     "upload.default": "Téléversement",
     "upload.one": "Média téléversé.",
     "upload.many": "{count} fichiers téléversés.",
@@ -447,6 +630,25 @@ const I18N = {
     "identities.heading": "Identités d'envoi",
     "identities.label": "Libellé d'identité",
     "identities.color": "Couleur d'identité",
+    "identities.autoreply": "Réponse d'absence",
+    "identities.autoreply_enabled": "Activer",
+    "identities.autoreply_message": "Message automatique",
+    "identities.autoreply_placeholder": "Merci pour votre message. Je suis absent et répondrai dès que possible.",
+    "identities.autoreply_cooldown": "Heures d'attente",
+    "identities.autoreply_on": "Active",
+    "identities.autoreply_off": "Inactive",
+    "identities.discard_confirm": "Ignorer les modifications non enregistrées du numéro ?",
+    "voice.heading": "Appels",
+    "voice.forwarding": "Transfert d'appel",
+    "voice.forward_calls": "Transférer les appels entrants",
+    "voice.forward_to": "Transférer vers",
+    "voice.forward_timeout": "Secondes de sonnerie",
+    "voice.voicemail": "Enregistrer un message vocal",
+    "voice.voicemail_heading": "Messagerie vocale",
+    "voice.greeting": "Annonce du répondeur",
+    "voice.greeting_recording": "Enregistrement de l'annonce",
+    "voice.upload_greeting": "Téléverser l'enregistrement",
+    "voice.greeting_uploaded": "Enregistrement de l'annonce téléversé.",
     "contacts.sync": "Synchroniser",
     "contacts.find": "Trouver un contact",
     "contacts.add": "Ajouter",
@@ -459,6 +661,7 @@ const I18N = {
     "status.delivery_failed": "Échec",
     "status.delivery_unconfirmed": "Non confirmé",
     "status.queued": "En attente",
+    "status.scheduled": "Programmé",
     "status.sending": "Envoi",
     "status.sent": "Envoyé",
     "status.delivered": "Livré",
@@ -481,16 +684,30 @@ function localizedStatusLabel(status, fallback = "") {
   return I18N.en[key] ? t(key) : fallback;
 }
 
+function updateDetailsControls() {
+  const overlayMode = isDetailsOverlayLayout();
+  const overlayOpen = document.body.classList.contains("details-overlay-open");
+  const collapsed = document.body.classList.contains("details-collapsed");
+  const visible = overlayMode ? overlayOpen : !collapsed;
+  els.toggleDetailsButton.textContent = visible ? t("panel.collapse_label") : t("panel.expand_label");
+  els.toggleDetailsButton.setAttribute("aria-pressed", visible ? "true" : "false");
+  els.toggleDetailsButton.setAttribute("aria-label", visible ? t("panel.hide") : t("panel.show"));
+  els.toggleDetailsButton.title = visible ? t("panel.hide") : t("panel.show");
+  if (els.mobilePanelButton) {
+    els.mobilePanelButton.setAttribute("aria-pressed", visible ? "true" : "false");
+    els.mobilePanelButton.setAttribute("aria-label", visible ? t("panel.hide") : t("panel.show"));
+    els.mobilePanelButton.title = visible ? t("panel.hide") : t("panel.show");
+  }
+  if (els.mobileDetailCloseButton) {
+    els.mobileDetailCloseButton.title = t("panel.close");
+    els.mobileDetailCloseButton.setAttribute("aria-label", t("panel.close"));
+  }
+}
+
 function setDetailsCollapsed(collapsed) {
   document.body.classList.toggle("details-collapsed", collapsed);
-  els.toggleDetailsButton.textContent = collapsed ? t("panel.expand_label") : t("panel.collapse_label");
-  els.toggleDetailsButton.setAttribute("aria-pressed", collapsed ? "true" : "false");
-  els.toggleDetailsButton.setAttribute(
-    "aria-label",
-    collapsed ? t("panel.show") : t("panel.hide"),
-  );
-  els.toggleDetailsButton.title = collapsed ? t("panel.show") : t("panel.hide");
   localStorage.setItem("detailsCollapsedDefaultHidden", collapsed ? "1" : "0");
+  updateDetailsControls();
   applyColumnWidths();
 }
 
@@ -525,9 +742,64 @@ function isDesktopLayout() {
   return window.matchMedia("(min-width: 761px)").matches;
 }
 
+function isDetailsOverlayLayout() {
+  return window.matchMedia("(max-width: 1120px)").matches;
+}
+
+function isDetailsOverlayOpen() {
+  return document.body.classList.contains("details-overlay-open");
+}
+
+function setDetailsOverlayOpen(open, { restoreFocus = false } = {}) {
+  const shouldOpen = Boolean(open) && isDetailsOverlayLayout();
+  document.body.classList.toggle("details-overlay-open", shouldOpen);
+  if (els.detailRail) {
+    if (shouldOpen) {
+      els.detailRail.setAttribute("role", "dialog");
+      els.detailRail.setAttribute("aria-modal", "true");
+      els.detailRail.setAttribute("aria-label", t("panel.label"));
+    } else {
+      els.detailRail.removeAttribute("role");
+      els.detailRail.removeAttribute("aria-modal");
+      els.detailRail.removeAttribute("aria-label");
+    }
+  }
+  updateDetailsControls();
+  syncNativePullRefreshEnabled();
+  if (shouldOpen) {
+    requestAnimationFrame(() => els.mobileDetailCloseButton?.focus());
+  } else if (restoreFocus) {
+    (isDetailsOverlayLayout() ? els.mobilePanelButton : els.toggleDetailsButton)?.focus();
+  }
+}
+
+function closeDetailsOverlay(options = {}) {
+  if (!isDetailsOverlayOpen()) return false;
+  setDetailsOverlayOpen(false, options);
+  return true;
+}
+
+function toggleDetailsPanel() {
+  if (isDetailsOverlayLayout()) {
+    setDetailsOverlayOpen(!isDetailsOverlayOpen(), { restoreFocus: true });
+    return;
+  }
+  setDetailsCollapsed(!document.body.classList.contains("details-collapsed"));
+}
+
+function syncDetailsLayout() {
+  if (!isDetailsOverlayLayout() && isDetailsOverlayOpen()) {
+    setDetailsOverlayOpen(false);
+    return;
+  }
+  updateDetailsControls();
+  syncNativePullRefreshEnabled();
+}
+
 function setMobileThreadOpen(open) {
   document.body.classList.toggle("mobile-thread-open", Boolean(open));
   requestAnimationFrame(updateComposerOffset);
+  syncNativePullRefreshEnabled();
 }
 
 function replaceNavigationState(view = "list") {
@@ -551,6 +823,7 @@ function pushMobileThreadState(detail = {}) {
 
 function closeMobileThread({ fromHistory = false } = {}) {
   clearStatusPoll();
+  closeDetailsOverlay();
   setMobileThreadOpen(false);
   if (!fromHistory && !isDesktopLayout() && history.state?.textingApp === true && history.state.view === "thread") {
     history.back();
@@ -577,6 +850,15 @@ function handleNavigationPop(event) {
 }
 
 window.textingCloseThreadForNativeBack = () => {
+  if (!els.statsModal.classList.contains("hidden")) {
+    closeStats();
+    return true;
+  }
+  if (state.selectedConversationIds.size) {
+    clearConversationSelection();
+    return true;
+  }
+  if (closeDetailsOverlay()) return true;
   closeMobileThread();
   return true;
 };
@@ -603,7 +885,7 @@ function updateComposerOffset() {
 
 function isDetailColumnVisible() {
   const detailRail = document.querySelector(".detail-rail");
-  return isDesktopLayout() && detailRail && getComputedStyle(detailRail).display !== "none";
+  return !isDetailsOverlayLayout() && detailRail && getComputedStyle(detailRail).display !== "none";
 }
 
 function clampColumnWidths(widths = state.columnWidths) {
@@ -674,6 +956,7 @@ function applyStaticTranslations() {
   document.documentElement.lang = state.language;
   document.title = t("app.title");
   document.querySelectorAll("[data-i18n]").forEach((element) => {
+    if (element.dataset.i18nDynamic === "true" || element === els.threadKind || element === els.threadTitle) return;
     element.textContent = t(element.dataset.i18n);
   });
   document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
@@ -685,6 +968,23 @@ function applyStaticTranslations() {
   document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
     element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
   });
+}
+
+function restoreThreadHeaderAfterStaticTranslations() {
+  if (state.currentConversation || els.threadPane.classList.contains("recipients-visible")) {
+    renderThreadHeader();
+    return;
+  }
+  if (state.currentConversationId) {
+    const conversation = state.conversations.find((item) => item.id === state.currentConversationId);
+    if (conversation) {
+      els.threadKind.textContent = conversation.kind === "group" ? t("thread.group") : t("thread.direct");
+      els.threadTitle.textContent = conversation.title || t("thread.conversation");
+    }
+    return;
+  }
+  els.threadKind.textContent = t("thread.conversation");
+  els.threadTitle.textContent = t("thread.select");
 }
 
 function normalizeHotkey(value) {
@@ -759,7 +1059,9 @@ function applyRuntimeSettings() {
   configureHotkeys();
   configureAutoRefresh();
   applyStaticTranslations();
+  restoreThreadHeaderAfterStaticTranslations();
   applyTheme(document.documentElement.dataset.theme || "light", { persist: false });
+  updateDetailsControls();
 }
 
 function focusAndSelect(element) {
@@ -813,10 +1115,44 @@ function renderSettings(payload = state.bootstrap?.settings) {
     .join("");
 }
 
+function voiceGreetingPreview(url) {
+  if (!url) return "";
+  return `<audio class="voice-greeting-preview" controls preload="metadata" src="${escapeHtml(url)}"></audio>`;
+}
+
+function renderVoiceGreetingSettingField(field, key, source, help) {
+  return `
+    <div class="setting-field setting-upload-field">
+      <span>
+        <strong>${escapeHtml(field.label)}</strong>
+        <small>${source}</small>
+        ${help}
+      </span>
+      <input
+        class="setting-voice-greeting-url"
+        data-setting-key="${key}"
+        data-setting-type="url"
+        type="url"
+        value="${escapeHtml(field.value || "")}"
+        autocomplete="off"
+      />
+      <div class="voice-upload-row">
+        <label class="small-button voice-greeting-upload-control">
+          <span>${escapeHtml(t("voice.upload_greeting"))}</span>
+          <input class="hidden-file-input setting-voice-greeting-file" type="file" accept="audio/*" />
+        </label>
+        ${voiceGreetingPreview(field.value || "")}
+      </div>
+    </div>`;
+}
+
 function renderSettingField(field) {
   const key = escapeHtml(field.key);
   const source = escapeHtml(settingSourceLabel(field));
   const help = field.help ? `<p class="setting-help">${escapeHtml(field.help)}</p>` : "";
+  if (field.key === "voice.voicemail_greeting_media_url") {
+    return renderVoiceGreetingSettingField(field, key, source, help);
+  }
   if (field.type === "bool") {
     const checked = String(field.value || "0") === "1" ? "checked" : "";
     return `
@@ -907,6 +1243,83 @@ function closeSettings() {
   els.settingsModal.classList.add("hidden");
 }
 
+function statsLabel(key) {
+  const normalized = String(key || "").toLowerCase();
+  const i18nKey = `stats.${normalized}`;
+  if (I18N.en[i18nKey]) return t(i18nKey);
+  if (I18N.en[`status.${normalized}`]) return t(`status.${normalized}`);
+  return normalized.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function renderStatsList(items = []) {
+  if (!items.length) return `<div class="empty-state">${escapeHtml(t("settings.empty"))}</div>`;
+  return items
+    .map(
+      ([label, value]) => `
+        <div class="stat-detail">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value ?? 0)}</strong>
+        </div>`,
+    )
+    .join("");
+}
+
+function renderStats(payload) {
+  const totals = payload?.totals || {};
+  const totalItems = [
+    [t("stats.threads"), totals.conversations],
+    [t("stats.inbox_conversations"), totals.inbox_conversations],
+    [t("stats.hidden_conversations"), totals.hidden_conversations],
+    [t("stats.unread_conversations"), totals.unread_conversations],
+    [t("stats.texts"), totals.messages],
+    [t("stats.inbound_messages"), totals.inbound_messages],
+    [t("stats.outbound_messages"), totals.outbound_messages],
+    [t("stats.voicemails"), totals.voicemails],
+    [t("stats.failed_messages"), totals.failed_messages],
+    [t("stats.pending_messages"), totals.pending_messages],
+    [t("stats.media"), totals.attachments],
+    [t("stats.people"), totals.contacts],
+  ];
+  const statusItems = (payload?.by_status || []).map((item) => [statsLabel(item.status), item.count]);
+  const sourceItems = (payload?.by_source || []).map((item) => [statsLabel(item.source), item.count]);
+  const recentItems = (payload?.recent_days || []).map((item) => [
+    item.day,
+    `${item.count ?? 0} (${item.inbound ?? 0}/${item.outbound ?? 0})`,
+  ]);
+  els.statsBody.innerHTML = `
+    <section class="stats-section">
+      <h3>${escapeHtml(t("stats.totals"))}</h3>
+      <div class="stats-grid">${renderStatsList(totalItems)}</div>
+    </section>
+    <section class="stats-section">
+      <h3>${escapeHtml(t("stats.by_status"))}</h3>
+      <div class="stats-grid">${renderStatsList(statusItems)}</div>
+    </section>
+    <section class="stats-section">
+      <h3>${escapeHtml(t("stats.by_source"))}</h3>
+      <div class="stats-grid">${renderStatsList(sourceItems)}</div>
+    </section>
+    <section class="stats-section">
+      <h3>${escapeHtml(t("stats.recent"))}</h3>
+      <div class="stats-grid">${renderStatsList(recentItems)}</div>
+    </section>`;
+}
+
+async function openStats() {
+  els.statsBody.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.loading"))}</div>`;
+  els.statsModal.classList.remove("hidden");
+  els.statsModal.focus();
+  try {
+    renderStats(await api("/api/stats"));
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function closeStats() {
+  els.statsModal.classList.add("hidden");
+}
+
 async function saveSettings(event) {
   event.preventDefault();
   const settings = {};
@@ -941,7 +1354,7 @@ async function saveSettings(event) {
     }
     state.bootstrap = await api("/api/bootstrap");
     applyRuntimeSettings();
-    renderBootstrap();
+    renderBootstrap({ forceIdentities: true });
     renderThreadHeader();
     renderConversations();
     renderMessages(state.messages, "preserve");
@@ -1055,6 +1468,54 @@ async function uploadSelectedMedia(files) {
     els.sendButton.disabled = false;
     els.mediaFiles.value = "";
     updateComposerOffset();
+  }
+}
+
+function updateVoiceGreetingPreview(container, url) {
+  if (!container) return;
+  const row = container.querySelector(".voice-upload-row");
+  const oldWrap = container.querySelector(".voice-greeting-preview-wrap");
+  let preview = row?.querySelector(".voice-greeting-preview") || container.querySelector(".voice-greeting-preview");
+  if (!url) {
+    if (preview) preview.remove();
+    if (oldWrap) oldWrap.remove();
+    return;
+  }
+  if (!preview) {
+    preview = document.createElement("audio");
+    preview.className = "voice-greeting-preview";
+    preview.controls = true;
+    preview.preload = "metadata";
+  }
+  if (row && preview.parentElement !== row) {
+    row.append(preview);
+  }
+  if (oldWrap) {
+    oldWrap.remove();
+  }
+  preview.src = url;
+}
+
+async function uploadVoiceGreetingFile(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const container = input.closest(".identity-card, .setting-field");
+  const urlInput = container?.querySelector(".identity-voice-greeting-media-url, .setting-voice-greeting-url");
+  const control = input.closest(".voice-greeting-upload-control");
+  input.disabled = true;
+  if (control) control.classList.add("disabled");
+  try {
+    const uploaded = await uploadMediaFile(file);
+    if (urlInput) urlInput.value = uploaded.url;
+    updateVoiceGreetingPreview(container, uploaded.url);
+    updateIdentityDirtyState(urlInput || input);
+    toast(t("voice.greeting_uploaded"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    input.disabled = false;
+    input.value = "";
+    if (control) control.classList.remove("disabled");
   }
 }
 
@@ -1302,6 +1763,29 @@ function participantSavedName(participant) {
   return display;
 }
 
+function isContactNameModalOpen() {
+  return Boolean(els.contactNameModal && !els.contactNameModal.classList.contains("hidden"));
+}
+
+function closeContactNameModal({ restoreFocus = false } = {}) {
+  if (!els.contactNameModal) return;
+  els.contactNameModal.classList.add("hidden");
+  if (restoreFocus) {
+    els.threadTitle?.focus();
+  }
+}
+
+function openContactNameModal(participant) {
+  if (!participant || !els.contactNameModal || !els.contactNameModalInput) return;
+  els.contactNameForm.classList.add("hidden");
+  els.contactNameModalInput.value = participantSavedName(participant);
+  els.contactNameModal.classList.remove("hidden");
+  requestAnimationFrame(() => {
+    els.contactNameModalInput.focus();
+    els.contactNameModalInput.select();
+  });
+}
+
 function conversationIsRead(conversation) {
   if (conversation?.manual_unread_at) return false;
   const last = conversation?.last_occurred_at || conversation?.last_message_at || conversation?.sort_at || "";
@@ -1313,8 +1797,14 @@ function setContactNameEditor(visible) {
   const participant = currentDirectParticipant();
   if (!participant || !visible) {
     els.contactNameForm.classList.add("hidden");
+    closeContactNameModal();
     return;
   }
+  if (!isDesktopLayout()) {
+    openContactNameModal(participant);
+    return;
+  }
+  closeContactNameModal();
   els.contactNameInput.value = participantSavedName(participant);
   els.contactNameForm.classList.remove("hidden");
   els.contactNameInput.focus();
@@ -1362,7 +1852,7 @@ function preferredReplyIdentity(conversation = state.currentConversation, messag
   return state.bootstrap?.default_identity || [...activePhones][0] || "";
 }
 
-function renderBootstrap() {
+function renderBootstrap({ forceIdentities = false } = {}) {
   const stats = state.bootstrap.stats || {};
   const previousFromNumber = els.fromNumber.value;
   els.statStrip.innerHTML = [
@@ -1385,7 +1875,11 @@ function renderBootstrap() {
     .join("");
   selectFromNumber(previousFromNumber || preferredReplyIdentity());
 
-  renderIdentities();
+  if (!forceIdentities && hasDirtyIdentityChanges()) {
+    updateIdentityDirtyStates();
+  } else {
+    renderIdentities();
+  }
   renderCategoryTabs();
 }
 
@@ -1432,11 +1926,94 @@ function clearConversationSearch({ focus = false } = {}) {
   return true;
 }
 
+function identitySnapshotFromIdentity(identity = {}) {
+  return {
+    label: String(identity.label || ""),
+    color: String(identity.color || "").toLowerCase(),
+    autoreply_enabled: Boolean(identity.autoreply_enabled),
+    autoreply_message: String(identity.autoreply_message || ""),
+    autoreply_cooldown_hours: String(Number(identity.autoreply_cooldown_hours) || 24),
+    voice_forwarding_enabled: Boolean(identity.voice_forwarding_enabled),
+    voice_forward_to_number: String(identity.voice_forward_to_number || ""),
+    voice_forward_timeout_seconds: String(Number(identity.voice_forward_timeout_seconds) || 20),
+    voice_voicemail_enabled: identity.voice_voicemail_enabled === false ? false : true,
+    voice_voicemail_greeting: String(identity.voice_voicemail_greeting || ""),
+    voice_voicemail_greeting_media_url: String(identity.voice_voicemail_greeting_media_url || ""),
+  };
+}
+
+function identitySnapshotFromCard(card) {
+  return {
+    label: card.querySelector(".identity-label")?.value || "",
+    color: String(card.querySelector(".identity-color")?.value || "").toLowerCase(),
+    autoreply_enabled: Boolean(card.querySelector(".identity-autoreply-enabled")?.checked),
+    autoreply_message: card.querySelector(".identity-autoreply-message")?.value || "",
+    autoreply_cooldown_hours: String(Number(card.querySelector(".identity-autoreply-cooldown-hours")?.value) || 24),
+    voice_forwarding_enabled: Boolean(card.querySelector(".identity-voice-forwarding-enabled")?.checked),
+    voice_forward_to_number: card.querySelector(".identity-voice-forward-to")?.value || "",
+    voice_forward_timeout_seconds: String(Number(card.querySelector(".identity-voice-forward-timeout")?.value) || 20),
+    voice_voicemail_enabled: Boolean(card.querySelector(".identity-voice-voicemail-enabled")?.checked),
+    voice_voicemail_greeting: card.querySelector(".identity-voice-greeting")?.value || "",
+    voice_voicemail_greeting_media_url: card.querySelector(".identity-voice-greeting-media-url")?.value || "",
+  };
+}
+
+function isIdentityCardDirty(card) {
+  if (!card?.dataset?.id) return false;
+  const identity = (state.bootstrap?.identities || []).find((item) => String(item.id) === String(card.dataset.id));
+  if (!identity) return false;
+  return JSON.stringify(identitySnapshotFromCard(card)) !== JSON.stringify(identitySnapshotFromIdentity(identity));
+}
+
+function updateIdentityDirtyState(target) {
+  const card = target?.closest?.(".identity-card");
+  if (!card) return;
+  card.classList.toggle("identity-dirty", isIdentityCardDirty(card));
+}
+
+function dirtyIdentityCards() {
+  return [...els.identityList.querySelectorAll(".identity-card")].filter(isIdentityCardDirty);
+}
+
+function hasDirtyIdentityChanges() {
+  return dirtyIdentityCards().length > 0;
+}
+
+function updateIdentityDirtyStates() {
+  els.identityList.querySelectorAll(".identity-card").forEach((card) => {
+    card.classList.toggle("identity-dirty", isIdentityCardDirty(card));
+  });
+}
+
+function discardIdentityChanges() {
+  renderIdentities();
+}
+
+function confirmDiscardIdentityChanges() {
+  if (!hasDirtyIdentityChanges()) return true;
+  if (!window.confirm(t("identities.discard_confirm"))) return false;
+  discardIdentityChanges();
+  return true;
+}
+
 function renderIdentities() {
   els.identityList.innerHTML = (state.bootstrap.identities || [])
     .map(
-      (identity) => `
-        <article class="identity-card" data-id="${identity.id}">
+      (identity) => {
+        const autoreplyEnabled = identity.autoreply_enabled ? "checked" : "";
+        const autoreplyOpen = identity.autoreply_enabled ? "open" : "";
+        const autoreplyStatus = identity.autoreply_enabled ? t("identities.autoreply_on") : t("identities.autoreply_off");
+        const cooldown = Number(identity.autoreply_cooldown_hours) || 24;
+        const voiceForwardingEnabled = Boolean(identity.voice_forwarding_enabled);
+        const voiceVoicemailEnabled = identity.voice_voicemail_enabled === false ? false : true;
+        const voiceForwarding = voiceForwardingEnabled ? "checked" : "";
+        const voiceVoicemail = voiceVoicemailEnabled ? "checked" : "";
+        const voiceForwardingStatus = voiceForwardingEnabled ? t("identities.autoreply_on") : t("identities.autoreply_off");
+        const voiceVoicemailStatus = voiceVoicemailEnabled ? t("identities.autoreply_on") : t("identities.autoreply_off");
+        const voiceTimeout = Number(identity.voice_forward_timeout_seconds) || 20;
+        const voiceGreetingMediaUrl = identity.voice_voicemail_greeting_media_url || "";
+        return `
+        <article class="identity-card ${identity.autoreply_enabled ? "autoreply-on" : ""}" data-id="${identity.id}">
           <label class="swatch color-swatch" style="background:${escapeHtml(identity.color)}" title="${escapeHtml(t("identities.color"))}">
             <input class="identity-color" type="color" value="${escapeHtml(identity.color)}" aria-label="${escapeHtml(t("identities.color"))}" />
           </label>
@@ -1445,7 +2022,77 @@ function renderIdentities() {
             <div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div>
           </div>
           <button class="icon-button save-identity" title="${escapeHtml(t("common.save"))}" aria-label="${escapeHtml(t("common.save"))}">✓</button>
-        </article>`,
+          <details class="identity-autoreply" ${autoreplyOpen}>
+            <summary class="identity-autoreply-summary">
+              <strong>${escapeHtml(t("identities.autoreply"))}</strong>
+              <span class="identity-autoreply-status">${escapeHtml(autoreplyStatus)}</span>
+            </summary>
+            <div class="identity-autoreply-body">
+              <label class="identity-autoreply-toggle">
+                <input class="identity-autoreply-enabled" type="checkbox" ${autoreplyEnabled} />
+                <span>${escapeHtml(t("identities.autoreply_enabled"))}</span>
+              </label>
+              <textarea
+                class="identity-autoreply-message"
+                rows="3"
+                aria-label="${escapeHtml(t("identities.autoreply_message"))}"
+                placeholder="${escapeHtml(t("identities.autoreply_placeholder"))}"
+              >${escapeHtml(identity.autoreply_message || "")}</textarea>
+              <label class="identity-autoreply-cooldown">
+                <span>${escapeHtml(t("identities.autoreply_cooldown"))}</span>
+                <input class="identity-autoreply-cooldown-hours" type="number" min="1" step="1" value="${escapeHtml(cooldown)}" />
+              </label>
+            </div>
+          </details>
+          <details class="identity-voice identity-call-forwarding ${voiceForwardingEnabled ? "voice-on" : ""}">
+            <summary class="identity-autoreply-summary">
+              <strong>${escapeHtml(t("voice.forwarding"))}</strong>
+              <span class="identity-autoreply-status">${escapeHtml(voiceForwardingStatus)}</span>
+            </summary>
+            <div class="identity-voice-body">
+              <label class="identity-autoreply-toggle">
+                <input class="identity-voice-forwarding-enabled" type="checkbox" ${voiceForwarding} />
+                <span>${escapeHtml(t("voice.forward_calls"))}</span>
+              </label>
+              <label class="identity-voice-field">
+                <span>${escapeHtml(t("voice.forward_to"))}</span>
+                <input class="identity-voice-forward-to" type="text" value="${escapeHtml(identity.voice_forward_to_number || "")}" placeholder="+15551234567 or sip:alice@example.com" />
+              </label>
+              <label class="identity-voice-field">
+                <span>${escapeHtml(t("voice.forward_timeout"))}</span>
+                <input class="identity-voice-forward-timeout" type="number" min="5" max="120" step="1" value="${escapeHtml(voiceTimeout)}" />
+              </label>
+            </div>
+          </details>
+          <details class="identity-voice identity-voicemail ${voiceVoicemailEnabled ? "voice-on" : ""}">
+            <summary class="identity-autoreply-summary">
+              <strong>${escapeHtml(t("voice.voicemail_heading"))}</strong>
+              <span class="identity-autoreply-status">${escapeHtml(voiceVoicemailStatus)}</span>
+            </summary>
+            <div class="identity-voice-body">
+              <label class="identity-autoreply-toggle">
+                <input class="identity-voice-voicemail-enabled" type="checkbox" ${voiceVoicemail} />
+                <span>${escapeHtml(t("voice.voicemail"))}</span>
+              </label>
+              <label class="identity-voice-field">
+                <span>${escapeHtml(t("voice.greeting"))}</span>
+                <textarea class="identity-voice-greeting" rows="2">${escapeHtml(identity.voice_voicemail_greeting || "")}</textarea>
+              </label>
+              <div class="identity-voice-field voice-greeting-upload-field">
+                <span>${escapeHtml(t("voice.greeting_recording"))}</span>
+                <input class="identity-voice-greeting-media-url" type="url" value="${escapeHtml(voiceGreetingMediaUrl)}" placeholder="https://example.com/greeting.mp3" />
+                <div class="voice-upload-row">
+                  <label class="small-button voice-greeting-upload-control">
+                    <span>${escapeHtml(t("voice.upload_greeting"))}</span>
+                    <input class="hidden-file-input identity-voice-greeting-file" type="file" accept="audio/*" />
+                  </label>
+                  ${voiceGreetingPreview(voiceGreetingMediaUrl)}
+                </div>
+              </div>
+            </div>
+          </details>
+        </article>`;
+      },
     )
     .join("");
 }
@@ -1454,6 +2101,9 @@ function renderConversations() {
   const items = state.conversations
     .map((conversation) => {
       const active = conversation.id === state.currentConversationId ? "active" : "";
+      const selected = state.selectedConversationIds.has(Number(conversation.id));
+      const selectedClass = selected ? "selected" : "";
+      const selectingClass = state.selectedConversationIds.size ? "selecting" : "";
       const hasNewMessage = Boolean(conversation.needs_attention) && state.conversationCategory !== "hidden";
       const newMessageClass = hasNewMessage ? "new-message" : "";
       const failedClass = conversation.last_status_kind === "failed" ? "failed-message" : "";
@@ -1466,10 +2116,12 @@ function renderConversations() {
               detail: conversation.last_status_detail || lastStatusLabel || t("conversation.could_not_deliver"),
             })
           : "";
-      const preview = failedPreview || reactionPreviewText(conversation.last_text) || (lastStatusLabel ? lastStatusLabel : "");
+      const preview = failedPreview || messagePreviewText(conversation) || (lastStatusLabel ? lastStatusLabel : "");
       return `
-        <button class="conversation-item ${active} ${newMessageClass} ${failedClass}" data-id="${conversation.id}">
-          <div class="avatar">${escapeHtml(initials(title))}</div>
+        <button class="conversation-item ${active} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}">
+          <span class="avatar conversation-selector" role="checkbox" aria-checked="${selected ? "true" : "false"}" title="${escapeHtml(t("selection.actions"))}">
+            ${selected ? "✓" : escapeHtml(initials(title))}
+          </span>
           <div class="conversation-copy">
             <div class="conversation-top">
               <strong>${escapeHtml(title)}</strong>
@@ -1493,6 +2145,182 @@ function renderConversationsPreservingScroll() {
   const previousScrollTop = els.conversationList.scrollTop;
   renderConversations();
   els.conversationList.scrollTop = previousScrollTop;
+}
+
+function selectedConversationIds() {
+  return [...state.selectedConversationIds].filter((id) => Number.isFinite(id) && id > 0);
+}
+
+function updateSelectionToolbar() {
+  const count = state.selectedConversationIds.size;
+  document.body.classList.toggle("conversation-selecting", count > 0);
+  els.selectionToolbar.classList.toggle("hidden", count === 0);
+  els.selectionCount.textContent = t("selection.count", { count });
+  syncNativePullRefreshEnabled();
+}
+
+function clearConversationSelection() {
+  if (!state.selectedConversationIds.size) return;
+  state.selectedConversationIds.clear();
+  updateSelectionToolbar();
+  renderConversationsPreservingScroll();
+}
+
+function toggleConversationSelection(id, selected) {
+  const conversationId = Number(id);
+  if (!conversationId) return;
+  const nextSelected = selected ?? !state.selectedConversationIds.has(conversationId);
+  if (nextSelected) {
+    state.selectedConversationIds.add(conversationId);
+  } else {
+    state.selectedConversationIds.delete(conversationId);
+  }
+  updateSelectionToolbar();
+  renderConversationsPreservingScroll();
+}
+
+async function bulkConversationAction(action) {
+  const ids = selectedConversationIds();
+  if (!ids.length) {
+    toast(t("selection.none"));
+    return;
+  }
+  const controls = [els.bulkReadButton, els.bulkUnreadButton, els.bulkHideButton, els.selectionCancelButton];
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    const payload = await api("/api/conversations/bulk", {
+      method: "POST",
+      body: JSON.stringify({ action, conversation_ids: ids }),
+    });
+    clearConversationSelection();
+    state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
+    renderBootstrap();
+    await loadConversations({ append: false });
+    if (state.currentConversationId && ids.includes(state.currentConversationId) && action === "hide") {
+      const next = state.conversations[0];
+      if (next) {
+        await openConversation(next.id);
+      } else {
+        startNewConversation();
+      }
+    } else if (state.currentConversationId) {
+      await refreshCurrentConversationStatus();
+    }
+    toast(t("selection.updated", { count: payload.updated ?? ids.length }));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    controls.forEach((control) => {
+      control.disabled = false;
+    });
+  }
+}
+
+function clearConversationPressTimer() {
+  if (state.conversationPressTimer) {
+    clearTimeout(state.conversationPressTimer);
+    state.conversationPressTimer = null;
+  }
+  state.conversationPressTargetId = null;
+}
+
+async function hideConversationFromList(id) {
+  const conversationId = Number(id);
+  if (!conversationId) return;
+  try {
+    await api(`/api/conversations/${conversationId}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ archived: true }),
+    });
+    state.conversations = state.conversations.filter((conversation) => conversation.id !== conversationId);
+    state.selectedConversationIds.delete(conversationId);
+    updateSelectionToolbar();
+    renderConversationsPreservingScroll();
+    state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
+    renderBootstrap();
+    if (state.currentConversationId === conversationId) {
+      const next = state.conversations[0];
+      if (next) {
+        await openConversation(next.id);
+      } else {
+        startNewConversation();
+      }
+    }
+    toast(t("conversation.archived"));
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function resetConversationSwipe() {
+  const swipe = state.conversationSwipe;
+  if (swipe?.item) {
+    swipe.item.style.transform = "";
+    swipe.item.classList.remove("swiping");
+  }
+  state.conversationSwipe = null;
+}
+
+function beginConversationGesture(event) {
+  const item = event.target.closest(".conversation-item");
+  if (!item || event.button > 0 || event.target.closest("input, button:not(.conversation-item), textarea, select")) return;
+  const id = Number(item.dataset.id);
+  if (!id) return;
+  clearConversationPressTimer();
+  state.conversationPressTargetId = id;
+  state.conversationPressTimer = window.setTimeout(() => {
+    state.suppressConversationClickUntil = Date.now() + 500;
+    toggleConversationSelection(id, true);
+    clearConversationPressTimer();
+  }, 520);
+  if (event.pointerType === "touch" || !isDesktopLayout()) {
+    state.conversationSwipe = {
+      id,
+      item,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dx: 0,
+      dragging: false,
+    };
+  }
+}
+
+function moveConversationGesture(event) {
+  const swipe = state.conversationSwipe;
+  if (!swipe || swipe.pointerId !== event.pointerId) return;
+  const dx = event.clientX - swipe.startX;
+  const dy = event.clientY - swipe.startY;
+  swipe.dx = dx;
+  if (!swipe.dragging && dx > 12 && Math.abs(dx) > Math.abs(dy) * 1.25) {
+    swipe.dragging = true;
+    clearConversationPressTimer();
+  }
+  if (!swipe.dragging) {
+    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) clearConversationPressTimer();
+    return;
+  }
+  event.preventDefault();
+  const offset = clamp(dx, 0, 104);
+  swipe.item.classList.add("swiping");
+  swipe.item.style.transform = `translate3d(${offset}px, 0, 0)`;
+}
+
+function endConversationGesture(event) {
+  clearConversationPressTimer();
+  const swipe = state.conversationSwipe;
+  if (!swipe || swipe.pointerId !== event.pointerId) return;
+  const shouldHide = swipe.dragging && swipe.dx > 82;
+  const id = swipe.id;
+  resetConversationSwipe();
+  if (shouldHide) {
+    state.suppressConversationClickUntil = Date.now() + 500;
+    hideConversationFromList(id);
+  }
 }
 
 function scrollActiveConversationIntoView() {
@@ -1709,6 +2537,11 @@ function isPdfAttachment(attachment, url) {
   return contentType === "application/pdf" || /\.pdf([?#].*)?$/i.test(url || attachment.filename || "");
 }
 
+function isAudioAttachment(attachment, url) {
+  const contentType = (attachment.content_type || "").split(";", 1)[0].trim().toLowerCase();
+  return contentType.startsWith("audio/") || /\.(aac|flac|m4a|mp3|oga|ogg|opus|wav)([?#].*)?$/i.test(url || attachment.filename || "");
+}
+
 function pdfViewerUrl(url) {
   return `${url}${String(url).includes("#") ? "&" : "#"}toolbar=1&navpanes=0`;
 }
@@ -1717,15 +2550,16 @@ function renderAttachment(attachment) {
   const url = mediaUrl(attachment);
   if (!url) return "";
   const contentType = attachment.content_type || "";
+  const mediaKey = escapeHtml(normalizedMediaKey(url));
   if (isImageAttachment(attachment, url)) {
     const caption = attachment.filename || t("attachment.image");
     return `<a href="${escapeHtml(url)}" class="image-attachment" data-lightbox-src="${escapeHtml(url)}" data-lightbox-caption="${escapeHtml(caption)}" target="_blank"><img src="${escapeHtml(url)}" alt="" loading="lazy" /></a>`;
   }
   if (contentType.startsWith("video/")) {
-    return `<video src="${escapeHtml(url)}" controls preload="metadata"></video>`;
+    return `<video src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="metadata"></video>`;
   }
-  if (contentType.startsWith("audio/")) {
-    return `<audio src="${escapeHtml(url)}" controls preload="metadata"></audio>`;
+  if (isAudioAttachment(attachment, url)) {
+    return `<audio src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="metadata"></audio>`;
   }
   if (isPdfAttachment(attachment, url)) {
     const filename = attachment.filename || t("attachment.pdf");
@@ -1785,8 +2619,107 @@ function reactionPreviewText(text) {
   return reaction ? t("message.reaction_preview", { icon: reaction.icon }) : text;
 }
 
+function isVoicemailMessage(message) {
+  return String(message?.message_type || message?.last_message_type || "").toLowerCase() === "voicemail";
+}
+
+function messagePreviewText(conversation) {
+  const text = reactionPreviewText(conversation.last_text) || "";
+  if (!isVoicemailMessage(conversation)) return text;
+  return text ? `${t("message.voicemail")}: ${text}` : t("message.voicemail");
+}
+
+function normalizedMediaKey(url) {
+  const value = String(url || "");
+  if (!value) return "";
+  try {
+    return new URL(value, window.location.href).href;
+  } catch {
+    return value;
+  }
+}
+
+function mediaElementKey(element) {
+  return element.dataset.mediaKey || normalizedMediaKey(element.currentSrc || element.getAttribute("src") || "");
+}
+
+function captureMessageMediaPlayback() {
+  const states = new Map();
+  const occurrences = new Map();
+  els.messages.querySelectorAll("audio, video").forEach((element) => {
+    const key = mediaElementKey(element);
+    if (!key) return;
+    const index = occurrences.get(key) || 0;
+    occurrences.set(key, index + 1);
+    if (!states.has(key)) states.set(key, []);
+    states.get(key)[index] = {
+      currentTime: Number.isFinite(element.currentTime) ? element.currentTime : 0,
+      playing: !element.paused && !element.ended,
+      muted: element.muted,
+      volume: element.volume,
+      playbackRate: element.playbackRate,
+    };
+  });
+  return states;
+}
+
+function restoreMediaCurrentTime(element, currentTime) {
+  if (!Number.isFinite(currentTime) || currentTime <= 0) return;
+  const apply = () => {
+    try {
+      if (Math.abs(element.currentTime - currentTime) > 0.25) {
+        element.currentTime = currentTime;
+      }
+    } catch {
+      // Some browsers reject currentTime changes until metadata is ready.
+    }
+  };
+  if (element.readyState >= 1) {
+    apply();
+  } else {
+    element.addEventListener("loadedmetadata", apply, { once: true });
+  }
+}
+
+function resumeRestoredMedia(element, state) {
+  const resume = () => {
+    requestAnimationFrame(() => {
+      restoreMediaCurrentTime(element, state.currentTime);
+      const playResult = element.play();
+      if (playResult?.catch) playResult.catch(() => {});
+    });
+  };
+  if (element.readyState >= 1) {
+    resume();
+  } else {
+    element.addEventListener("loadedmetadata", resume, { once: true });
+  }
+}
+
+function restoreMessageMediaPlayback(states) {
+  if (!states?.size) return;
+  const occurrences = new Map();
+  els.messages.querySelectorAll("audio, video").forEach((element) => {
+    const key = mediaElementKey(element);
+    if (!key || !states.has(key)) return;
+    const index = occurrences.get(key) || 0;
+    occurrences.set(key, index + 1);
+    const state = states.get(key)[index];
+    if (!state) return;
+    element.muted = state.muted;
+    element.volume = state.volume;
+    element.playbackRate = state.playbackRate;
+    if (state.playing) {
+      resumeRestoredMedia(element, state);
+    } else {
+      restoreMediaCurrentTime(element, state.currentTime);
+    }
+  });
+}
+
 function renderMessages(messages, scrollMode = "bottom") {
   const wasNearBottom = isNearMessageBottom();
+  const mediaPlayback = captureMessageMediaPlayback();
   const visibleMessages = messagesWithInlineReactions(messages);
   if (!visibleMessages.length) {
     els.messages.innerHTML = `<div class="empty-state">${escapeHtml(t("messages.empty"))}</div>`;
@@ -1807,11 +2740,26 @@ function renderMessages(messages, scrollMode = "bottom") {
       const day = formatDay(message.occurred_at);
       const divider = day !== lastDay ? `<div class="day-divider">${escapeHtml(day)}</div>` : "";
       lastDay = day;
-      const attachments = (message.attachments || []).map(renderAttachment).join("");
+      const messageAttachments = message.attachments || [];
+      const attachments = messageAttachments.map(renderAttachment).join("");
+      const attachmentGridClass = messageAttachments.some((attachment) => isAudioAttachment(attachment, mediaUrl(attachment)))
+        ? "attachment-grid audio-attachment-grid"
+        : "attachment-grid";
       const reactions = renderMessageReactions(message);
+      const voicemailLabel = isVoicemailMessage(message)
+        ? `<div class="message-type-label">${escapeHtml(t("message.voicemail"))}</div>`
+        : "";
       const statusKind = message.status_kind || "neutral";
       const statusLabel = localizedStatusLabel(message.status, message.status_label || message.status || "");
       const statusDetail = message.status_detail || "";
+      const scheduledMessageId = message.scheduled_message_id ? String(message.scheduled_message_id) : "";
+      const isQueuedScheduledMessage = Boolean(scheduledMessageId) && message.source === "scheduled" && message.status === "scheduled";
+      const queuedDetail = isQueuedScheduledMessage
+        ? `<div class="message-queue-detail">${escapeHtml(t("schedule.queued_for", { time: formatTime(message.occurred_at, true) }))}</div>`
+        : "";
+      const cancelScheduledAction = isQueuedScheduledMessage
+        ? `<button class="message-inline-action" type="button" data-cancel-scheduled-id="${escapeHtml(scheduledMessageId)}">${escapeHtml(t("schedule.cancel"))}</button>`
+        : "";
       const bubbleStyle =
         message.direction === "outbound" && message.identity_color
           ? ` style="--message-out:${escapeHtml(message.identity_color)}"`
@@ -1828,13 +2776,16 @@ function renderMessages(messages, scrollMode = "bottom") {
         <article class="message-row ${message.direction} ${statusKind}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
-              ${attachments ? `<div class="attachment-grid">${attachments}</div>` : ""}
+              ${voicemailLabel}
+              ${attachments ? `<div class="${attachmentGridClass}">${attachments}</div>` : ""}
               ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
+              ${queuedDetail}
               ${failureDetail}
               <div class="message-meta">
                 <span>${escapeHtml(message.from_display || phoneDisplay(message.from_number))}</span>
                 <time>${escapeHtml(formatTime(message.occurred_at))}</time>
                 <span class="message-status ${escapeHtml(statusKind)}" title="${escapeHtml(statusDetail)}">${escapeHtml(statusLabel)}</span>
+                ${cancelScheduledAction}
               </div>
             </div>
             ${reactions}
@@ -1842,6 +2793,7 @@ function renderMessages(messages, scrollMode = "bottom") {
         </article>`;
       })
       .join("");
+  restoreMessageMediaPlayback(mediaPlayback);
   updateComposerOffset();
   if (scrollMode === "preserve") {
     els.messages.scrollTop = els.messages.scrollHeight - oldScrollHeight + oldScrollTop;
@@ -1853,7 +2805,7 @@ function renderMessages(messages, scrollMode = "bottom") {
 
 function watchMessageMediaForBottomStick(scrollMode, wasNearBottom = false) {
   const shouldStick = scrollMode === "bottom" || wasNearBottom;
-  const media = [...els.messages.querySelectorAll("img, video")];
+  const media = [...els.messages.querySelectorAll("img, video, audio")];
   if (!media.length) return;
   const keepBottomVisible = () => {
     updateComposerOffset();
@@ -1983,6 +2935,29 @@ function handleGlobalKeydown(event) {
     }
     return;
   }
+  const statsOpen = !els.statsModal.classList.contains("hidden");
+  if (statsOpen) {
+    if (event.key === "Escape") {
+      closeStats();
+      event.preventDefault();
+    }
+    return;
+  }
+  if (isContactNameModalOpen()) {
+    if (event.key === "Escape") {
+      closeContactNameModal({ restoreFocus: true });
+      event.preventDefault();
+    }
+    return;
+  }
+  const scheduleOpen = !els.scheduleModal.classList.contains("hidden");
+  if (scheduleOpen) {
+    if (event.key === "Escape") {
+      closeScheduleModal();
+      event.preventDefault();
+    }
+    return;
+  }
   const lightboxOpen = !els.lightbox.classList.contains("hidden");
   if (lightboxOpen) {
     if (event.key === "Escape") closeLightbox();
@@ -1991,6 +2966,15 @@ function handleGlobalKeydown(event) {
     if (["Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
     }
+    return;
+  }
+  if (event.key === "Escape" && closeDetailsOverlay({ restoreFocus: true })) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Escape" && state.selectedConversationIds.size) {
+    clearConversationSelection();
+    event.preventDefault();
     return;
   }
   if (event.key === "Escape" && els.conversationSearch.value && !isEditableKeyTarget(event.target)) {
@@ -2042,6 +3026,18 @@ function refreshQuery() {
   return state.currentConversationId ? `?conversation_id=${encodeURIComponent(state.currentConversationId)}` : "";
 }
 
+function conversationPayloadMatchesState(payload) {
+  return JSON.stringify(payload?.conversation || null) === JSON.stringify(state.currentConversation || null);
+}
+
+function messagePayloadMatchesState(payload) {
+  return (
+    JSON.stringify(payload?.messages || []) === JSON.stringify(state.messages || []) &&
+    Boolean(payload?.has_more) === Boolean(state.hasMoreMessages) &&
+    Number(payload?.older_count || 0) === Number(state.olderCount || 0)
+  );
+}
+
 async function pollForChanges({ prime = false, force = false } = {}) {
   if (!state.bootstrap || state.autoRefreshInFlight || document.hidden) return;
   state.autoRefreshInFlight = true;
@@ -2069,7 +3065,7 @@ async function pollForChanges({ prime = false, force = false } = {}) {
       });
     }
     if (conversationChanged && state.currentConversationId === conversationId) {
-      await refreshCurrentConversationStatus();
+      await refreshCurrentConversationStatus({ knownChanged: true, force });
     }
   } finally {
     state.autoRefreshInFlight = false;
@@ -2077,22 +3073,48 @@ async function pollForChanges({ prime = false, force = false } = {}) {
   }
 }
 
-async function refreshCurrentConversationStatus() {
+async function refreshCurrentConversationStatus({ knownChanged = false, force = false } = {}) {
   if (!state.currentConversationId || state.statusPollInFlight) return;
   state.statusPollInFlight = true;
   const conversationId = state.currentConversationId;
   const shouldStickToBottom = isNearMessageBottom();
   const limit = Math.max(80, state.messages.length || 0);
   try {
+    if (!knownChanged && !force) {
+      const refreshPayload = await api(`/api/refresh${refreshQuery()}`);
+      const previous = state.refreshTokens || {};
+      const next = refreshPayload.tokens || {};
+      if (Object.keys(previous).length && previous.conversation === next.conversation) {
+        state.lastThreadRefreshAt = Date.now();
+        return;
+      }
+      state.refreshTokens = next;
+      if (!Object.keys(previous).length && !next.conversation) {
+        state.lastThreadRefreshAt = Date.now();
+        return;
+      }
+    }
     const payload = await api(`/api/conversations/${conversationId}/messages?limit=${limit}`);
     if (state.currentConversationId !== conversationId) return;
+    const conversationChanged = force || !conversationPayloadMatchesState(payload);
+    const messagesChanged = force || !messagePayloadMatchesState(payload);
+    if (!conversationChanged && !messagesChanged) {
+      state.lastThreadRefreshAt = Date.now();
+      return;
+    }
     state.currentConversation = payload.conversation;
-    state.messages = payload.messages;
-    state.hasMoreMessages = payload.has_more;
-    state.olderCount = payload.older_count;
     state.lastThreadRefreshAt = Date.now();
-    renderThreadHeader();
-    renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
+    if (messagesChanged) {
+      state.messages = payload.messages;
+      state.hasMoreMessages = payload.has_more;
+      state.olderCount = payload.older_count;
+    }
+    if (conversationChanged || messagesChanged) {
+      renderThreadHeader();
+    }
+    if (messagesChanged) {
+      renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
+    }
     const current = state.conversations.find((conversation) => conversation.id === conversationId);
     if (current) {
       current.needs_attention = payload.conversation.needs_attention;
@@ -2106,6 +3128,28 @@ async function refreshCurrentConversationStatus() {
   }
 }
 
+function canUsePullRefresh() {
+  return (
+    isDetailsOverlayLayout() &&
+    !document.body.classList.contains("mobile-thread-open") &&
+    !document.body.classList.contains("details-overlay-open") &&
+    !state.selectedConversationIds.size &&
+    !state.isRefreshingFromPull &&
+    els.conversationList.scrollTop <= 0
+  );
+}
+
+function nativePullRefreshBridge() {
+  const bridge = window.SwitchboardAndroid;
+  return bridge && typeof bridge.setPullRefreshEnabled === "function" ? bridge : null;
+}
+
+function syncNativePullRefreshEnabled() {
+  const bridge = nativePullRefreshBridge();
+  if (!bridge) return;
+  bridge.setPullRefreshEnabled(canUsePullRefresh() || state.isRefreshingFromPull);
+}
+
 async function refreshForegroundData({ force = false } = {}) {
   if (!state.bootstrap || state.foregroundRefreshInFlight || document.hidden) return;
   const now = Date.now();
@@ -2115,17 +3159,95 @@ async function refreshForegroundData({ force = false } = {}) {
   if (!listIsStale && !threadIsStale) return;
   state.foregroundRefreshInFlight = true;
   try {
-    if (listIsStale) {
-      state.bootstrap = await api("/api/bootstrap");
-      applyRuntimeSettings();
-      renderBootstrap();
-      await loadConversations({ append: false, preserveScroll: true });
-    }
-    if (threadIsStale && state.currentConversationId) {
-      await refreshCurrentConversationStatus();
-    }
+    await pollForChanges({ force });
   } finally {
     state.foregroundRefreshInFlight = false;
+  }
+}
+
+function setPullRefreshState(status, distance = 0) {
+  if (!els.pullRefreshIndicator) return;
+  if (nativePullRefreshBridge()) {
+    els.pullRefreshIndicator.classList.remove("visible", "ready", "refreshing");
+    els.pullRefreshIndicator.textContent = "";
+    els.pullRefreshIndicator.style.transform = "translate3d(-50%, 0, 0)";
+    return;
+  }
+  const visible = status !== "idle";
+  const offset = Math.min(Math.max(distance, 0), 78);
+  els.pullRefreshIndicator.classList.toggle("visible", visible);
+  els.pullRefreshIndicator.classList.toggle("ready", status === "ready");
+  els.pullRefreshIndicator.classList.toggle("refreshing", status === "refreshing");
+  els.pullRefreshIndicator.textContent = "";
+  els.pullRefreshIndicator.style.transform = visible
+    ? `translate3d(-50%, ${offset}px, 0)`
+    : "translate3d(-50%, 0, 0)";
+}
+
+async function refreshFromPull() {
+  if (state.isRefreshingFromPull) return true;
+  state.isRefreshingFromPull = true;
+  syncNativePullRefreshEnabled();
+  setPullRefreshState("refreshing", 72);
+  try {
+    await refreshForegroundData({ force: true });
+    await loadConversations({ append: false, preserveScroll: true });
+    toast(t("refresh.updated"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.isRefreshingFromPull = false;
+    syncNativePullRefreshEnabled();
+    window.setTimeout(() => setPullRefreshState("idle"), 250);
+  }
+  return true;
+}
+
+window.textingRefreshFromNativePull = () => {
+  if (!canUsePullRefresh()) return false;
+  refreshFromPull();
+  return true;
+};
+
+function beginPullRefresh(event) {
+  if (!event.touches || event.touches.length !== 1 || !isDetailsOverlayLayout()) return;
+  if (nativePullRefreshBridge()) return;
+  if (!canUsePullRefresh()) return;
+  state.pullRefresh = {
+    startY: event.touches[0].clientY,
+    distance: 0,
+    active: false,
+  };
+}
+
+function movePullRefresh(event) {
+  const pull = state.pullRefresh;
+  if (!pull || !event.touches || event.touches.length !== 1) return;
+  const dy = event.touches[0].clientY - pull.startY;
+  if (dy <= 0) return;
+  if (els.conversationList.scrollTop > 0) {
+    state.pullRefresh = null;
+    setPullRefreshState("idle");
+    return;
+  }
+  pull.distance = Math.pow(dy, 0.82);
+  pull.active = pull.distance > 12;
+  if (!pull.active) return;
+  event.preventDefault();
+  setPullRefreshState(pull.distance > 68 ? "ready" : "pulling", pull.distance);
+}
+
+function endPullRefresh() {
+  const pull = state.pullRefresh;
+  state.pullRefresh = null;
+  if (!pull?.active) {
+    setPullRefreshState("idle");
+    return;
+  }
+  if (pull.distance > 68) {
+    refreshFromPull();
+  } else {
+    setPullRefreshState("idle");
   }
 }
 
@@ -2194,6 +3316,7 @@ function bindColumnResizers() {
   window.addEventListener("pointerup", endDrag);
   window.addEventListener("pointercancel", endDrag);
   window.addEventListener("resize", () => {
+    syncDetailsLayout();
     applyColumnWidths();
     updateComposerOffset();
   });
@@ -2233,6 +3356,7 @@ async function loadConversations({ append = false, preserveScroll = false, limit
       if (!append) {
         els.conversationList.scrollTop = preserveScroll ? previousScrollTop : 0;
       }
+      syncNativePullRefreshEnabled();
     }
   }
 }
@@ -2240,13 +3364,16 @@ async function loadConversations({ append = false, preserveScroll = false, limit
 async function openConversation(id, options = {}) {
   const updateHistory = options.updateHistory !== false;
   clearStatusPoll();
-  setMobileThreadOpen(true);
   const conversationId = Number(id);
-  if (updateHistory) {
-    pushMobileThreadState({ conversationId });
+  if (!conversationId) return;
+  const requestSeq = ++state.openConversationSeq;
+  const shouldOpenBeforeLoad = isDesktopLayout() || document.body.classList.contains("mobile-thread-open");
+  if (shouldOpenBeforeLoad) {
+    setMobileThreadOpen(true);
   }
-  state.currentConversationId = conversationId;
   const payload = await api(`/api/conversations/${id}/messages?limit=80`);
+  if (requestSeq !== state.openConversationSeq) return;
+  state.currentConversationId = conversationId;
   state.currentConversation = payload.conversation;
   state.messages = payload.messages;
   state.hasMoreMessages = payload.has_more;
@@ -2257,6 +3384,12 @@ async function openConversation(id, options = {}) {
   scrollActiveConversationIntoView();
   renderThreadHeader();
   renderMessages(state.messages, "bottom");
+  if (updateHistory) {
+    pushMobileThreadState({ conversationId });
+  }
+  if (!shouldOpenBeforeLoad) {
+    setMobileThreadOpen(true);
+  }
   scheduleStatusPoll();
   pollForChanges({ prime: true }).catch((error) => toast(error.message));
   if (state.bootstrap?.mark_read_on_open && !conversationIsRead(state.currentConversation)) {
@@ -2361,6 +3494,7 @@ async function loadOlderMessages() {
 function startNewConversation(options = {}) {
   const updateHistory = options.updateHistory !== false;
   clearStatusPoll();
+  state.openConversationSeq += 1;
   setMobileThreadOpen(true);
   if (updateHistory) {
     pushMobileThreadState({ draft: true });
@@ -2437,41 +3571,54 @@ function currentRecipients() {
   return state.recipientDraft;
 }
 
-async function sendCurrentMessage() {
+function currentComposerDraft() {
   const text = els.messageText.value.trim();
   const mediaUrls = els.mediaUrls.value
     .split(/[\n,]+/)
     .map((x) => x.trim())
     .filter(Boolean);
   mediaUrls.push(...state.uploadedMedia.map((item) => item.url).filter(Boolean));
-  const toNumbers = currentRecipients();
-  if (!toNumbers.length) {
+  return {
+    conversation_id: state.currentConversationId,
+    from_number: els.fromNumber.value,
+    to_numbers: currentRecipients(),
+    text,
+    media_urls: mediaUrls,
+  };
+}
+
+function validateComposerDraft(draft) {
+  if (!draft.to_numbers.length) {
     toast(t("recipient.add_one"));
-    return;
+    return false;
   }
-  if (!text && !mediaUrls.length) {
+  if (!draft.text && !draft.media_urls.length) {
     showComposerError(t("composer.requires_content"));
     toast(t("composer.requires_content"));
-    return;
+    return false;
   }
+  return true;
+}
+
+function clearComposerDraft() {
+  els.messageText.value = "";
+  els.mediaUrls.value = "";
+  state.uploadedMedia = [];
+  renderUploadedMedia();
+  updateMessageCounter();
+}
+
+async function sendCurrentMessage() {
+  const draft = currentComposerDraft();
+  if (!validateComposerDraft(draft)) return;
   showComposerError("");
   els.sendButton.disabled = true;
   try {
     await api("/api/messages", {
       method: "POST",
-      body: JSON.stringify({
-        conversation_id: state.currentConversationId,
-        from_number: els.fromNumber.value,
-        to_numbers: toNumbers,
-        text,
-        media_urls: mediaUrls,
-      }),
+      body: JSON.stringify(draft),
     });
-    els.messageText.value = "";
-    els.mediaUrls.value = "";
-    state.uploadedMedia = [];
-    renderUploadedMedia();
-    updateMessageCounter();
+    clearComposerDraft();
     await loadConversations();
     if (state.currentConversationId) {
       await openConversation(state.currentConversationId);
@@ -2487,19 +3634,204 @@ async function sendCurrentMessage() {
   }
 }
 
+function dateTimeLocalValue(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    "-",
+    pad(date.getMonth() + 1),
+    "-",
+    pad(date.getDate()),
+    "T",
+    pad(date.getHours()),
+    ":",
+    pad(date.getMinutes()),
+  ].join("");
+}
+
+function defaultScheduleDate() {
+  const date = new Date(Date.now() + 60 * 60 * 1000);
+  date.setSeconds(0, 0);
+  const minutes = date.getMinutes();
+  const rounded = Math.ceil(minutes / 5) * 5;
+  date.setMinutes(rounded);
+  return date;
+}
+
+function savedScheduleTime() {
+  const value = localStorage.getItem(SCHEDULE_TIME_KEY) || "";
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date <= new Date()) return "";
+  return value;
+}
+
+function rememberScheduleTime(value) {
+  if (value) {
+    localStorage.setItem(SCHEDULE_TIME_KEY, value);
+  }
+}
+
+function setScheduleModalOpen(open) {
+  els.scheduleModal.classList.toggle("hidden", !open);
+  if (open) {
+    const defaultDate = defaultScheduleDate();
+    els.scheduleTime.min = dateTimeLocalValue(new Date(Date.now() + 60 * 1000));
+    const activeValue = els.scheduleTime.value || savedScheduleTime();
+    if (activeValue && new Date(activeValue) > new Date()) {
+      els.scheduleTime.value = activeValue;
+    } else {
+      els.scheduleTime.value = dateTimeLocalValue(defaultDate);
+    }
+    requestAnimationFrame(() => els.scheduleTime.focus());
+  }
+}
+
+function openScheduleModal() {
+  const draft = currentComposerDraft();
+  if (!validateComposerDraft(draft)) return;
+  showComposerError("");
+  setScheduleModalOpen(true);
+}
+
+function closeScheduleModal() {
+  setScheduleModalOpen(false);
+}
+
+async function scheduleCurrentMessage(event) {
+  event.preventDefault();
+  const draft = currentComposerDraft();
+  if (!validateComposerDraft(draft)) return;
+  if (!els.scheduleTime.value) {
+    toast(t("schedule.choose_time"));
+    return;
+  }
+  const scheduledDate = new Date(els.scheduleTime.value);
+  if (Number.isNaN(scheduledDate.getTime()) || scheduledDate <= new Date()) {
+    toast(t("schedule.future_time"));
+    return;
+  }
+  showComposerError("");
+  els.sendButton.disabled = true;
+  try {
+    const payload = await api("/api/messages/schedule", {
+      method: "POST",
+      body: JSON.stringify({
+        ...draft,
+        scheduled_for: scheduledDate.toISOString(),
+      }),
+    });
+    rememberScheduleTime(els.scheduleTime.value);
+    closeScheduleModal();
+    clearComposerDraft();
+    await loadConversations({ preserveScroll: true });
+    if (payload.conversation_id) {
+      await openConversation(payload.conversation_id);
+    }
+    toast(t("schedule.queued"));
+  } catch (error) {
+    showComposerError(error.message);
+    toast(error.message);
+  } finally {
+    els.sendButton.disabled = false;
+  }
+}
+
+async function cancelScheduledMessage(scheduledId, button) {
+  const id = Number(scheduledId);
+  if (!id) return;
+  if (button) button.disabled = true;
+  try {
+    const payload = await api(`/api/messages/schedule/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      body: "{}",
+    });
+    toast(t("schedule.cancelled"));
+    await loadConversations({
+      preserveScroll: true,
+      limit: Math.max(80, state.conversations.length || 0),
+    });
+    const conversationId = Number(payload.conversation_id || state.currentConversationId || 0);
+    if (conversationId && state.currentConversationId === conversationId) {
+      await refreshCurrentConversationStatus();
+    }
+  } catch (error) {
+    toast(error.message);
+    if (button) button.disabled = false;
+  }
+}
+
+function clearSendPressTimer() {
+  if (state.sendPressTimer) {
+    clearTimeout(state.sendPressTimer);
+    state.sendPressTimer = null;
+  }
+}
+
+function setSendSchedulingIndicator(active) {
+  els.sendButton.classList.toggle("is-scheduling", active);
+  els.sendButton.textContent = active ? SCHEDULE_SEND_SYMBOL : SEND_NOW_SYMBOL;
+  const label = active ? t("schedule.title") : t("composer.send");
+  els.sendButton.title = label;
+  els.sendButton.setAttribute("aria-label", label);
+}
+
+function startSendPress(event) {
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  if (els.sendButton.disabled) return;
+  clearSendPressTimer();
+  state.sendHoldTriggered = false;
+  setSendSchedulingIndicator(true);
+  state.sendPressTimer = window.setTimeout(() => {
+    state.sendPressTimer = null;
+    state.sendHoldTriggered = true;
+    setSendSchedulingIndicator(false);
+    openScheduleModal();
+  }, SEND_HOLD_MS);
+}
+
+function endSendPress() {
+  clearSendPressTimer();
+  if (!state.sendHoldTriggered) {
+    setSendSchedulingIndicator(false);
+  }
+}
+
 async function saveIdentity(card) {
   const id = card.dataset.id;
   const label = card.querySelector(".identity-label").value;
   const color = card.querySelector(".identity-color").value;
+  const autoreplyEnabled = card.querySelector(".identity-autoreply-enabled").checked;
+  const autoreplyMessage = card.querySelector(".identity-autoreply-message").value;
+  const autoreplyCooldownHours = card.querySelector(".identity-autoreply-cooldown-hours").value;
+  const voiceForwardingEnabled = card.querySelector(".identity-voice-forwarding-enabled").checked;
+  const voiceForwardToNumber = card.querySelector(".identity-voice-forward-to").value;
+  const voiceForwardTimeoutSeconds = card.querySelector(".identity-voice-forward-timeout").value;
+  const voiceVoicemailEnabled = card.querySelector(".identity-voice-voicemail-enabled").checked;
+  const voiceVoicemailGreeting = card.querySelector(".identity-voice-greeting").value;
+  const voiceVoicemailGreetingMediaUrl = card.querySelector(".identity-voice-greeting-media-url").value;
   try {
     const payload = await api(`/api/identities/${id}`, {
       method: "PUT",
-      body: JSON.stringify({ label, color, is_active: true }),
+      body: JSON.stringify({
+        label,
+        color,
+        is_active: true,
+        autoreply_enabled: autoreplyEnabled,
+        autoreply_message: autoreplyMessage,
+        autoreply_cooldown_hours: autoreplyCooldownHours,
+        voice_forwarding_enabled: voiceForwardingEnabled,
+        voice_forward_to_number: voiceForwardToNumber,
+        voice_forward_timeout_seconds: voiceForwardTimeoutSeconds,
+        voice_voicemail_enabled: voiceVoicemailEnabled,
+        voice_voicemail_greeting: voiceVoicemailGreeting,
+        voice_voicemail_greeting_media_url: voiceVoicemailGreetingMediaUrl,
+      }),
     });
     const index = state.bootstrap.identities.findIndex((item) => item.id === payload.identity.id);
     if (index >= 0) state.bootstrap.identities[index] = payload.identity;
     applyIdentityToLoadedState(payload.identity);
-    renderBootstrap();
+    renderBootstrap({ forceIdentities: true });
     renderThreadHeader();
     renderMessages(state.messages, "preserve");
     renderConversationsPreservingScroll();
@@ -2534,13 +3866,15 @@ async function searchContacts() {
 
 async function saveCurrentContactName() {
   const participant = currentDirectParticipant();
-  const displayName = els.contactNameInput.value.trim();
+  const form = isContactNameModalOpen() ? els.contactNameModalForm : els.contactNameForm;
+  const input = isContactNameModalOpen() ? els.contactNameModalInput : els.contactNameInput;
+  const displayName = input.value.trim();
   if (!participant) return;
   if (!displayName) {
     toast(t("contact.enter_name"));
     return;
   }
-  const controls = els.contactNameForm.querySelectorAll("input, button");
+  const controls = form.querySelectorAll("input, button");
   controls.forEach((control) => {
     control.disabled = true;
   });
@@ -2587,17 +3921,59 @@ function bindEvents() {
     const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     applyTheme(current === "dark" ? "light" : "dark");
   });
-  els.settingsButton.addEventListener("click", openSettings);
+  els.settingsButton.addEventListener("click", () => {
+    if (confirmDiscardIdentityChanges()) openSettings();
+  });
   els.settingsClose.addEventListener("click", closeSettings);
   els.settingsCancel.addEventListener("click", closeSettings);
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettings();
   });
-  els.settingsForm.addEventListener("submit", saveSettings);
-  els.conversationList.addEventListener("click", (event) => {
-    const button = event.target.closest(".conversation-item");
-    if (button) openConversation(button.dataset.id).catch((error) => toast(error.message));
+  els.settingsSections.addEventListener("change", (event) => {
+    const voiceGreetingFile = event.target.closest(".setting-voice-greeting-file");
+    if (voiceGreetingFile) uploadVoiceGreetingFile(voiceGreetingFile);
   });
+  els.settingsForm.addEventListener("submit", saveSettings);
+  els.statsButton.addEventListener("click", openStats);
+  els.statsClose.addEventListener("click", closeStats);
+  els.statsModal.addEventListener("click", (event) => {
+    if (event.target === els.statsModal) closeStats();
+  });
+  els.selectionCancelButton.addEventListener("click", clearConversationSelection);
+  els.bulkReadButton.addEventListener("click", () => bulkConversationAction("read"));
+  els.bulkUnreadButton.addEventListener("click", () => bulkConversationAction("unread"));
+  els.bulkHideButton.addEventListener("click", () => bulkConversationAction("hide"));
+  els.conversationList.addEventListener("click", (event) => {
+    if (Date.now() < state.suppressConversationClickUntil) {
+      event.preventDefault();
+      return;
+    }
+    const button = event.target.closest(".conversation-item");
+    if (!button) return;
+    if (event.target.closest(".conversation-selector") || state.selectedConversationIds.size) {
+      event.preventDefault();
+      toggleConversationSelection(button.dataset.id);
+      return;
+    }
+    if (state.threadNavigationInFlight) return;
+    state.threadNavigationInFlight = true;
+    openConversation(button.dataset.id)
+      .catch((error) => toast(error.message))
+      .finally(() => {
+        state.threadNavigationInFlight = false;
+      });
+  });
+  els.conversationList.addEventListener("pointerdown", beginConversationGesture);
+  els.conversationList.addEventListener("pointermove", moveConversationGesture);
+  els.conversationList.addEventListener("pointerup", endConversationGesture);
+  els.conversationList.addEventListener("pointercancel", (event) => {
+    clearConversationPressTimer();
+    resetConversationSwipe(event);
+  });
+  els.conversationList.addEventListener("touchstart", beginPullRefresh, { passive: true });
+  els.conversationList.addEventListener("touchmove", movePullRefresh, { passive: false });
+  els.conversationList.addEventListener("touchend", endPullRefresh);
+  els.conversationList.addEventListener("touchcancel", endPullRefresh);
   els.conversationSearch.addEventListener("input", () => {
     scheduleConversationSearchLoad();
   });
@@ -2613,6 +3989,7 @@ function bindEvents() {
   });
   els.categoryTabs.forEach((tab) => {
     tab.addEventListener("click", async () => {
+      clearConversationSelection();
       state.conversationCategory = tab.dataset.category;
       localStorage.setItem("conversationCategory", state.conversationCategory);
       renderCategoryTabs();
@@ -2629,6 +4006,7 @@ function bindEvents() {
     });
   });
   els.conversationList.addEventListener("scroll", () => {
+    syncNativePullRefreshEnabled();
     const remaining =
       els.conversationList.scrollHeight - els.conversationList.scrollTop - els.conversationList.clientHeight;
     if (remaining < 600) {
@@ -2636,6 +4014,7 @@ function bindEvents() {
     }
   });
   els.newConversationButton.addEventListener("click", startNewConversation);
+  els.mobilePanelButton?.addEventListener("click", toggleDetailsPanel);
   els.threadTitle.addEventListener("click", openContactRename);
   els.threadTitle.addEventListener("keydown", (event) => {
     if (!["Enter", " "].includes(event.key)) return;
@@ -2643,9 +4022,18 @@ function bindEvents() {
     event.preventDefault();
     openContactRename();
   });
-  els.contactNameToggle.addEventListener("click", () => setContactNameEditor(true));
+  els.contactNameToggle.addEventListener("click", openContactRename);
   els.contactNameCancel.addEventListener("click", () => setContactNameEditor(false));
   els.contactNameForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveCurrentContactName();
+  });
+  els.contactNameModalClose?.addEventListener("click", () => closeContactNameModal({ restoreFocus: true }));
+  els.contactNameModalCancel?.addEventListener("click", () => closeContactNameModal({ restoreFocus: true }));
+  els.contactNameModal?.addEventListener("click", (event) => {
+    if (event.target === els.contactNameModal) closeContactNameModal({ restoreFocus: true });
+  });
+  els.contactNameModalForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     saveCurrentContactName();
   });
@@ -2711,7 +4099,25 @@ function bindEvents() {
     renderRecipientDraft();
     renderThreadHeader();
   });
-  els.sendButton.addEventListener("click", sendCurrentMessage);
+  els.sendButton.addEventListener("pointerdown", startSendPress);
+  els.sendButton.addEventListener("pointerup", endSendPress);
+  els.sendButton.addEventListener("pointerleave", endSendPress);
+  els.sendButton.addEventListener("pointercancel", endSendPress);
+  els.sendButton.addEventListener("contextmenu", (event) => event.preventDefault());
+  els.sendButton.addEventListener("click", (event) => {
+    if (state.sendHoldTriggered) {
+      event.preventDefault();
+      state.sendHoldTriggered = false;
+      return;
+    }
+    sendCurrentMessage();
+  });
+  els.scheduleForm.addEventListener("submit", scheduleCurrentMessage);
+  els.scheduleClose.addEventListener("click", closeScheduleModal);
+  els.scheduleCancel.addEventListener("click", closeScheduleModal);
+  els.scheduleModal.addEventListener("click", (event) => {
+    if (event.target === els.scheduleModal) closeScheduleModal();
+  });
   els.dealtButton.addEventListener("click", toggleCurrentConversationRead);
   els.archiveButton.addEventListener("click", () => {
     const archived = !Boolean(state.currentConversation?.is_archived);
@@ -2739,6 +4145,12 @@ function bindEvents() {
   els.messages.addEventListener("click", (event) => {
     if (event.target.closest("#loadOlderButton")) {
       loadOlderMessages().catch((error) => toast(error.message));
+      return;
+    }
+    const cancelScheduledButton = event.target.closest("[data-cancel-scheduled-id]");
+    if (cancelScheduledButton) {
+      event.preventDefault();
+      cancelScheduledMessage(cancelScheduledButton.dataset.cancelScheduledId, cancelScheduledButton).catch((error) => toast(error.message));
       return;
     }
     const imageLink = event.target.closest("[data-lightbox-src]");
@@ -2770,13 +4182,20 @@ function bindEvents() {
   window.addEventListener("pageshow", (event) => {
     refreshForegroundData({ force: Boolean(event.persisted) }).catch((error) => toast(error.message));
   });
-  window.addEventListener("popstate", handleNavigationPop);
-  els.toggleDetailsButton.addEventListener("click", () => {
-    setDetailsCollapsed(!document.body.classList.contains("details-collapsed"));
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasDirtyIdentityChanges()) return;
+    event.preventDefault();
+    event.returnValue = "";
   });
-  document.querySelector(".detail-rail").addEventListener("click", (event) => {
+  window.addEventListener("popstate", handleNavigationPop);
+  els.toggleDetailsButton.addEventListener("click", toggleDetailsPanel);
+  els.mobileDetailCloseButton?.addEventListener("click", () => {
+    setDetailsOverlayOpen(false, { restoreFocus: true });
+  });
+  els.detailRail.addEventListener("click", (event) => {
     const tab = event.target.closest(".tab");
     if (tab) {
+      if (tab.dataset.tab !== "identities" && !confirmDiscardIdentityChanges()) return;
       document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("active", item === tab));
       document.querySelector("#identitiesPanel").classList.toggle("active", tab.dataset.tab === "identities");
       document.querySelector("#contactsPanel").classList.toggle("active", tab.dataset.tab === "contacts");
@@ -2789,15 +4208,25 @@ function bindEvents() {
         startNewConversation();
       }
       addRecipient(contactButton.dataset.contactPhone, contactButton.dataset.contactName || "");
+      closeDetailsOverlay();
     }
   });
-  document.querySelector(".detail-rail").addEventListener("input", (event) => {
+  els.detailRail.addEventListener("input", (event) => {
+    const identityField = event.target.closest(".identity-card input, .identity-card textarea");
+    if (identityField) updateIdentityDirtyState(identityField);
     const colorInput = event.target.closest(".identity-color");
     if (!colorInput) return;
     const swatch = colorInput.closest(".color-swatch");
     if (swatch) swatch.style.background = colorInput.value;
   });
+  els.detailRail.addEventListener("change", (event) => {
+    const identityField = event.target.closest(".identity-card input, .identity-card textarea");
+    if (identityField) updateIdentityDirtyState(identityField);
+    const voiceGreetingFile = event.target.closest(".identity-voice-greeting-file");
+    if (voiceGreetingFile) uploadVoiceGreetingFile(voiceGreetingFile);
+  });
   els.syncContactsButton.addEventListener("click", async () => {
+    if (!confirmDiscardIdentityChanges()) return;
     els.syncContactsButton.disabled = true;
     try {
       const payload = await api("/api/contacts/sync", { method: "POST", body: "{}" });

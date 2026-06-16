@@ -7,6 +7,9 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
+import time
+from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http import HTTPStatus
@@ -15,10 +18,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import config
+from .autoreply import (
+    DEFAULT_AUTOREPLY_COOLDOWN_HOURS,
+    DEFAULT_AUTOREPLY_MESSAGE,
+    identity_autoreply_fields,
+    update_autoreply_rule,
+)
 from .contacts import ContactsError, active_provider, configured_providers
 from .contacts import save_contact_name as save_synced_contact_name
 from .contacts import start_autosync, sync_contacts
-from .db import connect, conversation_key, ensure_conversation, from_json, init_db
+from .db import connect, conversation_key, ensure_conversation, from_json, init_db, self_numbers
 from .fastmail import FastmailError
 from .google_contacts import GoogleContactsError
 from .messaging import MessagingError, configured_messaging_providers
@@ -27,9 +36,18 @@ from .phone import display_phone, normalize_phone
 from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values
 from .telnyx import TelnyxError
 from .telnyx import handle_webhook as handle_telnyx_webhook
-from .timeutil import now_est
+from .timeutil import EASTERN, now_est
 from .twilio import TwilioError
 from .twilio import handle_webhook as handle_twilio_webhook
+from .voice import (
+    VoiceError,
+    parse_voice_callback,
+    store_revai_callback,
+    store_voicemail_callback,
+    update_voice_rule,
+    voice_rule_fields,
+    voice_xml,
+)
 
 
 STATIC_DIR = config.ROOT / "static"
@@ -46,6 +64,38 @@ def _json_default(value):
 
 def _row_dict(row) -> dict:
     return dict(row) if row else {}
+
+
+def _identity_dict(row) -> dict:
+    identity = _row_dict(row)
+    if identity:
+        identity.update(identity_autoreply_fields(identity))
+        identity.update(voice_rule_fields(identity))
+    return identity
+
+
+def _identity_with_autoreply(conn, identity_id: int) -> dict:
+    row = conn.execute(
+        """
+        SELECT i.*,
+          COALESCE(ar.enabled, 0) AS autoreply_enabled,
+          COALESCE(ar.message, '') AS autoreply_message,
+          COALESCE(ar.cooldown_hours, ?) AS autoreply_cooldown_hours,
+          vr.phone_number AS voice_rule_phone_number,
+          COALESCE(vr.forwarding_enabled, 0) AS voice_forwarding_enabled,
+          COALESCE(vr.forward_to_number, '') AS voice_forward_to_number,
+          COALESCE(vr.forward_timeout_seconds, 20) AS voice_forward_timeout_seconds,
+          COALESCE(vr.voicemail_enabled, 1) AS voice_voicemail_enabled,
+          COALESCE(vr.voicemail_greeting, '') AS voice_voicemail_greeting,
+          COALESCE(vr.voicemail_greeting_media_url, '') AS voice_voicemail_greeting_media_url
+        FROM identities i
+        LEFT JOIN autoreply_rules ar ON ar.phone_number = i.phone_number
+        LEFT JOIN voice_rules vr ON vr.phone_number = i.phone_number
+        WHERE i.id = ?
+        """,
+        (DEFAULT_AUTOREPLY_COOLDOWN_HOURS, identity_id),
+    ).fetchone()
+    return _identity_dict(row)
 
 
 def _configured_upload_dir() -> Path:
@@ -309,10 +359,66 @@ def _mark_uploaded_attachments_local(message_id: int, media_urls: list[str]) -> 
         conn.close()
 
 
+def _scheduled_messages_for_conversation(conn, conversation_id: int) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM scheduled_messages
+        WHERE conversation_id = ?
+          AND status IN ('queued', 'sending', 'failed')
+        ORDER BY scheduled_for, id
+        """,
+        (conversation_id,),
+    ).fetchall()
+    scheduled = []
+    for row in rows:
+        to_numbers = from_json(row["to_numbers"], [])
+        media_urls = from_json(row["media_urls"], [])
+        failed = row["status"] == "failed"
+        attachments = [
+            {
+                "id": f"scheduled-{row['id']}-{index}",
+                "local_path": "",
+                "remote_url": url,
+                "content_type": mimetypes.guess_type(url)[0] or "",
+                "size": None,
+                "sha256": "",
+                "filename": Path(unquote(urlparse(url).path)).name,
+                "source": "scheduled",
+            }
+            for index, url in enumerate(media_urls)
+        ]
+        scheduled.append(
+            {
+                "id": f"scheduled-{row['id']}",
+                "scheduled_message_id": row["id"],
+                "conversation_id": conversation_id,
+                "direction": "outbound",
+                "from_number": row["from_number"],
+                "to_numbers": to_numbers,
+                "cc_numbers": [],
+                "text": row["text"],
+                "message_type": "MMS" if media_urls or len(to_numbers) > 1 else "SMS",
+                "status": "failed" if failed else "scheduled",
+                "status_label": "Failed" if failed else "Scheduled",
+                "status_kind": "failed" if failed else "pending",
+                "status_detail": row["failure"] if failed else f"Scheduled for {row['scheduled_for']}",
+                "occurred_at": row["scheduled_for"],
+                "source": "scheduled",
+                "raw_json": None,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "from_display": _contact_name(conn, row["from_number"]),
+                "attachments": attachments,
+            }
+        )
+    return scheduled
+
+
 FAILURE_STATUSES = {"delivery_failed", "failed", "undelivered", "rejected", "expired"}
 WARNING_STATUSES = {"delivery_unconfirmed", "unknown", "unconfirmed"}
 SUCCESS_STATUSES = {"delivered", "received", "imported"}
-PENDING_STATUSES = {"queued", "sending", "sent", "accepted", "finalized"}
+PENDING_STATUSES = {"queued", "scheduled", "sending", "sent", "accepted", "finalized"}
 
 
 def _needs_attention(
@@ -339,11 +445,21 @@ UNREAD_CONVERSATION_CLAUSE = """
         SELECT candidate.id
         FROM messages candidate
         WHERE candidate.conversation_id = c.id
+          AND COALESCE(candidate.source, '') != 'autoreply'
         ORDER BY candidate.occurred_at DESC, candidate.id DESC
         LIMIT 1
       )
   )
 )
+"""
+
+CONVERSATION_SORT_EXPR = """
+CASE
+  WHEN sm.scheduled_for IS NOT NULL
+    AND (c.last_message_at IS NULL OR sm.scheduled_for > c.last_message_at)
+    THEN sm.scheduled_for
+  ELSE COALESCE(c.last_message_at, c.updated_at)
+END
 """
 
 
@@ -352,6 +468,7 @@ def _status_label(status: str | None) -> str:
         "delivery_failed": "Failed",
         "delivery_unconfirmed": "Unconfirmed",
         "queued": "Queued",
+        "scheduled": "Scheduled",
         "sending": "Sending",
         "sent": "Sent",
         "delivered": "Delivered",
@@ -522,17 +639,19 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
           WHERE lower(cp.phone_number) LIKE ? OR lower(COALESCE(co.display_name, '')) LIKE ?
               ) OR c.id IN (
                 SELECT conversation_id FROM messages WHERE lower(text) LIKE ?
+              ) OR c.id IN (
+                SELECT conversation_id FROM scheduled_messages WHERE lower(text) LIKE ?
               )
             )
             """
         )
-        params.extend([like, like, like])
+        params.extend([like, like, like, like])
     if before and before_id:
         clauses.append(
-            """
+            f"""
             (
-              COALESCE(c.last_message_at, c.updated_at) < ?
-              OR (COALESCE(c.last_message_at, c.updated_at) = ? AND c.id < ?)
+              {CONVERSATION_SORT_EXPR} < ?
+              OR ({CONVERSATION_SORT_EXPR} = ? AND c.id < ?)
             )
             """
         )
@@ -542,15 +661,25 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
         f"""
         SELECT c.*,
           m.text AS last_text,
+          m.message_type AS last_message_type,
           m.direction AS last_direction,
           m.status AS last_status,
           m.occurred_at AS last_occurred_at,
           m.raw_json AS last_raw_json,
+          sm.id AS scheduled_id,
+          sm.text AS scheduled_text,
+          sm.to_numbers AS scheduled_to_numbers,
+          sm.media_urls AS scheduled_media_urls,
+          sm.scheduled_for AS scheduled_for,
+          sm.status AS scheduled_status,
+          sm.failure AS scheduled_failure,
+          {CONVERSATION_SORT_EXPR} AS list_sort_at,
           (SELECT COUNT(*) FROM messages mm WHERE mm.conversation_id = c.id) AS message_count
         FROM conversations c
         LEFT JOIN messages m ON m.id = (
           SELECT id FROM messages
           WHERE conversation_id = c.id
+            AND COALESCE(source, '') != 'autoreply'
             AND (
               c.last_message_at IS NULL
               OR occurred_at <= c.last_message_at
@@ -563,8 +692,15 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
           ORDER BY occurred_at DESC, id DESC
           LIMIT 1
         )
+        LEFT JOIN scheduled_messages sm ON sm.id = (
+          SELECT id FROM scheduled_messages
+          WHERE conversation_id = c.id
+            AND status IN ('queued', 'sending', 'failed')
+          ORDER BY scheduled_for DESC, id DESC
+          LIMIT 1
+        )
         {where}
-        ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC, c.id DESC
+        ORDER BY list_sort_at DESC, c.id DESC
         LIMIT ?
         """,
         (*params, limit + 1),
@@ -574,18 +710,34 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
     conversations = []
     for row in rows:
         item = _row_dict(row)
+        use_scheduled = bool(row["scheduled_id"]) and (
+            not row["last_occurred_at"] or row["scheduled_for"] >= row["last_occurred_at"]
+        )
+        if use_scheduled:
+            scheduled_to_numbers = from_json(row["scheduled_to_numbers"], [])
+            scheduled_media_urls = from_json(row["scheduled_media_urls"], [])
+            scheduled_failed = row["scheduled_status"] == "failed"
+            item["last_text"] = row["scheduled_text"]
+            item["last_message_type"] = "MMS" if scheduled_media_urls or len(scheduled_to_numbers) > 1 else "SMS"
+            item["last_direction"] = "outbound"
+            item["last_status"] = "failed" if scheduled_failed else "scheduled"
+            item["last_occurred_at"] = row["scheduled_for"]
+            item["last_raw_json"] = None
         item["title"] = row["title"] or _conversation_title(conn, row["id"])
         item["participants"] = _participants(conn, row["id"])
-        item["sort_at"] = row["last_message_at"] or row["updated_at"]
+        item["sort_at"] = row["list_sort_at"] or row["last_message_at"] or row["updated_at"]
         item["needs_attention"] = _needs_attention(
-            row["last_direction"],
-            row["last_occurred_at"],
+            item.get("last_direction"),
+            item.get("last_occurred_at"),
             row["dealt_with_at"],
             row["manual_unread_at"],
         )
-        item["last_status_label"] = _status_label(row["last_status"])
-        item["last_status_kind"] = _status_kind(row["last_status"])
-        item["last_status_detail"] = _message_status_detail(row["last_status"], row["last_raw_json"])
+        item["last_status_label"] = _status_label(item.get("last_status"))
+        item["last_status_kind"] = _status_kind(item.get("last_status"))
+        if use_scheduled:
+            item["last_status_detail"] = row["scheduled_failure"] if row["scheduled_status"] == "failed" else f"Scheduled for {row['scheduled_for']}"
+        else:
+            item["last_status_detail"] = _message_status_detail(row["last_status"], row["last_raw_json"])
         conversations.append(item)
     return {"conversations": conversations, "has_more": has_more}
 
@@ -698,6 +850,8 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
           (SELECT COALESCE(MAX(updated_at), '') FROM conversations) AS conversations_updated_at,
           (SELECT COUNT(*) FROM messages) AS message_count,
           (SELECT COALESCE(MAX(updated_at), '') FROM messages) AS messages_updated_at,
+          (SELECT COUNT(*) FROM scheduled_messages) AS scheduled_count,
+          (SELECT COALESCE(MAX(updated_at), '') FROM scheduled_messages) AS scheduled_updated_at,
           (SELECT COUNT(*) FROM identities) AS identity_count,
           (SELECT COALESCE(MAX(updated_at), '') FROM identities) AS identities_updated_at,
           (SELECT COUNT(*) FROM contacts) AS contact_count,
@@ -714,6 +868,8 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
                 "conversations_updated_at",
                 "message_count",
                 "messages_updated_at",
+                "scheduled_count",
+                "scheduled_updated_at",
             )
         ),
         "bootstrap": "|".join(
@@ -739,7 +895,10 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
               COALESCE(c.last_message_at, '') AS last_message_at,
               COUNT(m.id) AS message_count,
               COALESCE(MAX(m.updated_at), '') AS messages_updated_at,
-              COALESCE(MAX(m.occurred_at), '') AS messages_occurred_at
+              COALESCE(MAX(m.occurred_at), '') AS messages_occurred_at,
+              (SELECT COUNT(*) FROM scheduled_messages sm WHERE sm.conversation_id = c.id) AS scheduled_count,
+              (SELECT COALESCE(MAX(sm.updated_at), '') FROM scheduled_messages sm WHERE sm.conversation_id = c.id) AS scheduled_updated_at,
+              (SELECT COALESCE(MAX(sm.scheduled_for), '') FROM scheduled_messages sm WHERE sm.conversation_id = c.id AND sm.status IN ('queued', 'sending', 'failed')) AS scheduled_for
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id = c.id
             WHERE c.id = ?
@@ -758,6 +917,9 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
                     "message_count",
                     "messages_updated_at",
                     "messages_occurred_at",
+                    "scheduled_count",
+                    "scheduled_updated_at",
+                    "scheduled_for",
                 )
             )
     return tokens
@@ -810,6 +972,9 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
             for a in conn.execute("SELECT * FROM attachments WHERE message_id = ?", (row["id"],)).fetchall()
         ]
         messages.append(_decorate_message_status(message))
+    if not before and not before_id:
+        messages.extend(_scheduled_messages_for_conversation(conn, conversation_id))
+        messages.sort(key=lambda item: (item.get("occurred_at") or "", str(item.get("id") or "")))
     older_count = 0
     if rows:
         oldest = rows[0]
@@ -828,6 +993,7 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
         SELECT direction, occurred_at
         FROM messages
         WHERE conversation_id = ?
+          AND COALESCE(source, '') != 'autoreply'
         ORDER BY occurred_at DESC, id DESC
         LIMIT 1
         """,
@@ -857,8 +1023,27 @@ def bootstrap() -> dict:
     init_db(conn)
     server_time = now_est()
     identities = [
-        _row_dict(row)
-        for row in conn.execute("SELECT * FROM identities ORDER BY id").fetchall()
+        _identity_dict(row)
+        for row in conn.execute(
+            """
+            SELECT i.*,
+              COALESCE(ar.enabled, 0) AS autoreply_enabled,
+              COALESCE(ar.message, '') AS autoreply_message,
+              COALESCE(ar.cooldown_hours, ?) AS autoreply_cooldown_hours,
+              vr.phone_number AS voice_rule_phone_number,
+              COALESCE(vr.forwarding_enabled, 0) AS voice_forwarding_enabled,
+              COALESCE(vr.forward_to_number, '') AS voice_forward_to_number,
+              COALESCE(vr.forward_timeout_seconds, 20) AS voice_forward_timeout_seconds,
+              COALESCE(vr.voicemail_enabled, 1) AS voice_voicemail_enabled,
+              COALESCE(vr.voicemail_greeting, '') AS voice_voicemail_greeting,
+              COALESCE(vr.voicemail_greeting_media_url, '') AS voice_voicemail_greeting_media_url
+            FROM identities i
+            LEFT JOIN autoreply_rules ar ON ar.phone_number = i.phone_number
+            LEFT JOIN voice_rules vr ON vr.phone_number = i.phone_number
+            ORDER BY i.id
+            """,
+            (DEFAULT_AUTOREPLY_COOLDOWN_HOURS,),
+        ).fetchall()
     ]
     stats = _row_dict(
         conn.execute(
@@ -893,6 +1078,74 @@ def bootstrap() -> dict:
         "mark_read_on_open": get_bool("behavior.mark_read_on_open", False),
         "details_collapsed_default": get_bool("behavior.details_collapsed_default", True),
         "default_identity": identities[0]["phone_number"] if identities else "",
+    }
+
+
+def message_stats() -> dict:
+    conn = connect()
+    init_db(conn)
+    totals = _row_dict(
+        conn.execute(
+            f"""
+            SELECT
+              (SELECT COUNT(*) FROM conversations) AS conversations,
+              (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 0) AS inbox_conversations,
+              (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 1) AS hidden_conversations,
+              (SELECT COUNT(*) FROM conversations c WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_conversations,
+              (SELECT COUNT(*) FROM messages) AS messages,
+              (SELECT COUNT(*) FROM messages WHERE direction = 'inbound') AS inbound_messages,
+              (SELECT COUNT(*) FROM messages WHERE direction = 'outbound') AS outbound_messages,
+              (SELECT COUNT(*) FROM messages WHERE message_type = 'Voicemail') AS voicemails,
+              (SELECT COUNT(*) FROM messages WHERE status IN ('delivery_failed', 'failed', 'undelivered', 'rejected', 'expired')) AS failed_messages,
+              (SELECT COUNT(*) FROM messages WHERE status IN ('queued', 'sending', 'sent', 'accepted', 'finalized')) AS pending_messages,
+              (SELECT COUNT(*) FROM attachments) AS attachments,
+              (SELECT COUNT(*) FROM contacts) AS contacts
+            """
+        ).fetchone()
+    )
+    by_status = [
+        _row_dict(row)
+        for row in conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM messages
+            GROUP BY status
+            ORDER BY count DESC, status
+            """
+        ).fetchall()
+    ]
+    by_source = [
+        _row_dict(row)
+        for row in conn.execute(
+            """
+            SELECT source, COUNT(*) AS count
+            FROM messages
+            GROUP BY source
+            ORDER BY count DESC, source
+            """
+        ).fetchall()
+    ]
+    recent_days = [
+        _row_dict(row)
+        for row in conn.execute(
+            """
+            SELECT substr(occurred_at, 1, 10) AS day,
+              COUNT(*) AS count,
+              SUM(direction = 'inbound') AS inbound,
+              SUM(direction = 'outbound') AS outbound
+            FROM messages
+            GROUP BY day
+            ORDER BY day DESC
+            LIMIT 14
+            """
+        ).fetchall()
+    ]
+    return {
+        "totals": totals,
+        "by_status": by_status,
+        "by_source": by_source,
+        "recent_days": recent_days,
+        "server_time": now_est(),
     }
 
 
@@ -973,13 +1226,66 @@ def update_identity(identity_id: int, payload: dict) -> dict:
         raise ValueError("Identity color must be a hex color.")
     conn = connect()
     init_db(conn)
+    existing = _identity_with_autoreply(conn, identity_id)
+    if not existing:
+        raise ValueError("Identity not found.")
+    autoreply_enabled = payload.get("autoreply_enabled", existing.get("autoreply_enabled", False))
+    if not isinstance(autoreply_enabled, bool):
+        autoreply_enabled = str(autoreply_enabled).strip().lower() in {"1", "true", "yes", "on"}
+    autoreply_message = str(
+        payload.get(
+            "autoreply_message",
+            existing.get("autoreply_message") or DEFAULT_AUTOREPLY_MESSAGE,
+        )
+        or ""
+    ).strip()
+    try:
+        autoreply_cooldown_hours = int(
+            str(
+                payload.get(
+                    "autoreply_cooldown_hours",
+                    existing.get("autoreply_cooldown_hours") or DEFAULT_AUTOREPLY_COOLDOWN_HOURS,
+                )
+            ).strip()
+        )
+    except ValueError as exc:
+        raise ValueError("Auto-reply cooldown must be a number.") from exc
+    if autoreply_cooldown_hours < 1:
+        raise ValueError("Auto-reply cooldown must be at least 1 hour.")
+    if autoreply_enabled and not autoreply_message:
+        raise ValueError("Auto-reply message is required when auto-reply is enabled.")
     conn.execute(
         "UPDATE identities SET label = ?, color = ?, is_active = ?, updated_at = ? WHERE id = ?",
         (label, color, active, now_est(), identity_id),
     )
+    update_autoreply_rule(
+        conn,
+        phone_number=existing["phone_number"],
+        enabled=autoreply_enabled,
+        message=autoreply_message,
+        cooldown_hours=autoreply_cooldown_hours,
+    )
+    update_voice_rule(
+        conn,
+        phone_number=existing["phone_number"],
+        forwarding_enabled=payload.get("voice_forwarding_enabled", existing.get("voice_forwarding_enabled", False)),
+        forward_to_number=payload.get("voice_forward_to_number", existing.get("voice_forward_to_number", "")),
+        forward_timeout_seconds=payload.get(
+            "voice_forward_timeout_seconds",
+            existing.get("voice_forward_timeout_seconds") or 20,
+        ),
+        voicemail_enabled=payload.get("voice_voicemail_enabled", existing.get("voice_voicemail_enabled", True)),
+        voicemail_greeting=payload.get(
+            "voice_voicemail_greeting",
+            existing.get("voice_voicemail_greeting") or "Please leave a message after the beep.",
+        ),
+        voicemail_greeting_media_url=payload.get(
+            "voice_voicemail_greeting_media_url",
+            existing.get("voice_voicemail_greeting_media_url") or "",
+        ),
+    )
     conn.commit()
-    row = conn.execute("SELECT * FROM identities WHERE id = ?", (identity_id,)).fetchone()
-    return {"identity": _row_dict(row)}
+    return {"identity": _identity_with_autoreply(conn, identity_id)}
 
 
 def set_conversation_archived(conversation_id: int, archived: bool) -> dict:
@@ -1022,6 +1328,58 @@ def set_conversation_dealt(conversation_id: int, dealt: bool = True) -> dict:
     return {"conversation": get_messages(conversation_id)["conversation"]}
 
 
+def bulk_update_conversations(payload: dict) -> dict:
+    ids = []
+    for value in payload.get("conversation_ids") or payload.get("ids") or []:
+        try:
+            conversation_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if conversation_id > 0 and conversation_id not in ids:
+            ids.append(conversation_id)
+    if not ids:
+        raise ValueError("Select at least one conversation.")
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"read", "unread", "hide", "unhide"}:
+        raise ValueError("Bulk action must be read, unread, hide, or unhide.")
+    conn = connect()
+    init_db(conn)
+    timestamp = now_est()
+    placeholders = ",".join("?" for _ in ids)
+    if action in {"hide", "unhide"}:
+        archived = action == "hide"
+        conn.execute(
+            f"""
+            UPDATE conversations
+            SET is_archived = ?, archived_at = ?, updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (1 if archived else 0, timestamp if archived else None, timestamp, *ids),
+        )
+    else:
+        dealt = action == "read"
+        rows = conn.execute(
+            f"""
+            SELECT id, last_message_at
+            FROM conversations
+            WHERE id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        for row in rows:
+            marker = row["last_message_at"] or timestamp
+            conn.execute(
+                """
+                UPDATE conversations
+                SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (marker if dealt else None, None if dealt else marker, timestamp, row["id"]),
+            )
+    conn.commit()
+    return {"updated": len(ids), "action": action, "conversation_ids": ids}
+
+
 def create_conversation(payload: dict) -> dict:
     recipients = [normalize_phone(x) for x in payload.get("recipients", []) if normalize_phone(x)]
     if not recipients:
@@ -1056,6 +1414,217 @@ def send_api_message(payload: dict) -> dict:
     if result.get("message_id"):
         _mark_uploaded_attachments_local(int(result["message_id"]), media_urls)
     return result
+
+
+def _parse_schedule_time(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError("Choose a send time.")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Schedule time must be a valid date and time.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=EASTERN)
+    scheduled_for = parsed.astimezone(EASTERN).replace(microsecond=0)
+    now = datetime.now(EASTERN).replace(microsecond=0)
+    if scheduled_for <= now:
+        raise ValueError("Schedule time must be in the future.")
+    return scheduled_for.isoformat()
+
+
+def _scheduled_message_dict(row) -> dict:
+    message = _row_dict(row)
+    message["to_numbers"] = from_json(message.get("to_numbers"), [])
+    message["media_urls"] = from_json(message.get("media_urls"), [])
+    return message
+
+
+def schedule_api_message(payload: dict) -> dict:
+    conversation_id = payload.get("conversation_id")
+    to_numbers = [normalize_phone(x) for x in payload.get("to_numbers", []) if normalize_phone(x)]
+    text = str(payload.get("text") or "")
+    media_urls = [str(x).strip() for x in payload.get("media_urls", []) if str(x).strip()]
+    if not to_numbers:
+        raise ValueError("At least one recipient is required.")
+    if not text and not media_urls:
+        raise ValueError("Message text or media URL is required.")
+    scheduled_for = _parse_schedule_time(str(payload.get("scheduled_for") or ""))
+    timestamp = now_est()
+    conn = connect()
+    init_db(conn)
+    from_number = normalize_phone(payload.get("from_number") or "")
+    if conversation_id:
+        conversation_id = int(conversation_id)
+    else:
+        known_self = self_numbers(conn)
+        remote_numbers = sorted(n for n in to_numbers if n not in known_self)
+        conversation_id = ensure_conversation(conn, remote_numbers or to_numbers, [from_number] if from_number else [])
+    cur = conn.execute(
+        """
+        INSERT INTO scheduled_messages(
+          conversation_id, from_number, to_numbers, text, media_urls,
+          scheduled_for, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+        """,
+        (
+            conversation_id,
+            from_number,
+            json.dumps(to_numbers, separators=(",", ":")),
+            text,
+            json.dumps(media_urls, separators=(",", ":")),
+            scheduled_for,
+            timestamp,
+            timestamp,
+        ),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return {"conversation_id": conversation_id, "scheduled_message": _scheduled_message_dict(row)}
+
+
+def cancel_scheduled_message(scheduled_id: int) -> dict:
+    conn = connect()
+    init_db(conn)
+    row = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
+    if not row:
+        raise ValueError("Scheduled message not found.")
+    status = str(row["status"] or "")
+    if status != "queued":
+        raise ValueError("Only queued scheduled messages can be canceled.")
+    timestamp = now_est()
+    updated = conn.execute(
+        """
+        UPDATE scheduled_messages
+        SET status = 'canceled',
+            failure = '',
+            updated_at = ?
+        WHERE id = ? AND status = 'queued'
+        """,
+        (timestamp, scheduled_id),
+    ).rowcount
+    if not updated:
+        raise ValueError("Only queued scheduled messages can be canceled.")
+    conn.commit()
+    canceled = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
+    return {
+        "conversation_id": canceled["conversation_id"],
+        "scheduled_message": _scheduled_message_dict(canceled),
+        "canceled": True,
+    }
+
+
+def _send_scheduled_row(conn, row) -> None:
+    scheduled = _scheduled_message_dict(row)
+    scheduled_id = int(scheduled["id"])
+    timestamp = now_est()
+    updated = conn.execute(
+        """
+        UPDATE scheduled_messages
+        SET status = 'sending', updated_at = ?
+        WHERE id = ? AND status = 'queued'
+        """,
+        (timestamp, scheduled_id),
+    ).rowcount
+    conn.commit()
+    if not updated:
+        return
+    try:
+        result = send_provider_message(
+            from_number=scheduled.get("from_number"),
+            to_numbers=scheduled["to_numbers"],
+            text=scheduled.get("text") or "",
+            media_urls=scheduled["media_urls"],
+            conversation_id=int(scheduled["conversation_id"]) if scheduled.get("conversation_id") else None,
+        )
+        message_id = int(result["message_id"]) if result.get("message_id") else None
+        if message_id:
+            _mark_uploaded_attachments_local(message_id, scheduled["media_urls"])
+        conn.execute(
+            """
+            UPDATE scheduled_messages
+            SET status = 'sent',
+                provider = ?,
+                message_id = ?,
+                failure = '',
+                sent_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (str(result.get("provider") or ""), message_id, now_est(), now_est(), scheduled_id),
+        )
+    except Exception as exc:
+        conn.execute(
+            """
+            UPDATE scheduled_messages
+            SET status = 'failed',
+                failure = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (str(exc)[:500], now_est(), scheduled_id),
+        )
+        print(f"Scheduled message {scheduled_id} failed: {exc}", flush=True)
+    conn.commit()
+
+
+def process_due_scheduled_messages(limit: int = 10) -> int:
+    conn = connect()
+    init_db(conn)
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM scheduled_messages
+        WHERE status = 'queued'
+          AND scheduled_for <= ?
+        ORDER BY scheduled_for, id
+        LIMIT ?
+        """,
+        (now_est(), limit),
+    ).fetchall()
+    for row in rows:
+        _send_scheduled_row(conn, row)
+    conn.close()
+    return len(rows)
+
+
+_scheduled_sender_started = False
+
+
+def recover_sending_scheduled_messages() -> None:
+    conn = connect()
+    init_db(conn)
+    conn.execute(
+        """
+        UPDATE scheduled_messages
+        SET status = 'queued',
+            updated_at = ?
+        WHERE status = 'sending'
+        """,
+        (now_est(),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def start_scheduled_sender() -> None:
+    global _scheduled_sender_started
+    if _scheduled_sender_started:
+        return
+    _scheduled_sender_started = True
+    recover_sending_scheduled_messages()
+
+    def worker() -> None:
+        while True:
+            try:
+                process_due_scheduled_messages()
+            except Exception as exc:
+                print(f"Scheduled message worker failed: {exc}", flush=True)
+            time.sleep(10)
+
+    thread = threading.Thread(target=worker, name="scheduled-message-sender", daemon=True)
+    thread.start()
 
 
 class TextingHandler(BaseHTTPRequestHandler):
@@ -1128,6 +1697,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(bootstrap())
             elif path == "/api/settings":
                 self._send_json(configured_values())
+            elif path == "/api/stats":
+                self._send_json(message_stats())
             elif path == "/api/mobile/notifications":
                 self._send_json(mobile_notifications(query))
             elif path == "/api/refresh":
@@ -1142,6 +1713,10 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(get_messages(int(match.group(1)), query))
             elif path == "/api/contacts":
                 self._send_json(search_contacts(query))
+            elif path in {"/api/twilio/voice", "/api/telnyx/voice"}:
+                provider = "twilio" if "twilio" in path else "telnyx"
+                params = {key: values[-1] if values else "" for key, values in query.items()}
+                self._send_xml(voice_xml(provider, params, self._request_url()))
             elif path.startswith("/media/"):
                 name = Path(unquote(path.removeprefix("/media/"))).name
                 self._serve_file(config.MEDIA_DIR / name)
@@ -1166,6 +1741,10 @@ class TextingHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/messages":
                 self._send_json(send_api_message(self._read_json()))
+            elif path == "/api/messages/schedule":
+                self._send_json(schedule_api_message(self._read_json()))
+            elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/cancel", path):
+                self._send_json(cancel_scheduled_message(int(match.group(1))))
             elif path == "/api/conversations":
                 self._send_json(create_conversation(self._read_json()))
             elif match := re.fullmatch(r"/api/conversations/(\d+)/archive", path):
@@ -1176,6 +1755,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 dealt = bool(payload.get("dealt", True))
                 self._send_json(set_conversation_dealt(int(match.group(1)), dealt))
+            elif path == "/api/conversations/bulk":
+                self._send_json(bulk_update_conversations(self._read_json()))
             elif path == "/api/contacts/sync":
                 self._send_json({"synced": sync_contacts()})
             elif path == "/api/contacts/name":
@@ -1209,6 +1790,28 @@ class TextingHandler(BaseHTTPRequestHandler):
                 headers = {key.lower(): value for key, value in self.headers.items()}
                 handle_twilio_webhook(raw, headers, self._request_url())
                 self._send_xml('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+            elif path == "/api/revai/webhook":
+                self._send_json(store_revai_callback(self._read_raw()))
+            elif path in {"/api/twilio/voice", "/api/telnyx/voice"}:
+                raw = self._read_raw()
+                headers = {key.lower(): value for key, value in self.headers.items()}
+                provider = "twilio" if "twilio" in path else "telnyx"
+                params = parse_voice_callback(provider, raw, headers, self._request_url())
+                self._send_xml(voice_xml(provider, params, self._request_url()))
+            elif path in {
+                "/api/twilio/voice/recording",
+                "/api/twilio/voice/transcription",
+                "/api/telnyx/voice/recording",
+                "/api/telnyx/voice/transcription",
+            }:
+                raw = self._read_raw()
+                headers = {key.lower(): value for key, value in self.headers.items()}
+                provider = "twilio" if "twilio" in path else "telnyx"
+                params = parse_voice_callback(provider, raw, headers, self._request_url())
+                callback_kind = "transcription" if path.endswith("/transcription") else "recording"
+                result = store_voicemail_callback(provider, params, callback_kind=callback_kind, request_url=self._request_url())
+                print(f"{provider} voice {callback_kind} callback: {result}", flush=True)
+                self._send_xml('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup /></Response>')
             else:
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except (
@@ -1217,6 +1820,7 @@ class TextingHandler(BaseHTTPRequestHandler):
             MessagingError,
             TelnyxError,
             TwilioError,
+            VoiceError,
             FastmailError,
             GoogleContactsError,
             ContactsError,
@@ -1266,6 +1870,7 @@ def run(host: str | None = None, port: int | None = None) -> None:
     init_db(conn)
     conn.close()
     start_autosync()
+    start_scheduled_sender()
     httpd = ThreadingHTTPServer((host, port), TextingHandler)
     print(f"Switchboard running at http://{host}:{port}", flush=True)
     httpd.serve_forever()

@@ -55,6 +55,8 @@ Important settings:
 - `TWILIO_AUTH_TOKEN`: required for Twilio sends and enables Twilio webhook signature verification.
 - `TWILIO_WEBHOOK_URL`: exact public Twilio webhook URL. Recommended when the app sits behind a proxy.
 - `TWILIO_STATUS_CALLBACK_URL`: optional delivery callback URL sent with outbound Twilio messages.
+- `TEXTING_VOICEMAIL_TRANSCRIPTION_PROVIDER`: `provider` or `revai`.
+- `REVAI_ACCESS_TOKEN`: Rev.ai access token for voicemail transcription.
 - `TEXTING_UI_LANGUAGE`: `auto`, `en`, `es`, or `fr`.
 - `TEXTING_AUTO_REFRESH_SECONDS`: browser refresh check interval. Set to `0` to disable.
 - `NTFY_ENDPOINT`: optional HTTPS ntfy topic URL for inbound message notifications.
@@ -97,7 +99,7 @@ TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 ```
 
-Restarting the server seeds any new `TEXTING_PERSONAL_NUMBERS` into the local sender identity table. In the web UI, the Numbers panel can rename and recolor those sender identities. Settings > Messaging can adjust the default provider and per-number provider map without editing source.
+Restarting the server seeds any new `TEXTING_PERSONAL_NUMBERS` into the local sender identity table. In the web UI, the Numbers panel can rename and recolor those sender identities, and can enable a vacation auto-reply for one sender number at a time. Auto-replies are sent only for direct inbound texts, use the selected sender number's configured Telnyx/Twilio provider, and are rate-limited per recipient by the cooldown on that number. Settings > Messaging can adjust the default provider and per-number provider map without editing source.
 
 The Telnyx webhook endpoint is:
 
@@ -126,6 +128,14 @@ The Twilio webhook endpoint is:
 ```
 
 Use it for incoming Messaging webhooks and, if you want delivery updates, as the status callback URL. Twilio posts form-encoded webhook payloads; when `TWILIO_AUTH_TOKEN` is configured, the app validates `X-Twilio-Signature`. If Apache, Tailscale Serve, or another proxy changes the public URL, set `TWILIO_WEBHOOK_URL` to the exact URL configured in Twilio.
+
+Voicemails can use the phone provider's transcript or Rev.ai. Set `TEXTING_VOICEMAIL_TRANSCRIPTION_PROVIDER=revai` and provide `REVAI_ACCESS_TOKEN`, or save both values in Settings > Transcription. Rev.ai posts completed jobs back to:
+
+```text
+/api/revai/webhook
+```
+
+When Rev.ai is enabled, Switchboard submits completed voicemail recordings to Rev.ai and stores only non-empty transcripts as inbound voicemail messages in the caller's conversation.
 
 Outbound provider selection is resolved from the sender number. `TEXTING_PROVIDER_BY_NUMBER` wins first, then `TEXTING_MESSAGING_PROVIDER` is used as the default. Example:
 
@@ -234,13 +244,9 @@ Alias /mms-uploads/ /var/lib/switchboard/public-uploads/
     Require valid-user
 </Location>
 
-<Location /api/telnyx/webhook>
+<LocationMatch "^/api/((telnyx|twilio)/(webhook|voice(/(recording|transcription))?)|revai/webhook)$">
     Require all granted
-</Location>
-
-<Location /api/twilio/webhook>
-    Require all granted
-</Location>
+</LocationMatch>
 
 <Directory /var/lib/switchboard/public-uploads>
     Options -Indexes

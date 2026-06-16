@@ -139,6 +139,82 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         env_names=("TEXTING_PROVIDER_BY_NUMBER",),
     ),
     SettingDef(
+        "voice.forwarding_enabled",
+        "Call forwarding",
+        "Calls",
+        "bool",
+        "0",
+        help="Global default for sender numbers without their own call forwarding rule.",
+    ),
+    SettingDef(
+        "voice.forward_to_number",
+        "Forward to",
+        "Calls",
+        "text",
+        "",
+        help="Default phone number or SIP address for forwarded calls.",
+    ),
+    SettingDef(
+        "voice.forward_timeout_seconds",
+        "Ring seconds",
+        "Calls",
+        "number",
+        "20",
+        help="How long to try the forwarded number before voicemail.",
+    ),
+    SettingDef(
+        "voice.voicemail_enabled",
+        "Voicemail",
+        "Calls",
+        "bool",
+        "1",
+        help="Global default for recording voicemail when a call is not answered.",
+    ),
+    SettingDef(
+        "voice.voicemail_greeting",
+        "Voicemail greeting",
+        "Calls",
+        "text",
+        "Please leave a message after the beep.",
+        help="Text greeting used when no greeting recording is set.",
+    ),
+    SettingDef(
+        "voice.voicemail_greeting_media_url",
+        "Greeting recording URL",
+        "Calls",
+        "url",
+        "",
+        help="Optional public audio URL. Upload a recording here to play it before recording voicemail.",
+    ),
+    SettingDef(
+        "transcription.voicemail_provider",
+        "Voicemail transcription",
+        "Transcription",
+        "select",
+        config.VOICEMAIL_TRANSCRIPTION_PROVIDER,
+        options=(("provider", "Phone provider"), ("revai", "Rev.ai")),
+        help="Rev.ai uses completed voicemail recordings instead of the phone provider's built-in transcript.",
+        env_names=("TEXTING_VOICEMAIL_TRANSCRIPTION_PROVIDER",),
+    ),
+    SettingDef(
+        "revai.access_token",
+        "Rev.ai access token",
+        "Transcription",
+        "secret",
+        config.REVAI_ACCESS_TOKEN,
+        secret=True,
+        help="Required when voicemail transcription is set to Rev.ai.",
+        env_names=("REVAI_ACCESS_TOKEN",),
+    ),
+    SettingDef(
+        "revai.api_base",
+        "Rev.ai API base",
+        "Transcription",
+        "url",
+        config.REVAI_API_BASE,
+        env_names=("REVAI_API_BASE",),
+    ),
+    SettingDef(
         "contacts.provider",
         "Contact provider",
         "Contacts",
@@ -279,7 +355,10 @@ def get_value(key: str, default: str | None = None) -> str:
     init_db(conn)
     row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
     if row:
-        return str(row["value"])
+        value = str(row["value"])
+        if definition and definition.secret and not value.strip():
+            return fallback
+        return value
     return fallback
 
 

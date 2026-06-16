@@ -29,6 +29,7 @@
             <button class="icon-button" id="settingsButton" title="Settings" aria-label="Settings" data-i18n-title="settings.title" data-i18n-aria-label="settings.title">⚙</button>
             <button class="icon-button theme-button" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
             <button class="icon-button" id="newConversationButton" title="New conversation" aria-label="New conversation" data-i18n-title="conversation.new" data-i18n-aria-label="conversation.new">+</button>
+            <button class="icon-button mobile-panel-button" id="mobilePanelButton" title="Show sender identities and contacts" aria-label="Show sender identities and contacts" data-i18n-title="panel.show" data-i18n-aria-label="panel.show">☷</button>
           </div>
         </header>
         <div class="search-row">
@@ -54,6 +55,7 @@
           <button class="category-tab" data-category="unread" data-i18n="category.unread">Unread</button>
           <button class="category-tab" data-category="hidden" data-i18n="category.hidden">Hidden</button>
         </div>
+        <div class="pull-refresh-indicator" id="pullRefreshIndicator" aria-hidden="true"></div>
         <div class="conversation-list" id="conversationList"></div>
       </aside>
 
@@ -70,8 +72,8 @@
         <header class="thread-header">
           <button class="icon-button mobile-back-button" id="mobileBackButton" title="Back to conversations" aria-label="Back to conversations" data-i18n-title="conversation.back" data-i18n-aria-label="conversation.back">‹</button>
           <div class="thread-title-wrap">
-            <p class="eyebrow" id="threadKind" data-i18n="thread.conversation">Conversation</p>
-            <h2 id="threadTitle" data-i18n="thread.select">Select a thread</h2>
+            <p class="eyebrow" id="threadKind" data-i18n="thread.conversation" data-i18n-dynamic="true">Conversation</p>
+            <h2 id="threadTitle" data-i18n="thread.select" data-i18n-dynamic="true">Select a thread</h2>
             <div class="participant-row">
               <div class="participant-line" id="participantLine"></div>
               <button class="name-contact-button" id="contactNameToggle" type="button" hidden data-i18n="contact.name">Name</button>
@@ -140,6 +142,20 @@
       ></div>
 
       <aside class="rail detail-rail">
+        <header class="detail-mobile-header">
+          <h2 data-i18n="panel.label">Panel</h2>
+          <button
+            class="icon-button"
+            id="mobileDetailCloseButton"
+            type="button"
+            title="Close panel"
+            aria-label="Close panel"
+            data-i18n-title="panel.close"
+            data-i18n-aria-label="panel.close"
+          >
+            ×
+          </button>
+        </header>
         <div class="tabs" role="tablist">
           <button class="tab active" data-tab="identities" data-i18n="tabs.numbers">Numbers</button>
           <button class="tab" data-tab="contacts" data-i18n="tabs.contacts">Contacts</button>
@@ -163,7 +179,48 @@
       </aside>
     </div>
 
+    <div class="selection-toolbar hidden" id="selectionToolbar" role="toolbar" aria-label="Selection actions" data-i18n-aria-label="selection.actions">
+      <span id="selectionCount" data-i18n="selection.count">0 selected</span>
+      <button class="small-button" id="bulkReadButton" type="button" data-i18n="conversation.read">Read</button>
+      <button class="small-button" id="bulkUnreadButton" type="button" data-i18n="conversation.unread">Unread</button>
+      <button class="small-button danger-button" id="bulkHideButton" type="button" data-i18n="conversation.hide">Hide</button>
+      <button class="icon-button" id="selectionCancelButton" type="button" title="Cancel selection" aria-label="Cancel selection" data-i18n-title="common.cancel" data-i18n-aria-label="common.cancel">×</button>
+    </div>
+
     <div class="toast" id="toast" role="status"></div>
+    <div class="contact-name-modal hidden" id="contactNameModal" role="dialog" aria-modal="true" aria-label="Rename" tabindex="-1" data-i18n-aria-label="contact.rename">
+      <form class="contact-name-card" id="contactNameModalForm">
+        <header class="contact-name-header">
+          <h2 data-i18n="contact.rename">Rename</h2>
+          <button class="icon-button" id="contactNameModalClose" type="button" aria-label="Cancel" data-i18n-aria-label="common.cancel">×</button>
+        </header>
+        <div class="contact-name-body">
+          <input id="contactNameModalInput" type="text" placeholder="Contact name" autocomplete="off" data-i18n-placeholder="contact.name_placeholder" />
+        </div>
+        <footer class="contact-name-footer">
+          <button class="small-button" id="contactNameModalCancel" type="button" data-i18n="common.cancel">Cancel</button>
+          <button class="small-button done-button" type="submit" data-i18n="common.save">Save</button>
+        </footer>
+      </form>
+    </div>
+    <div class="schedule-modal hidden" id="scheduleModal" role="dialog" aria-modal="true" aria-label="Schedule send" tabindex="-1" data-i18n-aria-label="schedule.title">
+      <form class="schedule-card" id="scheduleForm">
+        <header class="schedule-header">
+          <h2 data-i18n="schedule.title">Schedule send</h2>
+          <button class="icon-button" id="scheduleClose" type="button" aria-label="Cancel" data-i18n-aria-label="common.cancel">×</button>
+        </header>
+        <div class="schedule-body">
+          <label for="scheduleTime">
+            <span data-i18n="schedule.send_at">Send at</span>
+            <input id="scheduleTime" type="datetime-local" required />
+          </label>
+        </div>
+        <footer class="schedule-footer">
+          <button class="small-button" id="scheduleCancel" type="button" data-i18n="common.cancel">Cancel</button>
+          <button class="small-button done-button" type="submit" data-i18n="schedule.queue">Queue</button>
+        </footer>
+      </form>
+    </div>
     <div class="settings-modal hidden" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1" data-i18n-aria-label="settings.title">
       <form class="settings-card" id="settingsForm">
         <header class="settings-header">
@@ -175,10 +232,23 @@
         </header>
         <div class="settings-sections" id="settingsSections"></div>
         <footer class="settings-footer">
+          <button class="small-button settings-stats-button" id="statsButton" type="button" data-i18n="stats.title">Stats</button>
           <button class="small-button" id="settingsCancel" type="button" data-i18n="common.cancel">Cancel</button>
           <button class="small-button done-button" type="submit" data-i18n="common.save">Save</button>
         </footer>
       </form>
+    </div>
+    <div class="stats-modal hidden" id="statsModal" role="dialog" aria-modal="true" aria-label="Stats" tabindex="-1" data-i18n-aria-label="stats.title">
+      <section class="stats-card">
+        <header class="settings-header">
+          <div>
+            <h2 data-i18n="stats.title">Stats</h2>
+            <p data-i18n="stats.description">Message and conversation totals.</p>
+          </div>
+          <button class="icon-button" id="statsClose" type="button" aria-label="Close stats" data-i18n-aria-label="stats.close">×</button>
+        </header>
+        <div class="stats-body" id="statsBody"></div>
+      </section>
     </div>
     <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1" data-i18n-aria-label="lightbox.preview">
       <button class="lightbox-close" id="lightboxClose" aria-label="Close image preview" data-i18n-aria-label="lightbox.close">×</button>

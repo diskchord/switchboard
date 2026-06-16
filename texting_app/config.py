@@ -154,6 +154,12 @@ TWILIO_API_BASE = os.environ.get("TWILIO_API_BASE", "https://api.twilio.com")
 TWILIO_WEBHOOK_URL = os.environ.get("TWILIO_WEBHOOK_URL", "")
 TWILIO_STATUS_CALLBACK_URL = os.environ.get("TWILIO_STATUS_CALLBACK_URL", "")
 
+REVAI_ACCESS_TOKEN = os.environ.get("REVAI_ACCESS_TOKEN", "")
+REVAI_API_BASE = os.environ.get("REVAI_API_BASE", "https://api.rev.ai/speechtotext/v1")
+VOICEMAIL_TRANSCRIPTION_PROVIDER = (
+    os.environ.get("TEXTING_VOICEMAIL_TRANSCRIPTION_PROVIDER", "provider").strip().lower() or "provider"
+)
+
 MESSAGING_PROVIDER = os.environ.get("TEXTING_MESSAGING_PROVIDER", "telnyx").strip().lower() or "telnyx"
 MESSAGING_PROVIDER_BY_NUMBER = _mapping_env("TEXTING_PROVIDER_BY_NUMBER")
 

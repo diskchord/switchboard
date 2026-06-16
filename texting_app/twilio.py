@@ -324,6 +324,18 @@ def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, str]) -> 
         text=text,
         media_count=len(media_items),
     )
+    try:
+        from .autoreply import maybe_send_autoreply
+
+        maybe_send_autoreply(
+            conversation_id=conversation_id,
+            from_number=from_number,
+            self_numbers=self_participants or [to_number],
+            remote_numbers=remote_numbers,
+            trigger_message_id=message_id,
+        )
+    except Exception as exc:
+        print(f"autoreply processing failed for inbound Twilio message {message_id}: {exc}", flush=True)
     return message_id
 
 

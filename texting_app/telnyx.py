@@ -704,6 +704,18 @@ def _store_webhook_message(conn, event: dict[str, Any], raw_event: dict[str, Any
             text=payload.get("text") or "",
             media_count=len(media_items),
         )
+        try:
+            from .autoreply import maybe_send_autoreply
+
+            maybe_send_autoreply(
+                conversation_id=conversation_id,
+                from_number=from_number,
+                self_numbers=self_participants or to_numbers,
+                remote_numbers=remote_numbers,
+                trigger_message_id=message_id,
+            )
+        except Exception as exc:
+            print(f"autoreply processing failed for inbound Telnyx message {message_id}: {exc}", flush=True)
     return message_id
 
 

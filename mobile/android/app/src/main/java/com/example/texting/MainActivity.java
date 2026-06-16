@@ -13,6 +13,7 @@ import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.webkit.HttpAuthHandler;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -22,6 +23,7 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 public class MainActivity extends Activity {
     private WebView webView;
     private SwipeRefreshLayout swipeRefreshLayout;
+    private volatile boolean nativePullRefreshEnabled = false;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
 
     @Override
@@ -33,19 +35,37 @@ public class MainActivity extends Activity {
 
         swipeRefreshLayout = new SwipeRefreshLayout(this);
         swipeRefreshLayout.setColorSchemeColors(0xFF127F73, 0xFF2563EB);
+        swipeRefreshLayout.setEnabled(false);
 
         webView = new WebView(this);
         swipeRefreshLayout.addView(webView, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        swipeRefreshLayout.setOnChildScrollUpCallback((parent, child) -> webView != null && webView.getScrollY() > 0);
+        swipeRefreshLayout.setOnChildScrollUpCallback(
+            (parent, child) -> !nativePullRefreshEnabled || (webView != null && webView.getScrollY() > 0)
+        );
         swipeRefreshLayout.setOnRefreshListener(() -> {
-            if (webView == null) {
+            if (webView == null || !nativePullRefreshEnabled) {
                 swipeRefreshLayout.setRefreshing(false);
                 return;
             }
-            webView.reload();
+            webView.evaluateJavascript(
+                "(function(){"
+                    + "return !!(window.textingRefreshFromNativePull"
+                    + "&& window.textingRefreshFromNativePull());"
+                    + "})()",
+                value -> {
+                    if (!"true".equals(value)) {
+                        webView.reload();
+                        return;
+                    }
+                    swipeRefreshLayout.postDelayed(
+                        () -> swipeRefreshLayout.setRefreshing(false),
+                        900
+                    );
+                }
+            );
         });
         setContentView(swipeRefreshLayout);
 
@@ -53,6 +73,7 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
+        webView.addJavascriptInterface(new AndroidBridge(), "SwitchboardAndroid");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -68,6 +89,24 @@ public class MainActivity extends Activity {
             }
         });
         webView.loadUrl(urlForIntent(getIntent()));
+    }
+
+    private void setNativePullRefreshEnabled(boolean enabled) {
+        nativePullRefreshEnabled = enabled;
+        if (swipeRefreshLayout == null) {
+            return;
+        }
+        swipeRefreshLayout.setEnabled(enabled);
+        if (!enabled && swipeRefreshLayout.isRefreshing()) {
+            swipeRefreshLayout.setRefreshing(false);
+        }
+    }
+
+    private class AndroidBridge {
+        @JavascriptInterface
+        public void setPullRefreshEnabled(boolean enabled) {
+            runOnUiThread(() -> setNativePullRefreshEnabled(enabled));
+        }
     }
 
     @Override
@@ -207,7 +246,10 @@ public class MainActivity extends Activity {
         }
         webView.evaluateJavascript(
             "(function(){"
-                + "if(document.body && document.body.classList.contains('mobile-thread-open')){"
+                + "if(document.body && (document.body.classList.contains('mobile-thread-open')"
+                + "|| document.body.classList.contains('conversation-selecting')"
+                + "|| (document.querySelector('#statsModal') && !document.querySelector('#statsModal').classList.contains('hidden'))"
+                + "|| document.body.classList.contains('details-overlay-open'))){"
                 + "if(window.textingCloseThreadForNativeBack){window.textingCloseThreadForNativeBack();}"
                 + "else if(history.length > 1){history.back();}"
                 + "else{document.body.classList.remove('mobile-thread-open');}"

@@ -137,11 +137,83 @@ CREATE TABLE IF NOT EXISTS provider_message_refs (
   PRIMARY KEY(provider, provider_message_id)
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+  from_number TEXT NOT NULL DEFAULT '',
+  to_numbers TEXT NOT NULL DEFAULT '[]',
+  text TEXT NOT NULL DEFAULT '',
+  media_urls TEXT NOT NULL DEFAULT '[]',
+  scheduled_for TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  provider TEXT NOT NULL DEFAULT '',
+  message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  failure TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  sent_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS autoreply_rules (
+  phone_number TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  cooldown_hours INTEGER NOT NULL DEFAULT 24,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autoreply_deliveries (
+  phone_number TEXT NOT NULL,
+  recipient_number TEXT NOT NULL,
+  last_sent_at TEXT NOT NULL,
+  message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(phone_number, recipient_number)
+);
+
+CREATE TABLE IF NOT EXISTS voice_rules (
+  phone_number TEXT PRIMARY KEY,
+  forwarding_enabled INTEGER NOT NULL DEFAULT 0,
+  forward_to_number TEXT NOT NULL DEFAULT '',
+  forward_timeout_seconds INTEGER NOT NULL DEFAULT 20,
+  voicemail_enabled INTEGER NOT NULL DEFAULT 1,
+  voicemail_greeting TEXT NOT NULL DEFAULT '',
+  voicemail_greeting_media_url TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voicemail_recordings (
+  provider TEXT NOT NULL,
+  recording_id TEXT NOT NULL,
+  from_number TEXT NOT NULL DEFAULT '',
+  to_number TEXT NOT NULL DEFAULT '',
+  recording_url TEXT NOT NULL DEFAULT '',
+  local_path TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT '',
+  size INTEGER,
+  sha256 TEXT NOT NULL DEFAULT '',
+  duration_seconds REAL,
+  transcription_provider TEXT NOT NULL DEFAULT '',
+  transcription_status TEXT NOT NULL DEFAULT '',
+  transcript_text TEXT NOT NULL DEFAULT '',
+  failure TEXT NOT NULL DEFAULT '',
+  revai_job_id TEXT NOT NULL DEFAULT '',
+  raw_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(provider, recording_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_time ON messages(conversation_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_messages_telnyx_id ON messages(telnyx_id);
 CREATE INDEX IF NOT EXISTS idx_contact_phones_phone ON contact_phones(phone_number);
 CREATE INDEX IF NOT EXISTS idx_conversations_last ON conversations(last_message_at DESC);
 CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_autoreply_deliveries_recipient ON autoreply_deliveries(recipient_number);
 """
 
 
@@ -192,6 +264,120 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+          from_number TEXT NOT NULL DEFAULT '',
+          to_numbers TEXT NOT NULL DEFAULT '[]',
+          text TEXT NOT NULL DEFAULT '',
+          media_urls TEXT NOT NULL DEFAULT '[]',
+          scheduled_for TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          provider TEXT NOT NULL DEFAULT '',
+          message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          failure TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          sent_at TEXT
+        )
+        """
+    )
+    scheduled_columns = {row["name"] for row in conn.execute("PRAGMA table_info(scheduled_messages)").fetchall()}
+    for name, definition in {
+        "provider": "TEXT NOT NULL DEFAULT ''",
+        "message_id": "INTEGER REFERENCES messages(id) ON DELETE SET NULL",
+        "failure": "TEXT NOT NULL DEFAULT ''",
+        "sent_at": "TEXT",
+    }.items():
+        if name not in scheduled_columns:
+            conn.execute(f"ALTER TABLE scheduled_messages ADD COLUMN {name} {definition}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS autoreply_rules (
+          phone_number TEXT PRIMARY KEY,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          message TEXT NOT NULL DEFAULT '',
+          cooldown_hours INTEGER NOT NULL DEFAULT 24,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS autoreply_deliveries (
+          phone_number TEXT NOT NULL,
+          recipient_number TEXT NOT NULL,
+          last_sent_at TEXT NOT NULL,
+          message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(phone_number, recipient_number)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_autoreply_deliveries_recipient ON autoreply_deliveries(recipient_number)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS voice_rules (
+          phone_number TEXT PRIMARY KEY,
+          forwarding_enabled INTEGER NOT NULL DEFAULT 0,
+          forward_to_number TEXT NOT NULL DEFAULT '',
+          forward_timeout_seconds INTEGER NOT NULL DEFAULT 20,
+          voicemail_enabled INTEGER NOT NULL DEFAULT 1,
+          voicemail_greeting TEXT NOT NULL DEFAULT '',
+          voicemail_greeting_media_url TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS voicemail_recordings (
+          provider TEXT NOT NULL,
+          recording_id TEXT NOT NULL,
+          from_number TEXT NOT NULL DEFAULT '',
+          to_number TEXT NOT NULL DEFAULT '',
+          recording_url TEXT NOT NULL DEFAULT '',
+          local_path TEXT NOT NULL DEFAULT '',
+          content_type TEXT NOT NULL DEFAULT '',
+          size INTEGER,
+          sha256 TEXT NOT NULL DEFAULT '',
+          duration_seconds REAL,
+          transcription_provider TEXT NOT NULL DEFAULT '',
+          transcription_status TEXT NOT NULL DEFAULT '',
+          transcript_text TEXT NOT NULL DEFAULT '',
+          failure TEXT NOT NULL DEFAULT '',
+          revai_job_id TEXT NOT NULL DEFAULT '',
+          raw_json TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(provider, recording_id)
+        )
+        """
+    )
+    voicemail_columns = {row["name"] for row in conn.execute("PRAGMA table_info(voicemail_recordings)").fetchall()}
+    for name, definition in {
+        "local_path": "TEXT NOT NULL DEFAULT ''",
+        "content_type": "TEXT NOT NULL DEFAULT ''",
+        "size": "INTEGER",
+        "sha256": "TEXT NOT NULL DEFAULT ''",
+        "transcription_provider": "TEXT NOT NULL DEFAULT ''",
+        "transcription_status": "TEXT NOT NULL DEFAULT ''",
+        "transcript_text": "TEXT NOT NULL DEFAULT ''",
+        "failure": "TEXT NOT NULL DEFAULT ''",
+        "revai_job_id": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in voicemail_columns:
+            conn.execute(f"ALTER TABLE voicemail_recordings ADD COLUMN {name} {definition}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_voicemail_recordings_revai_job ON voicemail_recordings(revai_job_id)")
+    voice_columns = {row["name"] for row in conn.execute("PRAGMA table_info(voice_rules)").fetchall()}
+    if "voicemail_greeting_media_url" not in voice_columns:
+        conn.execute("ALTER TABLE voice_rules ADD COLUMN voicemail_greeting_media_url TEXT NOT NULL DEFAULT ''")
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
     if "is_archived" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0")
