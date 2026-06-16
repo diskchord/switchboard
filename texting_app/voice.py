@@ -34,7 +34,7 @@ DEFAULT_VOICEMAIL_GREETING = "Please leave a message after the beep."
 MIN_VOICEMAIL_RECORDING_SECONDS = 2.0
 MIN_VOICEMAIL_MAX_LENGTH_SECONDS = 180
 VOICEMAIL_MAX_LENGTH_SECONDS = max(300, MIN_VOICEMAIL_MAX_LENGTH_SECONDS)
-VOICEMAIL_SILENCE_TIMEOUT_SECONDS = 5
+VOICEMAIL_SILENCE_TIMEOUT_SECONDS = 0
 REVAI_SUCCESS_STATUSES = {"transcribed"}
 REVAI_FAILURE_STATUSES = {"failed"}
 SIP_MAX_LENGTH = 255
@@ -230,8 +230,20 @@ def _provider_transcription_enabled() -> bool:
 
 
 def _safe_error_text(error: BaseException) -> str:
-    text = str(error)
+    text = _redact_sensitive_text(str(error))
     return text[:500] if len(text) > 500 else text
+
+
+def _redact_sensitive_text(text: str) -> str:
+    text = re.sub(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
+    text = re.sub(r"\bBasic\s+[A-Za-z0-9+/=]+", "Basic [redacted]", text)
+    text = re.sub(
+        r"((?:X-Amz-Signature|X-Amz-Credential|Signature|AccessKeyId)=)[^&\s<]+",
+        r"\1[redacted]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
 
 
 def _http_error_detail(error: urlerror.HTTPError) -> str:
@@ -239,6 +251,7 @@ def _http_error_detail(error: urlerror.HTTPError) -> str:
         body = error.read().decode("utf-8", errors="replace").strip()
     except OSError:
         body = ""
+    body = _redact_sensitive_text(body)
     detail = f"HTTP {error.code}"
     if body:
         detail = f"{detail}: {body[:500]}"
@@ -325,11 +338,39 @@ def _revai_upload_file(path: Path, *, content_type: str, options: dict[str, Any]
     return json.loads(response_body.decode("utf-8"))
 
 
-def _recording_source_auth_headers(provider: str) -> dict[str, str]:
+def _url_host(url: str) -> str:
+    return urlparse(url).hostname.lower() if urlparse(url).hostname else ""
+
+
+def _signed_download_url(url: str) -> bool:
+    keys = {key.lower() for key in parse_qs(urlparse(url).query).keys()}
+    if "x-amz-algorithm" in keys or "x-amz-signature" in keys:
+        return True
+    return "signature" in keys and bool(keys & {"expires", "credential", "x-amz-credential", "x-goog-credential"})
+
+
+def _same_domain_or_subdomain(host: str, domain: str) -> bool:
+    return bool(host and domain and (host == domain or host.endswith(f".{domain}")))
+
+
+def _telnyx_api_host() -> str:
+    base = app_settings.get_value("telnyx.api_base", config.TELNYX_API_BASE).strip()
+    return _url_host(base)
+
+
+def _recording_source_auth_headers(provider: str, download_url: str = "") -> dict[str, str]:
+    host = _url_host(download_url) if download_url else ""
+    if download_url and _signed_download_url(download_url):
+        return {}
     if provider == "telnyx":
+        telnyx_host = _telnyx_api_host()
+        if host and not (_same_domain_or_subdomain(host, "telnyx.com") or host == telnyx_host):
+            return {}
         api_key = app_settings.get_value("telnyx.api_key", config.TELNYX_API_KEY).strip()
         return {"Authorization": f"Bearer {api_key}"} if api_key else {}
     if provider == "twilio":
+        if host and not _same_domain_or_subdomain(host, "twilio.com"):
+            return {}
         account_sid = app_settings.get_value("twilio.account_sid", config.TWILIO_ACCOUNT_SID).strip()
         auth_token = app_settings.get_value("twilio.auth_token", config.TWILIO_AUTH_TOKEN).strip()
         if account_sid and auth_token:
@@ -433,7 +474,7 @@ def _download_recording_to_media(provider: str, recording_id: str, recording_url
         raise VoiceError("Recording callback did not include a recording URL.")
     headers = {"User-Agent": "switchboard/0.1"}
     if download_url == recording_url:
-        headers.update(_recording_source_auth_headers(provider))
+        headers.update(_recording_source_auth_headers(provider, download_url))
     request = urlrequest.Request(download_url, headers=headers)
     try:
         with urlrequest.urlopen(request, timeout=60) as response:
