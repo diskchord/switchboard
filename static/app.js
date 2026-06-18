@@ -42,6 +42,17 @@ const state = {
   sendHoldTriggered: false,
   pullRefresh: null,
   isRefreshingFromPull: false,
+  audioContext: null,
+  audioUnlocked: false,
+  latestInboundSoundKey: "",
+  receiveSoundPrimed: false,
+  soundSettings: {
+    sendEnabled: true,
+    sendTone: "ascending",
+    receiveMode: "auto",
+    receiveTone: "chime",
+    volume: 0.45,
+  },
   language: "en",
   hotkeysEnabled: true,
   hotkeys: {},
@@ -136,6 +147,7 @@ const MIN_AUTO_REFRESH_SECONDS = 5;
 const SEND_HOLD_MS = 550;
 const SEND_NOW_SYMBOL = "➤";
 const SCHEDULE_SEND_SYMBOL = "◷";
+const SOUND_TONES = new Set(["ascending", "chime", "pop", "bell"]);
 const REACTION_INVISIBLE_PATTERN = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
 const REACTION_SPACING_PATTERN = /[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]/g;
 const REACTION_WORDS = new Map([
@@ -215,6 +227,8 @@ const I18N = {
     "stats.totals": "Totals",
     "stats.by_status": "By status",
     "stats.by_source": "By source",
+    "stats.by_type": "By type",
+    "stats.by_direction": "By direction",
     "stats.recent": "Recent days",
     "stats.inbox_conversations": "Inbox",
     "stats.hidden_conversations": "Hidden",
@@ -378,6 +392,8 @@ const I18N = {
     "stats.totals": "Totales",
     "stats.by_status": "Por estado",
     "stats.by_source": "Por origen",
+    "stats.by_type": "Por tipo",
+    "stats.by_direction": "Por dirección",
     "stats.recent": "Días recientes",
     "stats.inbox_conversations": "Entrada",
     "stats.hidden_conversations": "Ocultos",
@@ -541,6 +557,8 @@ const I18N = {
     "stats.totals": "Totaux",
     "stats.by_status": "Par statut",
     "stats.by_source": "Par source",
+    "stats.by_type": "Par type",
+    "stats.by_direction": "Par direction",
     "stats.recent": "Jours récents",
     "stats.inbox_conversations": "Boîte",
     "stats.hidden_conversations": "Masqués",
@@ -1054,10 +1072,118 @@ function configureAutoRefresh() {
   scheduleAutoRefresh();
 }
 
+function settingBool(key, fallback = false) {
+  const value = String(bootstrapSettingValue(key, fallback ? "1" : "0")).trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(value);
+}
+
+function configureSounds() {
+  const sendTone = String(bootstrapSettingValue("sounds.send_tone", "ascending")).trim().toLowerCase();
+  const receiveTone = String(bootstrapSettingValue("sounds.receive_tone", "chime")).trim().toLowerCase();
+  const receiveMode = String(bootstrapSettingValue("sounds.receive_mode", "auto")).trim().toLowerCase();
+  const rawVolume = Number(bootstrapSettingValue("sounds.volume", "45"));
+  state.soundSettings = {
+    sendEnabled: settingBool("sounds.send_enabled", true),
+    sendTone: SOUND_TONES.has(sendTone) ? sendTone : "ascending",
+    receiveMode: ["auto", "on", "off"].includes(receiveMode) ? receiveMode : "auto",
+    receiveTone: SOUND_TONES.has(receiveTone) ? receiveTone : "chime",
+    volume: clamp(Number.isFinite(rawVolume) ? rawVolume : 45, 0, 100) / 100,
+  };
+}
+
+function ntfyNotificationsActive() {
+  return settingBool("notifications.ntfy_enabled", false) && Boolean(String(bootstrapSettingValue("notifications.ntfy_endpoint", "")).trim());
+}
+
+function receiveSoundEnabled() {
+  const mode = state.soundSettings.receiveMode;
+  if (mode === "on") return true;
+  if (mode === "off") return false;
+  return !ntfyNotificationsActive();
+}
+
+function audioContext() {
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) return null;
+  if (!state.audioContext) {
+    state.audioContext = new AudioContextCtor();
+  }
+  return state.audioContext;
+}
+
+function unlockAudio() {
+  const context = audioContext();
+  if (!context) return;
+  context.resume?.().catch(() => {});
+  state.audioUnlocked = true;
+}
+
+function toneSequence(name) {
+  if (name === "chime") {
+    return [
+      { frequency: 659.25, duration: 0.08, gain: 0.38 },
+      { frequency: 987.77, duration: 0.15, gain: 0.26, gap: 0.025 },
+    ];
+  }
+  if (name === "pop") {
+    return [
+      { frequency: 349.23, duration: 0.045, gain: 0.36 },
+      { frequency: 523.25, duration: 0.07, gain: 0.26, gap: 0.018 },
+    ];
+  }
+  if (name === "bell") {
+    return [
+      { frequency: 783.99, duration: 0.1, gain: 0.32 },
+      { frequency: 1174.66, duration: 0.17, gain: 0.22, gap: 0.035 },
+    ];
+  }
+  return [
+    { frequency: 440, duration: 0.055, gain: 0.34 },
+    { frequency: 554.37, duration: 0.055, gain: 0.3, gap: 0.018 },
+    { frequency: 659.25, duration: 0.085, gain: 0.25, gap: 0.018 },
+  ];
+}
+
+function playTone(name) {
+  const context = audioContext();
+  if (!context) return;
+  context.resume?.().catch(() => {});
+  const volume = clamp(state.soundSettings.volume || 0, 0, 1);
+  if (volume <= 0) return;
+  let cursor = context.currentTime + 0.015;
+  for (const note of toneSequence(name)) {
+    cursor += note.gap || 0;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(note.frequency, cursor);
+    gain.gain.setValueAtTime(0.0001, cursor);
+    gain.gain.linearRampToValueAtTime(volume * note.gain, cursor + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, cursor + note.duration);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(cursor);
+    oscillator.stop(cursor + note.duration + 0.02);
+    cursor += note.duration;
+  }
+}
+
+function playMessageSound(kind) {
+  if (kind === "send") {
+    if (!state.soundSettings.sendEnabled) return;
+    playTone(state.soundSettings.sendTone);
+    return;
+  }
+  if (kind === "receive" && receiveSoundEnabled()) {
+    playTone(state.soundSettings.receiveTone);
+  }
+}
+
 function applyRuntimeSettings() {
   state.language = resolveLanguage(bootstrapSettingValue("ui.language", "auto"));
   configureHotkeys();
   configureAutoRefresh();
+  configureSounds();
   applyStaticTranslations();
   restoreThreadHeaderAfterStaticTranslations();
   applyTheme(document.documentElement.dataset.theme || "light", { persist: false });
@@ -1282,6 +1408,8 @@ function renderStats(payload) {
   ];
   const statusItems = (payload?.by_status || []).map((item) => [statsLabel(item.status), item.count]);
   const sourceItems = (payload?.by_source || []).map((item) => [statsLabel(item.source), item.count]);
+  const typeItems = (payload?.by_type || []).map((item) => [statsLabel(item.message_type), item.count]);
+  const directionItems = (payload?.by_direction || []).map((item) => [statsLabel(item.direction), item.count]);
   const recentItems = (payload?.recent_days || []).map((item) => [
     item.day,
     `${item.count ?? 0} (${item.inbound ?? 0}/${item.outbound ?? 0})`,
@@ -1298,6 +1426,14 @@ function renderStats(payload) {
     <section class="stats-section">
       <h3>${escapeHtml(t("stats.by_source"))}</h3>
       <div class="stats-grid">${renderStatsList(sourceItems)}</div>
+    </section>
+    <section class="stats-section">
+      <h3>${escapeHtml(t("stats.by_type"))}</h3>
+      <div class="stats-grid">${renderStatsList(typeItems)}</div>
+    </section>
+    <section class="stats-section">
+      <h3>${escapeHtml(t("stats.by_direction"))}</h3>
+      <div class="stats-grid">${renderStatsList(directionItems)}</div>
     </section>
     <section class="stats-section">
       <h3>${escapeHtml(t("stats.recent"))}</h3>
@@ -1786,8 +1922,19 @@ function openContactNameModal(participant) {
   });
 }
 
+function valueIsTruthy(value) {
+  if (value === true || value === 1) return true;
+  return ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+}
+
 function conversationIsRead(conversation) {
-  if (conversation?.manual_unread_at) return false;
+  if (!conversation) return false;
+  if (conversation.manual_unread_at) return false;
+  if (conversation.needs_attention !== undefined && conversation.needs_attention !== null && conversation.needs_attention !== "") {
+    return !valueIsTruthy(conversation.needs_attention);
+  }
+  const lastDirection = String(conversation.last_direction || "").toLowerCase();
+  if (lastDirection && lastDirection !== "inbound") return true;
   const last = conversation?.last_occurred_at || conversation?.last_message_at || conversation?.sort_at || "";
   const dealt = conversation?.dealt_with_at || "";
   return Boolean(last && dealt && dealt >= last);
@@ -1855,14 +2002,24 @@ function preferredReplyIdentity(conversation = state.currentConversation, messag
 function renderBootstrap({ forceIdentities = false } = {}) {
   const stats = state.bootstrap.stats || {};
   const previousFromNumber = els.fromNumber.value;
-  els.statStrip.innerHTML = [
-    [t("stats.threads"), stats.conversations],
-    [t("stats.texts"), stats.messages],
-    [t("stats.media"), stats.attachments],
-    [t("stats.people"), stats.contacts],
-  ]
-    .map(([label, value]) => `<div class="stat"><strong>${value ?? 0}</strong><span>${label}</span></div>`)
-    .join("");
+  const showSummaryStats = settingBool("behavior.show_summary_stats", true);
+  els.statStrip.hidden = !showSummaryStats;
+  els.statStrip.innerHTML = showSummaryStats
+    ? [
+        [t("stats.threads"), stats.conversations],
+        [t("stats.texts"), stats.messages],
+        [t("stats.media"), stats.attachments],
+        [t("stats.people"), stats.contacts],
+      ]
+        .map(
+          ([label, value]) => `
+            <button class="stat" type="button" aria-label="${escapeHtml(`${t("stats.title")}: ${label}`)}">
+              <strong>${escapeHtml(value ?? 0)}</strong>
+              <span>${escapeHtml(label)}</span>
+            </button>`,
+        )
+        .join("")
+    : "";
 
   els.fromNumber.innerHTML = (state.bootstrap.identities || [])
     .filter((identity) => identity.is_active)
@@ -3038,6 +3195,42 @@ function messagePayloadMatchesState(payload) {
   );
 }
 
+function inboundSoundKey(occurredAt, id) {
+  const timestamp = String(occurredAt || "");
+  if (!timestamp) return "";
+  return `${timestamp}|${String(id || 0).padStart(12, "0")}`;
+}
+
+function latestInboundSoundKeyFromConversations(conversations = []) {
+  return conversations.reduce((latest, conversation) => {
+    if (String(conversation.last_direction || "").toLowerCase() !== "inbound") return latest;
+    const key = inboundSoundKey(conversation.last_occurred_at || conversation.sort_at, conversation.last_message_id || conversation.id);
+    return key > latest ? key : latest;
+  }, "");
+}
+
+function latestInboundSoundKeyFromMessages(messages = []) {
+  return messages.reduce((latest, message) => {
+    if (String(message.direction || "").toLowerCase() !== "inbound") return latest;
+    const key = inboundSoundKey(message.occurred_at, message.id);
+    return key > latest ? key : latest;
+  }, "");
+}
+
+function trackInboundSoundKey(key, { play = false } = {}) {
+  if (!key) return;
+  if (!state.receiveSoundPrimed) {
+    state.latestInboundSoundKey = key;
+    state.receiveSoundPrimed = true;
+    return;
+  }
+  if (key <= state.latestInboundSoundKey) return;
+  state.latestInboundSoundKey = key;
+  if (play) {
+    playMessageSound("receive");
+  }
+}
+
 async function pollForChanges({ prime = false, force = false } = {}) {
   if (!state.bootstrap || state.autoRefreshInFlight || document.hidden) return;
   state.autoRefreshInFlight = true;
@@ -3062,6 +3255,7 @@ async function pollForChanges({ prime = false, force = false } = {}) {
         append: false,
         preserveScroll: true,
         limit: Math.max(80, state.conversations.length || 0),
+        soundForNew: true,
       });
     }
     if (conversationChanged && state.currentConversationId === conversationId) {
@@ -3105,6 +3299,7 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     state.currentConversation = payload.conversation;
     state.lastThreadRefreshAt = Date.now();
     if (messagesChanged) {
+      trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: true });
       state.messages = payload.messages;
       state.hasMoreMessages = payload.has_more;
       state.olderCount = payload.older_count;
@@ -3323,7 +3518,7 @@ function bindColumnResizers() {
   window.visualViewport?.addEventListener("resize", updateComposerOffset);
 }
 
-async function loadConversations({ append = false, preserveScroll = false, limit = 80 } = {}) {
+async function loadConversations({ append = false, preserveScroll = false, limit = 80, soundForNew = false } = {}) {
   if (append && state.isLoadingConversations) return;
   if (append && !state.hasMoreConversations) return;
   const requestSeq = ++state.conversationRequestSeq;
@@ -3347,6 +3542,7 @@ async function loadConversations({ append = false, preserveScroll = false, limit
     } else {
       state.conversations = payload.conversations;
       state.lastListRefreshAt = Date.now();
+      trackInboundSoundKey(latestInboundSoundKeyFromConversations(state.conversations), { play: soundForNew });
     }
     state.hasMoreConversations = payload.has_more;
   } finally {
@@ -3378,6 +3574,7 @@ async function openConversation(id, options = {}) {
   state.messages = payload.messages;
   state.hasMoreMessages = payload.has_more;
   state.olderCount = payload.older_count;
+  trackInboundSoundKey(latestInboundSoundKeyFromMessages(state.messages));
   state.lastThreadRefreshAt = Date.now();
   selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
   renderConversations();
@@ -3614,12 +3811,23 @@ async function sendCurrentMessage() {
   showComposerError("");
   els.sendButton.disabled = true;
   try {
-    await api("/api/messages", {
+    const payload = await api("/api/messages", {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    playMessageSound("send");
+    if (payload.conversation && Number(payload.conversation.id) === state.currentConversationId) {
+      state.currentConversation = payload.conversation;
+      const current = state.conversations.find((conversation) => conversation.id === state.currentConversationId);
+      if (current) {
+        current.dealt_with_at = payload.conversation.dealt_with_at;
+        current.manual_unread_at = payload.conversation.manual_unread_at;
+        current.needs_attention = payload.conversation.needs_attention;
+      }
+      renderThreadHeader();
+    }
     clearComposerDraft();
-    await loadConversations();
+    await loadConversations({ preserveScroll: true });
     if (state.currentConversationId) {
       await openConversation(state.currentConversationId);
     } else {
@@ -3913,6 +4121,8 @@ async function saveCurrentContactName() {
 }
 
 function bindEvents() {
+  document.addEventListener("pointerdown", unlockAudio, { once: true, passive: true });
+  document.addEventListener("keydown", unlockAudio, { once: true });
   bindColumnResizers();
   els.mobileBackButton.addEventListener("click", () => {
     closeMobileThread();
@@ -3938,6 +4148,9 @@ function bindEvents() {
   els.statsClose.addEventListener("click", closeStats);
   els.statsModal.addEventListener("click", (event) => {
     if (event.target === els.statsModal) closeStats();
+  });
+  els.statStrip.addEventListener("click", (event) => {
+    if (event.target.closest(".stat")) openStats();
   });
   els.selectionCancelButton.addEventListener("click", clearConversationSelection);
   els.bulkReadButton.addEventListener("click", () => bulkConversationAction("read"));

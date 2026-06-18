@@ -1,0 +1,22 @@
+services:
+  switchboard:
+    build:
+      context: .
+    image: switchboard:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TEXTING_HOST: 0.0.0.0
+      TEXTING_PORT: 8766
+      TEXTING_DATA_DIR: /data
+      TEXTING_DB: /data/switchboard.sqlite
+      TEXTING_MEDIA_DIR: /data/media
+      TEXTING_PUBLIC_UPLOAD_DIR: /data/public-uploads
+    ports:
+      - "${SWITCHBOARD_PORT:-8766}:8766"
+    volumes:
+      - switchboard-data:/data
+
+volumes:
+  switchboard-data:

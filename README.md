@@ -38,6 +38,40 @@ python3 server.py --host 127.0.0.1 --port 8766
 
 Open `http://127.0.0.1:8766`.
 
+## Docker
+
+Switchboard can run as a Docker Compose service with SQLite, media, voicemail recordings, and outbound upload staging stored in the `switchboard-data` volume.
+
+```bash
+cp .env.example .env
+# Edit .env with your sender numbers and provider credentials.
+docker compose up -d --build
+```
+
+Open `http://127.0.0.1:8766`. To use a different host port, set `SWITCHBOARD_PORT` before starting Compose:
+
+```bash
+SWITCHBOARD_PORT=8080 docker compose up -d --build
+```
+
+The container binds Switchboard to `0.0.0.0:8766` internally and stores runtime data at `/data`:
+
+- `/data/switchboard.sqlite`: SQLite database.
+- `/data/media`: inbound MMS, fax, and voicemail media kept locally.
+- `/data/public-uploads`: outbound MMS upload staging.
+
+The image includes `ffmpeg` for browser-friendly video conversion and `poppler-utils` for fax PDF page previews. The Docker health check uses `/api/health`.
+
+For a systemd-managed Docker install, put the checkout at `/opt/switchboard`, create `/opt/switchboard/.env`, then install the included unit:
+
+```bash
+sudo cp docker/systemd/switchboard.service /etc/systemd/system/switchboard.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now switchboard.service
+```
+
+On a public server, keep TLS and authentication in front of the app. Provider webhook routes such as `/api/telnyx/webhook`, `/api/telnyx/voice`, `/api/telnyx/voice/recording`, `/api/twilio/webhook`, and `/api/revai/webhook` must remain reachable by those providers. If outbound MMS uploads need to be fetched by Telnyx, set `TEXTING_PUBLIC_UPLOAD_BASE_URL` to a public URL that reaches the container's `/uploads/` route or another reverse-proxy alias for `/data/public-uploads`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the values you use.
@@ -151,6 +185,10 @@ Twilio's single-message API sends to one recipient at a time, so a multi-recipie
 The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings.
 
 The browser checks `/api/refresh` on the configured auto-refresh interval. That endpoint returns lightweight change tokens first; the app only reloads the conversation list or open thread when those tokens change. Use `TEXTING_AUTO_REFRESH_SECONDS=0`, or set Auto-refresh seconds to `0` in Settings, to disable browser polling.
+
+The summary statistic bubbles above the conversation list open the fuller statistics view. Hide them with `TEXTING_SHOW_SUMMARY_STATS=0`, or turn off Show summary stats in Settings > Behavior.
+
+Send and receive sound effects are configurable in Settings > Sounds. `TEXTING_RECEIVE_SOUND=auto` plays receive tones unless ntfy notifications are enabled, so ntfy-backed installs stay quiet by default.
 
 Hotkeys are enabled by default and can be changed in Settings > Hotkeys. Defaults:
 

@@ -10,6 +10,15 @@ from .db import connect, init_db
 from .timeutil import now_est
 
 
+SOUND_TONE_OPTIONS = (
+    ("ascending", "Ascending"),
+    ("chime", "Chime"),
+    ("pop", "Pop"),
+    ("bell", "Bell"),
+)
+SOUND_TONE_VALUES = {value for value, _ in SOUND_TONE_OPTIONS}
+
+
 @dataclass(frozen=True)
 class SettingDef:
     key: str
@@ -48,6 +57,15 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         "bool",
         "1",
         help="Applies when this browser has no saved panel preference.",
+    ),
+    SettingDef(
+        "behavior.show_summary_stats",
+        "Show summary stats",
+        "Behavior",
+        "bool",
+        "1" if config.SHOW_SUMMARY_STATS else "0",
+        help="Shows the clickable statistic bubbles above the conversation list.",
+        env_names=("TEXTING_SHOW_SUMMARY_STATS",),
     ),
     SettingDef(
         "behavior.auto_refresh_seconds",
@@ -92,6 +110,51 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         str(config.NATIVE_NOTIFICATION_INTERVAL_MINUTES),
         help="Android periodic background checks have a 15 minute minimum.",
         env_names=("TEXTING_NATIVE_NOTIFICATION_INTERVAL_MINUTES",),
+    ),
+    SettingDef(
+        "sounds.send_enabled",
+        "Play send sound",
+        "Sounds",
+        "bool",
+        "1" if config.SEND_SOUND_ENABLED else "0",
+        env_names=("TEXTING_SEND_SOUND_ENABLED",),
+    ),
+    SettingDef(
+        "sounds.send_tone",
+        "Send sound",
+        "Sounds",
+        "select",
+        config.SEND_SOUND_TONE if config.SEND_SOUND_TONE in SOUND_TONE_VALUES else "ascending",
+        options=SOUND_TONE_OPTIONS,
+        env_names=("TEXTING_SEND_SOUND_TONE",),
+    ),
+    SettingDef(
+        "sounds.receive_mode",
+        "Receive sound",
+        "Sounds",
+        "select",
+        config.RECEIVE_SOUND_MODE if config.RECEIVE_SOUND_MODE in {"auto", "on", "off"} else "auto",
+        options=(("auto", "Auto, off with ntfy"), ("on", "On"), ("off", "Off")),
+        help="Auto plays receive sounds unless ntfy notifications are enabled.",
+        env_names=("TEXTING_RECEIVE_SOUND",),
+    ),
+    SettingDef(
+        "sounds.receive_tone",
+        "Receive tone",
+        "Sounds",
+        "select",
+        config.RECEIVE_SOUND_TONE if config.RECEIVE_SOUND_TONE in SOUND_TONE_VALUES else "chime",
+        options=SOUND_TONE_OPTIONS,
+        env_names=("TEXTING_RECEIVE_SOUND_TONE",),
+    ),
+    SettingDef(
+        "sounds.volume",
+        "Sound volume",
+        "Sounds",
+        "number",
+        str(min(max(config.SOUND_VOLUME, 0), 100)),
+        help="Volume percentage for Switchboard send and receive sounds.",
+        env_names=("TEXTING_SOUND_VOLUME",),
     ),
     SettingDef(
         "uploads.public_directory",

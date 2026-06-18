@@ -661,6 +661,7 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
         f"""
         SELECT c.*,
           m.text AS last_text,
+          m.id AS last_message_id,
           m.message_type AS last_message_type,
           m.direction AS last_direction,
           m.status AS last_status,
@@ -1125,6 +1126,28 @@ def message_stats() -> dict:
             """
         ).fetchall()
     ]
+    by_type = [
+        _row_dict(row)
+        for row in conn.execute(
+            """
+            SELECT message_type, COUNT(*) AS count
+            FROM messages
+            GROUP BY message_type
+            ORDER BY count DESC, message_type
+            """
+        ).fetchall()
+    ]
+    by_direction = [
+        _row_dict(row)
+        for row in conn.execute(
+            """
+            SELECT direction, COUNT(*) AS count
+            FROM messages
+            GROUP BY direction
+            ORDER BY count DESC, direction
+            """
+        ).fetchall()
+    ]
     recent_days = [
         _row_dict(row)
         for row in conn.execute(
@@ -1144,6 +1167,8 @@ def message_stats() -> dict:
         "totals": totals,
         "by_status": by_status,
         "by_source": by_source,
+        "by_type": by_type,
+        "by_direction": by_direction,
         "recent_days": recent_days,
         "server_time": now_est(),
     }
@@ -1397,6 +1422,31 @@ def create_conversation(payload: dict) -> dict:
     return {"conversation_id": conversation_id, **get_messages(conversation_id)}
 
 
+def _mark_reply_message_read(message_id: int) -> dict | None:
+    conn = connect()
+    init_db(conn)
+    row = conn.execute(
+        "SELECT conversation_id, occurred_at FROM messages WHERE id = ?",
+        (message_id,),
+    ).fetchone()
+    if not row:
+        return None
+    conversation_id = int(row["conversation_id"])
+    marker = row["occurred_at"] or now_est()
+    conn.execute(
+        """
+        UPDATE conversations
+        SET dealt_with_at = ?,
+            manual_unread_at = NULL,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (marker, now_est(), conversation_id),
+    )
+    conn.commit()
+    return get_messages(conversation_id)["conversation"]
+
+
 def send_api_message(payload: dict) -> dict:
     conversation_id = payload.get("conversation_id")
     to_numbers = [normalize_phone(x) for x in payload.get("to_numbers", []) if normalize_phone(x)]
@@ -1412,7 +1462,12 @@ def send_api_message(payload: dict) -> dict:
         conversation_id=int(conversation_id) if conversation_id else None,
     )
     if result.get("message_id"):
-        _mark_uploaded_attachments_local(int(result["message_id"]), media_urls)
+        message_id = int(result["message_id"])
+        _mark_uploaded_attachments_local(message_id, media_urls)
+        conversation = _mark_reply_message_read(message_id)
+        if conversation:
+            result["conversation_id"] = conversation["id"]
+            result["conversation"] = conversation
     return result
 
 
@@ -1541,6 +1596,7 @@ def _send_scheduled_row(conn, row) -> None:
         message_id = int(result["message_id"]) if result.get("message_id") else None
         if message_id:
             _mark_uploaded_attachments_local(message_id, scheduled["media_urls"])
+            _mark_reply_message_read(message_id)
         conn.execute(
             """
             UPDATE scheduled_messages
@@ -1693,7 +1749,9 @@ class TextingHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         try:
-            if path == "/api/bootstrap":
+            if path == "/api/health":
+                self._send_json({"ok": True, "app": config.APP_SLUG})
+            elif path == "/api/bootstrap":
                 self._send_json(bootstrap())
             elif path == "/api/settings":
                 self._send_json(configured_values())

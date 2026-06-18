@@ -379,11 +379,22 @@ select:focus {
 }
 
 .stat {
+  appearance: none;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-2);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
   padding: 8px;
   min-width: 0;
+  text-align: left;
+}
+
+.stat:hover,
+.stat:focus-visible {
+  border-color: var(--hover-line);
+  background: var(--panel);
 }
 
 .stat strong {
