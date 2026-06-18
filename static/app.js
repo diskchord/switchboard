@@ -284,6 +284,7 @@ const I18N = {
     "recipient.add": "Add recipient",
     "recipient.needs_phone": "Recipient needs a phone number.",
     "recipient.add_one": "Add a recipient.",
+    "recipient.text_number": "Text this number",
     "messages.aria": "Messages",
     "messages.empty": "No messages yet.",
     "messages.load_older": "Load older ({count})",
@@ -449,6 +450,7 @@ const I18N = {
     "recipient.add": "Agregar destinatario",
     "recipient.needs_phone": "El destinatario necesita un número de teléfono.",
     "recipient.add_one": "Agrega un destinatario.",
+    "recipient.text_number": "Enviar mensaje a este número",
     "messages.aria": "Mensajes",
     "messages.empty": "Aún no hay mensajes.",
     "messages.load_older": "Cargar anteriores ({count})",
@@ -614,6 +616,7 @@ const I18N = {
     "recipient.add": "Ajouter un destinataire",
     "recipient.needs_phone": "Le destinataire doit avoir un numéro de téléphone.",
     "recipient.add_one": "Ajoutez un destinataire.",
+    "recipient.text_number": "Texter ce numéro",
     "messages.aria": "Messages",
     "messages.empty": "Aucun message pour le moment.",
     "messages.load_older": "Charger les anciens ({count})",
@@ -1866,11 +1869,25 @@ function participantDisplay(participant) {
 }
 
 function normalizeDraftPhone(raw) {
+  const text = String(raw || "").trim();
   const digits = String(raw || "").replace(/\D/g, "");
-  let phone = String(raw || "").trim();
-  if (digits.length === 10) phone = `+1${digits}`;
-  else if (digits.length === 11 && digits.startsWith("1")) phone = `+${digits}`;
-  return phone;
+  if (!digits) return text;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  if (text.startsWith("+") || digits.length >= 7) return `+${digits}`;
+  return text;
+}
+
+function isUsableDraftPhone(phone) {
+  return phone.startsWith("+") && phone.replace(/\D/g, "").length >= 7;
+}
+
+function pendingRecipientPhone() {
+  if (state.currentConversation) return "";
+  const raw = els.recipientInput.value.trim();
+  if (!raw) return "";
+  const phone = normalizeDraftPhone(raw);
+  return isUsableDraftPhone(phone) ? phone : "";
 }
 
 function usefulContactName(phone, displayName = "") {
@@ -2560,17 +2577,19 @@ function renderRecipientSuggestions() {
   els.recipientSuggestions.innerHTML = state.recipientSuggestions
     .map((contact, index) => {
       const active = index === state.recipientSuggestionIndex;
-      const label = contact.label ? ` ${contact.label}` : "";
+      const isManual = contact.kind === "manual";
+      const label = !isManual && contact.label ? ` ${contact.label}` : "";
+      const title = isManual ? t("recipient.text_number") : contact.display_name;
       return `
         <button
-          class="recipient-suggestion ${active ? "active" : ""}"
+          class="recipient-suggestion ${isManual ? "manual-recipient" : ""} ${active ? "active" : ""}"
           id="recipient-suggestion-${index}"
           role="option"
           type="button"
           aria-selected="${active ? "true" : "false"}"
           data-suggestion-index="${index}"
         >
-          <strong>${escapeHtml(contact.display_name)}</strong>
+          <strong>${escapeHtml(title)}</strong>
           <span>${escapeHtml(contact.phone_display)}${escapeHtml(label)}</span>
         </button>`;
     })
@@ -2594,7 +2613,7 @@ function moveRecipientSuggestion(delta) {
 function chooseRecipientSuggestion(index = state.recipientSuggestionIndex) {
   const contact = state.recipientSuggestions[index];
   if (!contact) return false;
-  addRecipient(contact.phone_number, contact.display_name);
+  addRecipient(contact.phone_number, contact.kind === "manual" ? "" : contact.display_name);
   return true;
 }
 
@@ -2605,19 +2624,38 @@ async function searchRecipientSuggestions() {
     return;
   }
   const seq = ++state.recipientSuggestionSeq;
+  const manualPhone = pendingRecipientPhone();
+  const manualSuggestion =
+    manualPhone && !state.recipientDraft.includes(manualPhone)
+      ? {
+          kind: "manual",
+          phone_number: manualPhone,
+          phone_display: phoneDisplay(manualPhone),
+          display_name: "",
+          label: "",
+        }
+      : null;
   try {
     const payload = await api(`/api/contacts?q=${encodeURIComponent(term)}`);
     if (seq !== state.recipientSuggestionSeq) return;
     const selected = new Set(state.recipientDraft);
     const seen = new Set();
-    state.recipientSuggestions = (payload.contacts || []).filter((contact) => {
+    if (manualSuggestion) seen.add(manualSuggestion.phone_number);
+    const contactSuggestions = (payload.contacts || []).filter((contact) => {
       if (!contact.phone_number || selected.has(contact.phone_number) || seen.has(contact.phone_number)) return false;
       seen.add(contact.phone_number);
       return true;
     });
+    state.recipientSuggestions = manualSuggestion ? [manualSuggestion, ...contactSuggestions] : contactSuggestions;
     state.recipientSuggestionIndex = state.recipientSuggestions.length ? 0 : -1;
     renderRecipientSuggestions();
   } catch (error) {
+    if (manualSuggestion && seq === state.recipientSuggestionSeq) {
+      state.recipientSuggestions = [manualSuggestion];
+      state.recipientSuggestionIndex = 0;
+      renderRecipientSuggestions();
+      return;
+    }
     clearRecipientSuggestions();
     toast(error.message);
   }
@@ -3741,7 +3779,7 @@ async function matchExistingGroupDraft() {
 
 function addRecipient(raw, displayName = "") {
   const phone = normalizeDraftPhone(raw);
-  if (!phone.startsWith("+") || phone.length < 8) {
+  if (!isUsableDraftPhone(phone)) {
     toast(t("recipient.needs_phone"));
     return;
   }
@@ -3757,6 +3795,19 @@ function addRecipient(raw, displayName = "") {
   renderRecipientDraft();
   renderThreadHeader();
   matchExistingGroupDraft();
+}
+
+function commitPendingRecipientInput() {
+  if (state.currentConversation) return true;
+  const raw = els.recipientInput.value.trim();
+  if (!raw) return true;
+  const phone = normalizeDraftPhone(raw);
+  if (!isUsableDraftPhone(phone)) {
+    toast(t("recipient.needs_phone"));
+    return false;
+  }
+  addRecipient(phone);
+  return true;
 }
 
 function currentRecipients() {
@@ -3806,6 +3857,7 @@ function clearComposerDraft() {
 }
 
 async function sendCurrentMessage() {
+  if (!commitPendingRecipientInput()) return;
   const draft = currentComposerDraft();
   if (!validateComposerDraft(draft)) return;
   showComposerError("");
@@ -3896,6 +3948,7 @@ function setScheduleModalOpen(open) {
 }
 
 function openScheduleModal() {
+  if (!commitPendingRecipientInput()) return;
   const draft = currentComposerDraft();
   if (!validateComposerDraft(draft)) return;
   showComposerError("");
@@ -3908,6 +3961,7 @@ function closeScheduleModal() {
 
 async function scheduleCurrentMessage(event) {
   event.preventDefault();
+  if (!commitPendingRecipientInput()) return;
   const draft = currentComposerDraft();
   if (!validateComposerDraft(draft)) return;
   if (!els.scheduleTime.value) {

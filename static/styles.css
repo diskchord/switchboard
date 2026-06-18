@@ -788,6 +788,10 @@ select:focus {
   background: var(--chip-bg);
 }
 
+.recipient-suggestion.manual-recipient strong {
+  color: var(--accent);
+}
+
 .recipient-suggestion strong,
 .recipient-suggestion span {
   overflow: hidden;
