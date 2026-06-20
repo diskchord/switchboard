@@ -2131,13 +2131,13 @@ function renderStatsTimelineChart(timeline = {}) {
 
   const years = chartPoints.map((item) => statsBucketYear(item.bucket, bucketType)).filter(Boolean);
   const spansYears = new Set(years).size > 1;
-  const height = spansYears ? 330 : 300;
-  const padLeft = 54;
-  const padRight = 28;
-  const padTop = 26;
-  const padBottom = spansYears ? 86 : 58;
-  const pointSpacing = bucketType === "month" ? 30 : bucketType === "hour" ? 42 : 36;
-  const width = Math.max(1000, padLeft + padRight + Math.max(1, chartPoints.length - 1) * pointSpacing);
+  const height = spansYears ? 280 : 250;
+  const padLeft = 46;
+  const padRight = 22;
+  const padTop = 22;
+  const padBottom = spansYears ? 64 : 44;
+  const pointSpacing = bucketType === "month" ? 24 : bucketType === "hour" ? 36 : 30;
+  const width = Math.max(820, padLeft + padRight + Math.max(1, chartPoints.length - 1) * pointSpacing);
   const plotWidth = width - padLeft - padRight;
   const plotHeight = height - padTop - padBottom;
   const plotBottom = height - padBottom;
@@ -2167,7 +2167,7 @@ function renderStatsTimelineChart(timeline = {}) {
   const axisTitles = `
     <text class="stats-chart-axis-title stats-chart-y-title" x="${padLeft}" y="17">${escapeHtml(t("stats.texts"))}</text>
     <text class="stats-chart-axis-title stats-chart-x-title" x="${(padLeft + plotWidth / 2).toFixed(2)}" y="${
-      spansYears ? height - 66 : height - 40
+      spansYears ? height - 48 : height - 30
     }">${escapeHtml(statsBucketUnitLabel(bucketType))}</text>`;
   const yearGuides = spansYears
     ? (() => {
@@ -2184,7 +2184,7 @@ function renderStatsTimelineChart(timeline = {}) {
               ? width - padRight
               : (coordinates[endIndex].x + coordinates[endIndex + 1].x) / 2;
           labels.push(`
-            <text class="stats-chart-year-label" x="${((left + right) / 2).toFixed(2)}" y="${height - 16}">
+            <text class="stats-chart-year-label" x="${((left + right) / 2).toFixed(2)}" y="${height - 10}">
               ${escapeHtml(year)}
             </text>`);
         };
@@ -2208,32 +2208,38 @@ function renderStatsTimelineChart(timeline = {}) {
       if (index !== 0 && index !== coordinates.length - 1 && index % labelEvery !== 0) return "";
       const includeYear = !spansYears && bucketType !== "hour" && (index === 0 || index === coordinates.length - 1);
       return `
-        <text class="stats-chart-x-label" x="${item.x.toFixed(2)}" y="${spansYears ? height - 44 : height - 18}">
+        <text class="stats-chart-x-label" x="${item.x.toFixed(2)}" y="${spansYears ? height - 29 : height - 12}">
           ${escapeHtml(formatStatsChartBucket(item.bucket, bucketType, false, { includeYear }))}
         </text>`;
     })
     .join("");
   const dots = coordinates
+    .map(
+      (item) => `
+        <circle class="stats-chart-point" cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="4"></circle>`,
+    )
+    .join("");
+  const tooltips = coordinates
     .map((item) => {
       const bucketLabel = formatStatsChartBucket(item.bucket, bucketType, true);
       const countLabel = `${item.count} ${t("stats.texts")}`;
       const detailLabel = `${item.inbound} ${t("stats.inbound_messages")} / ${item.outbound} ${t("stats.outbound_messages")}`;
       const label = `${bucketLabel}: ${countLabel} (${detailLabel})`;
-      const tooltipWidth = 270;
-      const tooltipHeight = 58;
+      const tooltipWidth = 248;
+      const tooltipHeight = 52;
       const tooltipX = clamp(item.x - tooltipWidth / 2, padLeft, width - padRight - tooltipWidth);
-      let tooltipY = item.y - tooltipHeight - 12;
-      if (tooltipY < 6) tooltipY = item.y + 14;
+      let tooltipY = item.y - tooltipHeight - 10;
+      if (tooltipY < 6) tooltipY = item.y + 12;
       if (tooltipY + tooltipHeight > plotBottom) tooltipY = Math.max(6, plotBottom - tooltipHeight);
       return `
-        <g class="stats-chart-point-group" tabindex="0" aria-label="${escapeHtml(label)}">
-          <title>${escapeHtml(label)}</title>
-          <circle class="stats-chart-point" cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="5"></circle>
+        <g class="stats-chart-tooltip-group" tabindex="0" aria-label="${escapeHtml(label)}">
+          <circle class="stats-chart-hit-area" cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="11"></circle>
+          <circle class="stats-chart-hover-point" cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="4"></circle>
           <g class="stats-chart-tooltip" transform="translate(${tooltipX.toFixed(2)} ${tooltipY.toFixed(2)})">
             <rect width="${tooltipWidth}" height="${tooltipHeight}" rx="8"></rect>
-            <text class="stats-chart-tooltip-title" x="12" y="19">${escapeHtml(bucketLabel)}</text>
-            <text class="stats-chart-tooltip-count" x="12" y="36">${escapeHtml(countLabel)}</text>
-            <text class="stats-chart-tooltip-detail" x="12" y="51">${escapeHtml(detailLabel)}</text>
+            <text class="stats-chart-tooltip-title" x="11" y="17">${escapeHtml(bucketLabel)}</text>
+            <text class="stats-chart-tooltip-count" x="11" y="33">${escapeHtml(countLabel)}</text>
+            <text class="stats-chart-tooltip-detail" x="11" y="47">${escapeHtml(detailLabel)}</text>
           </g>
         </g>`;
     })
@@ -2253,8 +2259,9 @@ function renderStatsTimelineChart(timeline = {}) {
           ${yearGuides}
           ${axisTitles}
           <polyline class="stats-chart-line" points="${linePoints}"></polyline>
-          ${dots}
+          <g class="stats-chart-point-layer">${dots}</g>
           ${axisLabels}
+          <g class="stats-chart-tooltip-layer">${tooltips}</g>
         </svg>
       </div>
     </div>`;

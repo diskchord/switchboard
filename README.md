@@ -1,8 +1,8 @@
 # Switchboard
 
-Switchboard is a local-first communications console for SMS, MMS, group texting, and inbound fax across Telnyx and Twilio, with a desktop web UI and a small Android WebView wrapper for sideloading.
+Switchboard is a local-first communications console for SMS, MMS, group texting, scheduled sends, inbound fax, call forwarding, and voicemail across Telnyx and Twilio. It ships with a desktop web UI/PWA and a small Android WebView wrapper for sideloading.
 
-The server stores conversations, messages, contacts, identities, and media metadata in SQLite. It can import historical HTML exports, receive Telnyx SMS/MMS/fax webhooks, receive Twilio Messaging webhooks, send outbound Telnyx or Twilio messages, sync contacts from Fastmail or Google Contacts, and optionally notify an ntfy topic when inbound texts arrive.
+The server stores conversations, messages, scheduled messages, contacts, sender identities, app settings, voice rules, voicemail recording metadata, and media metadata in SQLite. It can import historical HTML exports, receive Telnyx SMS/MMS/fax and Twilio Messaging webhooks, send outbound Telnyx or Twilio messages, handle TeXML/TwiML-compatible voice callbacks, sync contacts from Fastmail or Google Contacts, and optionally notify an ntfy topic or the Android wrapper when inbound texts arrive.
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
@@ -26,6 +26,21 @@ rg -n "TELNYX|FASTMAIL|GOOGLE|ntfy|https://[^ ]+|\\+?[0-9][0-9() .-]{7,}" \
 
 Review any hits and keep private values in `.env` or ignored local files.
 
+## Capabilities
+
+- Conversation inbox for direct and group threads with search across names, phone numbers, message text, and queued scheduled messages.
+- Inbox, unread, and hidden views with read/unread, hide/unhide, swipe-to-hide, and bulk read/unread/hide actions.
+- Outbound SMS/MMS through Telnyx or Twilio, with per-sender provider routing, delivery status updates, provider error details, and direct/group conversation matching.
+- Scheduled outbound messages with text and media, visible queue state in the conversation list and thread, cancellation before send, failed-send display, and automatic recovery of interrupted sends on server restart.
+- Inbound Telnyx SMS/MMS, Twilio SMS/MMS, and Telnyx fax storage, including local media caching, PDF fax page previews when `pdftoppm` is installed, and browser-friendly conversion of cached 3GP videos when `ffmpeg` is installed.
+- Per-number sender identities with labels, colors, active state, vacation auto-replies, call forwarding, voicemail rules, and text or recorded voicemail greetings.
+- Incoming call handling for Twilio and Telnyx TeXML/TwiML-style voice webhooks, including optional forwarding to a phone number or SIP address before voicemail.
+- Voicemail storage as conversation messages with audio attachments, phone-provider transcription support, and optional Rev.ai transcription callbacks.
+- Fastmail CardDAV, legacy Fastmail JMAP, and Google People API contact sync, plus local contact-name edits and Fastmail CardDAV writeback when configured.
+- Settings UI for behavior, language, notifications, sounds, uploads, messaging providers, calls, transcription, contacts, provider credentials, hotkeys, security, 2FA, and database download.
+- Statistics view with totals, inbox/hidden/unread counts, inbound/outbound/voicemail/failed/pending/media/contact counts, breakdowns by status/source/type/direction, and an activity timeline by hour, day, or month.
+- Notifications through ntfy, browser/app sounds, Android-native polling notifications, and lightweight browser refresh polling based on change tokens.
+
 ## Quick Start
 
 ```bash
@@ -36,7 +51,7 @@ cp .env.example .env
 python3 server.py --host 127.0.0.1 --port 8766
 ```
 
-Open `http://127.0.0.1:8766`.
+Open `http://127.0.0.1:8766`. On a new install, leave the auth variables blank and the first browser visit will show the account setup screen. For a headless or preconfigured install, generate `TEXTING_AUTH_PASSWORD_HASH` first with `python scripts/hash_password.py`.
 
 ## Docker
 
@@ -70,7 +85,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now switchboard.service
 ```
 
-On a public server, keep TLS in front of the app. Switchboard provides its own login screen when `TEXTING_AUTH_USERNAME` and `TEXTING_AUTH_PASSWORD_HASH` are set. Provider webhook routes such as `/api/telnyx/webhook`, `/api/telnyx/voice`, `/api/telnyx/voice/recording`, `/api/twilio/webhook`, and `/api/revai/webhook` remain reachable without a browser session so phone providers can call them. If outbound MMS uploads need to be fetched by Telnyx, set `TEXTING_PUBLIC_UPLOAD_BASE_URL` to a public URL that reaches the container's `/uploads/` route or another reverse-proxy alias for `/data/public-uploads`.
+On a public server, keep TLS in front of the app. Switchboard provides its own login screen when `TEXTING_AUTH_USERNAME` and `TEXTING_AUTH_PASSWORD_HASH` are set. Provider callback routes such as `/api/telnyx/webhook`, `/api/twilio/webhook`, `/api/telnyx/voice`, `/api/twilio/voice`, `/api/telnyx/voice/recording`, `/api/twilio/voice/recording`, `/api/telnyx/voice/transcription`, `/api/twilio/voice/transcription`, and `/api/revai/webhook` remain reachable without a browser session so phone providers can call them. If outbound MMS uploads or voicemail greeting uploads need to be fetched by Telnyx or Twilio, set `TEXTING_PUBLIC_UPLOAD_BASE_URL` to a public URL that reaches the container's `/uploads/` route or another reverse-proxy alias for `/data/public-uploads`.
 
 ## Configuration
 
@@ -127,31 +142,50 @@ Important settings:
 - `TEXTING_AUTH_SECRET_KEY`: optional session-signing secret generated by `python -m texting_app.auth secret-key`.
 - `TEXTING_AUTH_TOTP_SECRET`: optional authenticator-app secret generated by `python -m texting_app.auth setup-2fa`.
 - `TEXTING_AUTH_BACKUP_CODE_HASHES`: optional comma-separated one-time backup code hashes generated by `python -m texting_app.auth setup-2fa`.
+- `TEXTING_AUTH_DISABLED`: disables app sign-in when set to `1`; use only behind another trusted access boundary.
+- `TEXTING_HOST` / `TEXTING_PORT`: address and port for `server.py`.
+- `TEXTING_DATA_DIR`: base runtime directory for SQLite, media, and upload staging defaults.
 - `TEXTING_DB`: SQLite path. Use a path outside the Git checkout in production.
+- `TEXTING_MEDIA_DIR`: local directory for received media, cached attachments, converted videos, fax page previews, and voicemail recordings.
 - `TEXTING_PERSONAL_NUMBERS`: comma-separated sender numbers that belong to you.
 - `TEXTING_IDENTITY_LABELS`: JSON object mapping sender numbers to display labels.
 - `TEXTING_MESSAGING_PROVIDER`: default outbound provider, `telnyx` or `twilio`.
 - `TEXTING_PROVIDER_BY_NUMBER`: optional JSON object mapping sender numbers to `telnyx` or `twilio`.
 - `TELNYX_API_KEY`: required for sending texts.
 - `TELNYX_PUBLIC_KEY`: enables Telnyx webhook signature verification.
+- `TELNYX_API_BASE`: Telnyx API base URL; normally leave the default.
 - `TWILIO_ACCOUNT_SID`: required for sending through Twilio.
 - `TWILIO_AUTH_TOKEN`: required for Twilio sends and enables Twilio webhook signature verification.
+- `TWILIO_API_BASE`: Twilio API base URL; normally leave the default.
 - `TWILIO_WEBHOOK_URL`: exact public Twilio webhook URL. Recommended when the app sits behind a proxy.
 - `TWILIO_STATUS_CALLBACK_URL`: optional delivery callback URL sent with outbound Twilio messages.
 - `TEXTING_VOICEMAIL_TRANSCRIPTION_PROVIDER`: `provider` or `revai`.
 - `REVAI_ACCESS_TOKEN`: Rev.ai access token for voicemail transcription.
+- `REVAI_API_BASE`: Rev.ai API base URL; normally leave the default.
 - `TEXTING_UI_LANGUAGE`: `auto`, `en`, `es`, or `fr`.
 - `TEXTING_AUTO_REFRESH_SECONDS`: browser refresh check interval. Set to `0` to disable.
+- `TEXTING_SHOW_SUMMARY_STATS`: show or hide statistic bubbles above the conversation list.
+- `TEXTING_SHOW_COMPOSER_COUNTER`: show or hide the SMS segment counter in the composer.
 - `NTFY_ENDPOINT`: optional HTTPS ntfy topic URL for inbound message notifications.
+- `NTFY_ENABLED`: enables or disables ntfy without removing the endpoint.
 - `TEXTING_NATIVE_NOTIFICATIONS_ENABLED`: optional Android app native notifications. Defaults off.
 - `TEXTING_NATIVE_NOTIFICATION_INTERVAL_MINUTES`: Android app notification check interval. Android periodic checks have a 15 minute minimum.
+- `TEXTING_SEND_SOUND_ENABLED`, `TEXTING_SEND_SOUND_TONE`, `TEXTING_RECEIVE_SOUND`, `TEXTING_RECEIVE_SOUND_TONE`, `TEXTING_SOUND_VOLUME`: browser/app sound-effect controls.
 - `TEXTING_PUBLIC_UPLOAD_DIR`: local directory where uploaded outbound MMS files are staged.
-- `TEXTING_PUBLIC_UPLOAD_BASE_URL`: public URL that maps to the upload directory so Telnyx can fetch files.
+- `TEXTING_PUBLIC_UPLOAD_BASE_URL`: public URL that maps to the upload directory so Telnyx or Twilio can fetch files.
 - `TEXTING_UPLOAD_MAX_FILE_MB`: maximum upload size accepted by the app.
+- `TEXTING_CACHE_ATTACHMENTS`: caches remote received attachments locally when they are viewed.
 - `CONTACTS_PROVIDER`: `auto`, `fastmail`, `google`, or `none`.
   `auto` uses Fastmail when configured, otherwise Google when configured.
+- `CONTACTS_AUTOSYNC`: enables background contact sync at startup.
+- `CONTACTS_SYNC_INTERVAL_MINUTES`: background contact sync interval.
+- `FASTMAIL_USERNAME`, `FASTMAIL_APP_PASSWORD`, `FASTMAIL_CARDDAV_URL`, `FASTMAIL_CARDDAV_USERNAME`: Fastmail CardDAV settings.
+- `FASTMAIL_API_TOKEN`, `FASTMAIL_ACCOUNT_ID`: legacy Fastmail JMAP settings.
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`: Google People API refresh-token credentials.
+- `GOOGLE_TOKEN_URI`, `GOOGLE_PEOPLE_API_BASE`: Google OAuth and People API base URLs; normally leave the defaults.
+- `GOOGLE_CONTACTS_ACCESS_TOKEN`: optional short-lived Google token for testing.
 
-The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values for behavior, language, hotkeys, notifications, messaging provider selection, Telnyx, Twilio, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. Settings also includes a protected database download button; Switchboard creates a consistent SQLite backup for the logged-in user instead of exposing the data directory.
+The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values where a setting has an environment equivalent; settings without an env equivalent are still stored in SQLite. Settings covers behavior, language, hotkeys, notifications, sounds, uploads, messaging provider selection, calls, transcription, contacts, Telnyx, Twilio, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. Settings also includes a protected database download button; Switchboard creates a consistent SQLite backup for the logged-in user instead of exposing the data directory.
 
 ### Bring Your Own Numbers
 
@@ -184,6 +218,8 @@ TWILIO_AUTH_TOKEN=
 
 Restarting the server seeds any new `TEXTING_PERSONAL_NUMBERS` into the local sender identity table. In the web UI, the Numbers panel can rename and recolor those sender identities, and can enable a vacation auto-reply for one sender number at a time. Auto-replies are sent only for direct inbound texts, use the selected sender number's configured Telnyx/Twilio provider, and are rate-limited per recipient by the cooldown on that number. Settings > Messaging can adjust the default provider and per-number provider map without editing source.
 
+The same Numbers panel manages per-number call behavior. Each sender number can forward incoming calls to a phone number or SIP address, set the ring timeout from 5 to 120 seconds, enable or disable voicemail, and use either a text greeting or an uploaded public audio greeting. Settings > Calls provides global defaults for numbers without a saved per-number voice rule.
+
 The Telnyx webhook endpoint is:
 
 ```text
@@ -210,7 +246,34 @@ The Twilio webhook endpoint is:
 /api/twilio/webhook
 ```
 
-Use it for incoming Messaging webhooks and, if you want delivery updates, as the status callback URL. Twilio posts form-encoded webhook payloads; when `TWILIO_AUTH_TOKEN` is configured, the app validates `X-Twilio-Signature`. If Apache, Tailscale Serve, or another proxy changes the public URL, set `TWILIO_WEBHOOK_URL` to the exact URL configured in Twilio.
+Use it for incoming Messaging webhooks and, if you want delivery updates, as the status callback URL. Twilio posts form-encoded webhook payloads; when `TWILIO_AUTH_TOKEN` is configured, the app validates `X-Twilio-Signature`. If Apache, Tailscale Serve, or another proxy changes the public URL, prefer preserving the public `Host` and `X-Forwarded-Proto` headers. `TWILIO_WEBHOOK_URL` is a single exact-URL override used by Twilio signature verification, so it is best for simple deployments where all Twilio callbacks validate against the same configured URL.
+
+### Call Forwarding and Voicemail
+
+Switchboard returns TeXML/TwiML-compatible XML for inbound voice calls. Point Twilio voice webhooks at:
+
+```text
+/api/twilio/voice
+```
+
+Point Telnyx TeXML voice webhooks at:
+
+```text
+/api/telnyx/voice
+```
+
+Switchboard builds the callback URLs it returns from the current request host, so the public URL seen by Twilio or Telnyx should match the reverse proxy host. If a sender number has call forwarding enabled, Switchboard first returns a `<Dial>` response to the configured phone number or SIP address. If the dial is answered, the call is hung up when the provider reports completion. If the dial is not answered, or forwarding is off, Switchboard records voicemail when voicemail is enabled. If voicemail is disabled, the call is rejected.
+
+Recording and transcription callbacks are generated automatically in the XML response:
+
+```text
+/api/twilio/voice/recording
+/api/twilio/voice/transcription
+/api/telnyx/voice/recording
+/api/telnyx/voice/transcription
+```
+
+Twilio voice callbacks use `TWILIO_AUTH_TOKEN` for signature verification. Telnyx voice callbacks use `TELNYX_PUBLIC_KEY` for signature verification. Leave those values blank only for trusted local testing.
 
 Voicemails can use the phone provider's transcript or Rev.ai. Set `TEXTING_VOICEMAIL_TRANSCRIPTION_PROVIDER=revai` and provide `REVAI_ACCESS_TOKEN`, or save both values in Settings > Transcription. Rev.ai posts completed jobs back to:
 
@@ -218,7 +281,7 @@ Voicemails can use the phone provider's transcript or Rev.ai. Set `TEXTING_VOICE
 /api/revai/webhook
 ```
 
-When Rev.ai is enabled, Switchboard submits completed voicemail recordings to Rev.ai and stores only non-empty transcripts as inbound voicemail messages in the caller's conversation.
+When Rev.ai is enabled, Switchboard downloads the provider recording, submits it to Rev.ai with `/api/revai/webhook` as the notification URL, and stores the completed transcript as an inbound voicemail message in the caller's conversation. If Rev.ai submission fails for a meaningful recording, Switchboard stores a voicemail message with `No transcript available.` so the recording is still visible. Very short or empty recordings are skipped.
 
 Outbound provider selection is resolved from the sender number. `TEXTING_PROVIDER_BY_NUMBER` wins first, then `TEXTING_MESSAGING_PROVIDER` is used as the default. Example:
 
@@ -229,13 +292,27 @@ TEXTING_PROVIDER_BY_NUMBER={"+15551230001":"telnyx","+15551230002":"twilio"}
 
 Twilio's single-message API sends to one recipient at a time, so a multi-recipient send fans out to each recipient and stores the result as one conversation message.
 
+### Sending, Scheduling, and Status
+
+The composer can send immediately or schedule a message for a future time. Scheduled messages can include manually entered media URLs or files uploaded through the composer. Queued messages appear inline in the thread and can be canceled until the worker starts sending them. They also influence the conversation list sort order, so a future queued send stays visible.
+
+The server starts a background scheduled-message worker at launch. It checks for due messages about every 10 seconds, sends them through the sender number's resolved provider, marks successful rows as `sent`, and links the sent provider message back to the queued row. If a send fails, the scheduled item remains visible with the provider error. If the server stops while a scheduled message is in `sending`, the next launch returns it to `queued` before the worker starts.
+
+Delivery status is updated from provider callbacks where available. Telnyx outbound events update sent, delivered, finalized, failed, delivery-failed, and delivery-unconfirmed states. Twilio status callbacks update queued/sent/delivered/undelivered/failed-style states for known message SIDs. Failed and warning statuses expose provider details in the UI when the webhook payload includes them.
+
 ### Language and Hotkeys
 
 The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings.
 
 The browser checks `/api/refresh` on the configured auto-refresh interval. That endpoint returns lightweight change tokens first; the app only reloads the conversation list or open thread when those tokens change. Use `TEXTING_AUTO_REFRESH_SECONDS=0`, or set Auto-refresh seconds to `0` in Settings, to disable browser polling.
 
-The summary statistic bubbles above the conversation list open the fuller statistics view. Hide them with `TEXTING_SHOW_SUMMARY_STATS=0`, or turn off Show summary stats in Settings > Behavior.
+The summary statistic bubbles above the conversation list open the fuller statistics view. Hide them with `TEXTING_SHOW_SUMMARY_STATS=0`, or turn off Show summary stats in Settings > Behavior. The composer SMS segment counter can be hidden with `TEXTING_SHOW_COMPOSER_COUNTER=0` or Settings > Behavior.
+
+### Stats, Backup, and Data
+
+The statistics view supports all time, today, last 7 days, last week, last 30 days, this month, last month, year to date, and last year. It reports totals for threads, inbox, hidden, unread, texts, inbound, outbound, voicemails, failed, pending, media, and people. It also breaks messages down by status, source, type, and direction, and renders an activity timeline by hour for today, by day for shorter windows, and by month for year/all-time views.
+
+Settings includes a protected database download button. It creates a consistent SQLite backup from the live database and downloads it as `switchboard-YYYYMMDD-HHMMSS.sqlite`; it does not expose the full data directory. Attachments and public uploads are separate files, so back up `TEXTING_MEDIA_DIR` and `TEXTING_PUBLIC_UPLOAD_DIR` along with the SQLite file when you need a full restore point.
 
 Send and receive sound effects are configurable in Settings > Sounds. `TEXTING_RECEIVE_SOUND=auto` plays receive tones unless ntfy notifications are enabled, so ntfy-backed installs stay quiet by default.
 
@@ -251,9 +328,11 @@ Hotkeys are enabled by default and can be changed in Settings > Hotkeys. Default
 
 ### Outbound Media Uploads
 
-The composer can upload image, video, audio, or PDF files and attach their public URLs to an outbound MMS. Configure `TEXTING_PUBLIC_UPLOAD_DIR` as a writable directory outside the checkout, then expose that directory at `TEXTING_PUBLIC_UPLOAD_BASE_URL`.
+The composer can upload image, video, audio, or PDF files and attach their public URLs to an outbound MMS. The same upload pipeline is used for voicemail greeting recordings. Configure `TEXTING_PUBLIC_UPLOAD_DIR` as a writable directory outside the checkout, then expose that directory at `TEXTING_PUBLIC_UPLOAD_BASE_URL`.
 
-Telnyx must be able to fetch the uploaded file without browser login. If the main app is behind Basic Auth, expose only the upload directory without auth and keep uploads limited to random generated filenames.
+Telnyx or Twilio must be able to fetch uploaded outbound media without browser login. If the main app is behind another access layer such as Basic Auth, expose only the upload directory without that extra auth and keep uploads limited to Switchboard's random generated filenames. The upload API enforces `TEXTING_UPLOAD_MAX_FILE_MB` and accepts images, video, audio, and PDFs.
+
+Received attachments can be cached into `TEXTING_MEDIA_DIR` when opened so old provider URLs do not have to stay available forever. Keep `TEXTING_CACHE_ATTACHMENTS=1` for that behavior, or disable it in Settings > Uploads.
 
 ## Importing Old Texts
 
@@ -267,7 +346,9 @@ The importer reads the old HTML export, extracts message text and metadata, and 
 
 ## Contacts
 
-The app stores imported contacts locally and links them to conversation participants by phone number.
+The app stores imported contacts locally and links them to conversation participants by phone number. `CONTACTS_PROVIDER=auto` chooses Fastmail when Fastmail credentials are configured, otherwise Google when Google credentials are configured, otherwise no sync provider. You can also choose the provider in Settings > Contacts.
+
+Contact sync runs once in the background loop after startup and then repeats at `CONTACTS_SYNC_INTERVAL_MINUTES` while `CONTACTS_AUTOSYNC=1`. The Settings panel also has a manual Sync button. If you rename a phone number in the thread side panel, Switchboard saves the local name immediately. When Fastmail CardDAV credentials are configured, that rename is also written back to Fastmail; without Fastmail CardDAV it remains a local contact name.
 
 ### Fastmail
 
@@ -330,7 +411,7 @@ Alias /mms-uploads/ /var/lib/switchboard/public-uploads/
 </Directory>
 ```
 
-Do not add Basic Auth in front of Switchboard unless you also exempt the phone-provider callback routes and public upload fetch path. Keep the database writable by the service user and outside the web root. If you use the upload alias above, set `TEXTING_PUBLIC_UPLOAD_BASE_URL=https://your-domain.example/mms-uploads`.
+Do not add Basic Auth in front of Switchboard unless you also exempt the phone-provider callback routes, `/api/revai/webhook`, and the public upload fetch path. Keep `/media/` behind the app because received media and voicemail recordings are private, keep the database writable by the service user and outside the web root, and expose only the random-file upload directory if providers need to fetch outbound media. If you use the upload alias above, set `TEXTING_PUBLIC_UPLOAD_BASE_URL=https://your-domain.example/mms-uploads`.
 
 ## Android Wrapper
 

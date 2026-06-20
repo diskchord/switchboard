@@ -2237,9 +2237,9 @@ select:focus {
   border-radius: 8px;
   background: var(--panel-2);
   display: grid;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
-  padding: 14px;
+  padding: 12px;
 }
 
 .stats-chart-summary {
@@ -2266,7 +2266,7 @@ select:focus {
   background:
     linear-gradient(to bottom, rgba(104, 113, 125, 0.06), transparent),
     var(--panel);
-  min-height: 260px;
+  min-height: 220px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-color: var(--hover-line) transparent;
@@ -2296,25 +2296,42 @@ select:focus {
   stroke: var(--stats-line);
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 4;
+  stroke-width: 3;
   vector-effect: non-scaling-stroke;
 }
 
-.stats-chart-point {
+.stats-chart-point,
+.stats-chart-hover-point {
   fill: var(--panel);
   stroke: var(--stats-point);
-  stroke-width: 4;
+  stroke-width: 3;
   vector-effect: non-scaling-stroke;
 }
 
-.stats-chart-point-group:focus-visible .stats-chart-point,
-.stats-chart-point-group:hover .stats-chart-point {
+.stats-chart-hover-point {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.stats-chart-hit-area {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.stats-chart-tooltip-layer {
+  isolation: isolate;
+}
+
+.stats-chart-tooltip-group:focus-visible .stats-chart-hover-point,
+.stats-chart-tooltip-group:hover .stats-chart-hover-point {
   fill: var(--stats-point);
   stroke: var(--panel);
+  opacity: 1;
   outline: 0;
 }
 
-.stats-chart-point-group:focus-visible {
+.stats-chart-tooltip-group:focus-visible {
   outline: 0;
 }
 
@@ -2324,8 +2341,8 @@ select:focus {
   transition: opacity 120ms ease;
 }
 
-.stats-chart-point-group:focus-visible .stats-chart-tooltip,
-.stats-chart-point-group:hover .stats-chart-tooltip {
+.stats-chart-tooltip-group:focus-visible .stats-chart-tooltip,
+.stats-chart-tooltip-group:hover .stats-chart-tooltip {
   opacity: 1;
 }
 
@@ -2341,14 +2358,14 @@ select:focus {
 .stats-chart-tooltip-count,
 .stats-chart-tooltip-detail {
   fill: var(--ink);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 850;
 }
 
 .stats-chart-tooltip-count,
 .stats-chart-tooltip-detail {
   fill: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 750;
 }
 
@@ -2357,28 +2374,28 @@ select:focus {
 .stats-chart-year-label,
 .stats-chart-axis-title {
   fill: var(--muted);
-  font-size: 28px;
+  font-size: 13px;
   font-weight: 750;
   paint-order: stroke;
   stroke: var(--panel);
-  stroke-width: 5px;
+  stroke-width: 3px;
   text-anchor: middle;
 }
 
 .stats-chart-y-label {
-  font-size: 24px;
+  font-size: 12px;
   text-anchor: end;
 }
 
 .stats-chart-year-label {
   fill: var(--ink);
-  font-size: 26px;
+  font-size: 15px;
   font-weight: 850;
 }
 
 .stats-chart-axis-title {
   fill: var(--ink);
-  font-size: 24px;
+  font-size: 14px;
   font-weight: 850;
 }
 
@@ -2937,7 +2954,7 @@ select:focus {
   }
 
   .stats-chart-plot {
-    min-height: 230px;
+    min-height: 200px;
   }
 
   .stats-chart-svg {
