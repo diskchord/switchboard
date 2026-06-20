@@ -38,10 +38,17 @@ const state = {
   conversationPressTargetId: null,
   conversationSwipe: null,
   suppressConversationClickUntil: 0,
+  reactionTargetId: null,
+  reactionPressTimer: null,
+  reactionPressPointerId: null,
+  reactionPressStartX: 0,
+  reactionPressStartY: 0,
+  reactionLongPressTriggered: false,
   sendPressTimer: null,
   sendHoldTriggered: false,
   pullRefresh: null,
   isRefreshingFromPull: false,
+  layoutResizeObserver: null,
   audioContext: null,
   audioUnlocked: false,
   latestInboundSoundKey: "",
@@ -53,6 +60,9 @@ const state = {
     receiveTone: "chime",
     volume: 0.45,
   },
+  twoFactor: null,
+  twoFactorSetup: null,
+  twoFactorBackupCodes: [],
   language: "en",
   hotkeysEnabled: true,
   hotkeys: {},
@@ -61,6 +71,7 @@ const state = {
 const els = {
   appShell: document.querySelector(".app-shell"),
   threadPane: document.querySelector(".thread-pane"),
+  threadHeader: document.querySelector(".thread-header"),
   conversationList: document.querySelector("#conversationList"),
   conversationSearch: document.querySelector("#conversationSearch"),
   conversationSearchClear: document.querySelector("#conversationSearchClear"),
@@ -71,12 +82,17 @@ const els = {
   settingsButton: document.querySelector("#settingsButton"),
   settingsModal: document.querySelector("#settingsModal"),
   settingsForm: document.querySelector("#settingsForm"),
+  settingsNav: document.querySelector("#settingsNav"),
+  securitySettings: document.querySelector("#securitySettings"),
   settingsSections: document.querySelector("#settingsSections"),
   settingsClose: document.querySelector("#settingsClose"),
   settingsCancel: document.querySelector("#settingsCancel"),
+  databaseDownloadButton: document.querySelector("#databaseDownloadButton"),
+  logoutButton: document.querySelector("#logoutButton"),
   statsButton: document.querySelector("#statsButton"),
   statsModal: document.querySelector("#statsModal"),
   statsBody: document.querySelector("#statsBody"),
+  statsPeriod: document.querySelector("#statsPeriod"),
   statsClose: document.querySelector("#statsClose"),
   themeColor: document.querySelector("#themeColor"),
   fromNumber: document.querySelector("#fromNumber"),
@@ -128,6 +144,7 @@ const els = {
   lightboxClose: document.querySelector("#lightboxClose"),
   lightboxPrev: document.querySelector("#lightboxPrev"),
   lightboxNext: document.querySelector("#lightboxNext"),
+  reactionMenu: document.querySelector("#reactionMenu"),
   columnResizers: document.querySelectorAll(".column-resizer"),
   selectionToolbar: document.querySelector("#selectionToolbar"),
   selectionCount: document.querySelector("#selectionCount"),
@@ -141,12 +158,24 @@ const els = {
 const COLUMN_WIDTHS_KEY = "textingColumnWidths";
 const THEME_KEY = "textingTheme";
 const SCHEDULE_TIME_KEY = "textingScheduleTime";
+const STATS_PERIOD_KEY = "textingStatsPeriod";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
 const FOREGROUND_STALE_MS = 20_000;
 const MIN_AUTO_REFRESH_SECONDS = 5;
 const SEND_HOLD_MS = 550;
 const SEND_NOW_SYMBOL = "➤";
 const SCHEDULE_SEND_SYMBOL = "◷";
+const STATS_PERIOD_OPTIONS = [
+  { value: "all", labelKey: "stats.period_all" },
+  { value: "today", labelKey: "stats.period_today" },
+  { value: "7d", labelKey: "stats.period_7d" },
+  { value: "last_week", labelKey: "stats.period_last_week" },
+  { value: "30d", labelKey: "stats.period_30d" },
+  { value: "this_month", labelKey: "stats.period_this_month" },
+  { value: "last_month", labelKey: "stats.period_last_month" },
+  { value: "ytd", labelKey: "stats.period_ytd" },
+  { value: "last_year", labelKey: "stats.period_last_year" },
+];
 const SOUND_TONES = new Set(["ascending", "chime", "pop", "bell"]);
 const REACTION_INVISIBLE_PATTERN = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
 const REACTION_SPACING_PATTERN = /[\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -158,6 +187,14 @@ const REACTION_WORDS = new Map([
   ["emphasized", "‼️"],
   ["questioned", "❓"],
 ]);
+const MESSAGE_REACTION_OPTIONS = [
+  { action: "liked", icon: "👍", labelKey: "message.react_like" },
+  { action: "loved", icon: "❤️", labelKey: "message.react_love" },
+  { action: "laughed at", icon: "😂", labelKey: "message.react_laugh" },
+  { action: "emphasized", icon: "‼️", labelKey: "message.react_emphasize" },
+  { action: "questioned", icon: "❓", labelKey: "message.react_question" },
+  { action: "disliked", icon: "👎", labelKey: "message.react_dislike" },
+];
 const REACTION_SYMBOLS = new Set(["👍", "👎", "❤️", "❤", "😂", "🤣", "😆", "‼️", "!!", "?", "❓"]);
 const COLUMN_LIMITS = {
   leftMin: 260,
@@ -194,10 +231,49 @@ const I18N = {
   en: {
     "app.title": "Switchboard",
     "settings.title": "Settings",
-    "settings.description": "Changes are saved locally and override matching .env values.",
+    "settings.description": "Changes are saved and written to .env when available.",
     "settings.close": "Close settings",
     "settings.empty": "No settings are available.",
     "settings.saved": "Settings saved.",
+    "settings.download_database": "Download DB",
+    "settings.sign_out": "Sign out",
+    "security.title": "Security",
+    "security.account": "Account",
+    "security.account_help": "Change the sign-in name or set a new password.",
+    "security.username": "Username",
+    "security.new_password": "New password",
+    "security.confirm_password": "Confirm password",
+    "security.save_account": "Save account",
+    "security.account_saved": "Account updated.",
+    "security.2fa": "Two-factor authentication",
+    "security.2fa_enabled": "Enabled",
+    "security.2fa_disabled": "Off",
+    "security.2fa_env": "Configured in .env",
+    "security.current_password": "Current password",
+    "security.current_password_placeholder": "Current password",
+    "security.auth_code": "Authenticator or backup code",
+    "security.auth_code_placeholder": "123456 or backup code",
+    "security.start_setup": "Add 2FA",
+    "security.verify_enable": "Verify and enable",
+    "security.regenerate_backup": "New backup codes",
+    "security.disable": "Disable 2FA",
+    "security.setup_secret": "Authenticator secret",
+    "security.setup_uri": "Authenticator URI",
+    "security.scan_qr": "Scan this QR code",
+    "security.manual_secret": "Manual setup code",
+    "security.backup_codes": "Backup codes",
+    "security.backup_codes_note": "Save these now. They will not be shown again.",
+    "security.setup_help": "Enter this secret in your authenticator app, then type the current code.",
+    "security.unavailable": "Set up app sign-in before enabling 2FA.",
+    "security.enabled": "Two-factor authentication is enabled.",
+    "security.disabled": "Two-factor authentication is off.",
+    "security.env_note": "This is controlled by .env and cannot be disabled from Settings.",
+    "security.enabled_toast": "2FA enabled.",
+    "security.disabled_toast": "2FA disabled.",
+    "security.backup_regenerated": "Backup codes regenerated.",
+    "security.disable_confirm": "Disable two-factor authentication?",
+    "security.copy": "Copy",
+    "security.copied": "Copied.",
     "common.save": "Save",
     "common.cancel": "Cancel",
     "common.remove": "Remove",
@@ -224,12 +300,28 @@ const I18N = {
     "stats.description": "Message and conversation totals.",
     "stats.close": "Close stats",
     "stats.loading": "Loading stats...",
+    "stats.empty": "No data in this period.",
+    "stats.period": "Period",
+    "stats.period_all": "All time",
+    "stats.period_today": "Today",
+    "stats.period_7d": "Last 7 days",
+    "stats.period_last_week": "Last week",
+    "stats.period_30d": "Last 30 days",
+    "stats.period_this_month": "This month",
+    "stats.period_last_month": "Last month",
+    "stats.period_ytd": "This year so far",
+    "stats.period_last_year": "Last year",
     "stats.totals": "Totals",
     "stats.by_status": "By status",
     "stats.by_source": "By source",
     "stats.by_type": "By type",
     "stats.by_direction": "By direction",
     "stats.recent": "Recent days",
+    "stats.timeline": "Activity",
+    "stats.timeline_by": "{metric} by {bucket}",
+    "stats.bucket_hour": "hour",
+    "stats.bucket_day": "day",
+    "stats.bucket_month": "month",
     "stats.inbox_conversations": "Inbox",
     "stats.hidden_conversations": "Hidden",
     "stats.unread_conversations": "Unread",
@@ -284,12 +376,21 @@ const I18N = {
     "recipient.add": "Add recipient",
     "recipient.needs_phone": "Recipient needs a phone number.",
     "recipient.add_one": "Add a recipient.",
-    "recipient.text_number": "Text this number",
+    "recipient.text_number": "New text to {number}",
     "messages.aria": "Messages",
     "messages.empty": "No messages yet.",
     "messages.load_older": "Load older ({count})",
     "message.reaction_preview": "Reacted {icon}",
     "message.reaction_title": "{name} reacted {icon}",
+    "message.react": "React",
+    "message.react_like": "Like",
+    "message.react_love": "Love",
+    "message.react_laugh": "Laugh",
+    "message.react_emphasize": "Emphasize",
+    "message.react_question": "Question",
+    "message.react_dislike": "Dislike",
+    "message.react_requires_text": "You can react to text messages.",
+    "message.react_failed": "Could not send reaction.",
     "message.send_failed": "Send failed",
     "message.delivery_unconfirmed": "Delivery unconfirmed",
     "message.voicemail": "Voicemail",
@@ -298,7 +399,7 @@ const I18N = {
     "composer.media_urls": "Media URLs",
     "composer.upload": "Upload media",
     "composer.send": "Send",
-    "composer.requires_content": "Message text or media URL is required.",
+    "composer.requires_content": "Message text or attachment is required.",
     "schedule.title": "Schedule send",
     "schedule.send_at": "Send at",
     "schedule.queue": "Queue",
@@ -360,10 +461,49 @@ const I18N = {
   es: {
     "app.title": "Switchboard",
     "settings.title": "Ajustes",
-    "settings.description": "Los cambios se guardan localmente y reemplazan los valores .env correspondientes.",
+    "settings.description": "Los cambios se guardan y se escriben en .env cuando es posible.",
     "settings.close": "Cerrar ajustes",
     "settings.empty": "No hay ajustes disponibles.",
     "settings.saved": "Ajustes guardados.",
+    "settings.download_database": "Descargar DB",
+    "settings.sign_out": "Cerrar sesión",
+    "security.title": "Seguridad",
+    "security.account": "Cuenta",
+    "security.account_help": "Cambia el usuario de inicio de sesión o define una contraseña nueva.",
+    "security.username": "Usuario",
+    "security.new_password": "Contraseña nueva",
+    "security.confirm_password": "Confirmar contraseña",
+    "security.save_account": "Guardar cuenta",
+    "security.account_saved": "Cuenta actualizada.",
+    "security.2fa": "Autenticación de dos factores",
+    "security.2fa_enabled": "Activa",
+    "security.2fa_disabled": "Inactiva",
+    "security.2fa_env": "Configurada en .env",
+    "security.current_password": "Contraseña actual",
+    "security.current_password_placeholder": "Contraseña actual",
+    "security.auth_code": "Código o código de respaldo",
+    "security.auth_code_placeholder": "123456 o respaldo",
+    "security.start_setup": "Agregar 2FA",
+    "security.verify_enable": "Verificar y activar",
+    "security.regenerate_backup": "Nuevos códigos",
+    "security.disable": "Desactivar 2FA",
+    "security.setup_secret": "Secreto del autenticador",
+    "security.setup_uri": "URI del autenticador",
+    "security.scan_qr": "Escanea este código QR",
+    "security.manual_secret": "Código manual",
+    "security.backup_codes": "Códigos de respaldo",
+    "security.backup_codes_note": "Guárdalos ahora. No se mostrarán otra vez.",
+    "security.setup_help": "Ingresa este secreto en tu app autenticadora y escribe el código actual.",
+    "security.unavailable": "Configura el inicio de sesión antes de activar 2FA.",
+    "security.enabled": "La autenticación de dos factores está activa.",
+    "security.disabled": "La autenticación de dos factores está inactiva.",
+    "security.env_note": "Esto está controlado por .env y no se puede desactivar desde Ajustes.",
+    "security.enabled_toast": "2FA activada.",
+    "security.disabled_toast": "2FA desactivada.",
+    "security.backup_regenerated": "Códigos de respaldo regenerados.",
+    "security.disable_confirm": "¿Desactivar la autenticación de dos factores?",
+    "security.copy": "Copiar",
+    "security.copied": "Copiado.",
     "common.save": "Guardar",
     "common.cancel": "Cancelar",
     "common.remove": "Quitar",
@@ -390,12 +530,28 @@ const I18N = {
     "stats.description": "Totales de mensajes y conversaciones.",
     "stats.close": "Cerrar estadísticas",
     "stats.loading": "Cargando estadísticas...",
+    "stats.empty": "No hay datos en este período.",
+    "stats.period": "Período",
+    "stats.period_all": "Todo el tiempo",
+    "stats.period_today": "Hoy",
+    "stats.period_7d": "Últimos 7 días",
+    "stats.period_last_week": "Semana pasada",
+    "stats.period_30d": "Últimos 30 días",
+    "stats.period_this_month": "Este mes",
+    "stats.period_last_month": "Mes pasado",
+    "stats.period_ytd": "Este año hasta ahora",
+    "stats.period_last_year": "Año pasado",
     "stats.totals": "Totales",
     "stats.by_status": "Por estado",
     "stats.by_source": "Por origen",
     "stats.by_type": "Por tipo",
     "stats.by_direction": "Por dirección",
     "stats.recent": "Días recientes",
+    "stats.timeline": "Actividad",
+    "stats.timeline_by": "{metric} por {bucket}",
+    "stats.bucket_hour": "hora",
+    "stats.bucket_day": "día",
+    "stats.bucket_month": "mes",
     "stats.inbox_conversations": "Entrada",
     "stats.hidden_conversations": "Ocultos",
     "stats.unread_conversations": "No leídos",
@@ -450,12 +606,21 @@ const I18N = {
     "recipient.add": "Agregar destinatario",
     "recipient.needs_phone": "El destinatario necesita un número de teléfono.",
     "recipient.add_one": "Agrega un destinatario.",
-    "recipient.text_number": "Enviar mensaje a este número",
+    "recipient.text_number": "Nuevo mensaje a {number}",
     "messages.aria": "Mensajes",
     "messages.empty": "Aún no hay mensajes.",
     "messages.load_older": "Cargar anteriores ({count})",
     "message.reaction_preview": "Reaccionó {icon}",
     "message.reaction_title": "{name} reaccionó {icon}",
+    "message.react": "Reaccionar",
+    "message.react_like": "Me gusta",
+    "message.react_love": "Me encanta",
+    "message.react_laugh": "Risa",
+    "message.react_emphasize": "Énfasis",
+    "message.react_question": "Pregunta",
+    "message.react_dislike": "No me gusta",
+    "message.react_requires_text": "Puedes reaccionar a mensajes de texto.",
+    "message.react_failed": "No se pudo enviar la reacción.",
     "message.send_failed": "Envío fallido",
     "message.delivery_unconfirmed": "Entrega sin confirmar",
     "message.voicemail": "Buzón de voz",
@@ -464,7 +629,7 @@ const I18N = {
     "composer.media_urls": "URLs de media",
     "composer.upload": "Subir media",
     "composer.send": "Enviar",
-    "composer.requires_content": "Se requiere texto o URL de media.",
+    "composer.requires_content": "Se requiere texto o adjunto.",
     "schedule.title": "Programar envío",
     "schedule.send_at": "Enviar a las",
     "schedule.queue": "Encolar",
@@ -526,10 +691,49 @@ const I18N = {
   fr: {
     "app.title": "Switchboard",
     "settings.title": "Réglages",
-    "settings.description": "Les changements sont enregistrés localement et remplacent les valeurs .env correspondantes.",
+    "settings.description": "Les changements sont enregistrés et écrits dans .env quand c'est possible.",
     "settings.close": "Fermer les réglages",
     "settings.empty": "Aucun réglage disponible.",
     "settings.saved": "Réglages enregistrés.",
+    "settings.download_database": "Télécharger DB",
+    "settings.sign_out": "Se déconnecter",
+    "security.title": "Sécurité",
+    "security.account": "Compte",
+    "security.account_help": "Modifiez le nom de connexion ou définissez un nouveau mot de passe.",
+    "security.username": "Nom d'utilisateur",
+    "security.new_password": "Nouveau mot de passe",
+    "security.confirm_password": "Confirmer le mot de passe",
+    "security.save_account": "Enregistrer le compte",
+    "security.account_saved": "Compte mis à jour.",
+    "security.2fa": "Authentification à deux facteurs",
+    "security.2fa_enabled": "Active",
+    "security.2fa_disabled": "Inactive",
+    "security.2fa_env": "Configurée dans .env",
+    "security.current_password": "Mot de passe actuel",
+    "security.current_password_placeholder": "Mot de passe actuel",
+    "security.auth_code": "Code ou code de secours",
+    "security.auth_code_placeholder": "123456 ou code de secours",
+    "security.start_setup": "Ajouter 2FA",
+    "security.verify_enable": "Vérifier et activer",
+    "security.regenerate_backup": "Nouveaux codes",
+    "security.disable": "Désactiver 2FA",
+    "security.setup_secret": "Secret d'authentification",
+    "security.setup_uri": "URI d'authentification",
+    "security.scan_qr": "Scannez ce code QR",
+    "security.manual_secret": "Code de configuration manuel",
+    "security.backup_codes": "Codes de secours",
+    "security.backup_codes_note": "Enregistrez-les maintenant. Ils ne seront plus affichés.",
+    "security.setup_help": "Entrez ce secret dans votre app d'authentification, puis saisissez le code actuel.",
+    "security.unavailable": "Configurez la connexion avant d'activer 2FA.",
+    "security.enabled": "L'authentification à deux facteurs est active.",
+    "security.disabled": "L'authentification à deux facteurs est inactive.",
+    "security.env_note": "Ceci est contrôlé par .env et ne peut pas être désactivé dans Réglages.",
+    "security.enabled_toast": "2FA activée.",
+    "security.disabled_toast": "2FA désactivée.",
+    "security.backup_regenerated": "Codes de secours régénérés.",
+    "security.disable_confirm": "Désactiver l'authentification à deux facteurs ?",
+    "security.copy": "Copier",
+    "security.copied": "Copié.",
     "common.save": "Enregistrer",
     "common.cancel": "Annuler",
     "common.remove": "Supprimer",
@@ -556,12 +760,28 @@ const I18N = {
     "stats.description": "Totaux des messages et conversations.",
     "stats.close": "Fermer les stats",
     "stats.loading": "Chargement des stats...",
+    "stats.empty": "Aucune donnée pour cette période.",
+    "stats.period": "Période",
+    "stats.period_all": "Tout le temps",
+    "stats.period_today": "Aujourd'hui",
+    "stats.period_7d": "7 derniers jours",
+    "stats.period_last_week": "Semaine dernière",
+    "stats.period_30d": "30 derniers jours",
+    "stats.period_this_month": "Ce mois-ci",
+    "stats.period_last_month": "Mois dernier",
+    "stats.period_ytd": "Cette année à ce jour",
+    "stats.period_last_year": "Année dernière",
     "stats.totals": "Totaux",
     "stats.by_status": "Par statut",
     "stats.by_source": "Par source",
     "stats.by_type": "Par type",
     "stats.by_direction": "Par direction",
     "stats.recent": "Jours récents",
+    "stats.timeline": "Activité",
+    "stats.timeline_by": "{metric} par {bucket}",
+    "stats.bucket_hour": "heure",
+    "stats.bucket_day": "jour",
+    "stats.bucket_month": "mois",
     "stats.inbox_conversations": "Boîte",
     "stats.hidden_conversations": "Masqués",
     "stats.unread_conversations": "Non lus",
@@ -616,12 +836,21 @@ const I18N = {
     "recipient.add": "Ajouter un destinataire",
     "recipient.needs_phone": "Le destinataire doit avoir un numéro de téléphone.",
     "recipient.add_one": "Ajoutez un destinataire.",
-    "recipient.text_number": "Texter ce numéro",
+    "recipient.text_number": "Nouveau message à {number}",
     "messages.aria": "Messages",
     "messages.empty": "Aucun message pour le moment.",
     "messages.load_older": "Charger les anciens ({count})",
     "message.reaction_preview": "Réaction {icon}",
     "message.reaction_title": "{name} a réagi {icon}",
+    "message.react": "Réagir",
+    "message.react_like": "J'aime",
+    "message.react_love": "J'adore",
+    "message.react_laugh": "Rire",
+    "message.react_emphasize": "Souligner",
+    "message.react_question": "Question",
+    "message.react_dislike": "Je n'aime pas",
+    "message.react_requires_text": "Vous pouvez réagir aux messages texte.",
+    "message.react_failed": "Impossible d'envoyer la réaction.",
     "message.send_failed": "Envoi échoué",
     "message.delivery_unconfirmed": "Livraison non confirmée",
     "message.voicemail": "Messagerie vocale",
@@ -630,7 +859,7 @@ const I18N = {
     "composer.media_urls": "URL de médias",
     "composer.upload": "Téléverser un média",
     "composer.send": "Envoyer",
-    "composer.requires_content": "Un message ou une URL de média est requis.",
+    "composer.requires_content": "Un message ou une pièce jointe est requis.",
     "schedule.title": "Programmer l'envoi",
     "schedule.send_at": "Envoyer à",
     "schedule.queue": "Mettre en file",
@@ -853,6 +1082,10 @@ function closeMobileThread({ fromHistory = false } = {}) {
 
 function handleNavigationPop(event) {
   if (isDesktopLayout()) return;
+  if (els.conversationSearch?.value && clearConversationSearch()) {
+    replaceNavigationState("list");
+    return;
+  }
   const navState = event.state || {};
   if (navState.textingApp === true && navState.view === "thread") {
     if (navState.draft) {
@@ -871,6 +1104,9 @@ function handleNavigationPop(event) {
 }
 
 window.textingCloseThreadForNativeBack = () => {
+  if (els.conversationSearch?.value && clearConversationSearch()) {
+    return true;
+  }
   if (!els.statsModal.classList.contains("hidden")) {
     closeStats();
     return true;
@@ -898,9 +1134,22 @@ window.textingRefreshIfStaleFromNative = () => {
 
 function updateComposerOffset() {
   if (!els.threadPane || !els.composer) return;
-  const height = Math.ceil(els.composer.getBoundingClientRect().height || 0);
-  if (height > 0) {
-    els.threadPane.style.setProperty("--mobile-composer-height", `${height}px`);
+  const composerHeight = Math.ceil(els.composer.getBoundingClientRect().height || 0);
+  const headerHeight = Math.ceil(els.threadHeader?.getBoundingClientRect().height || 0);
+  const shellRect = els.appShell?.getBoundingClientRect();
+  const messagesRect = els.messages?.getBoundingClientRect();
+  if (composerHeight > 0) {
+    els.threadPane.style.setProperty("--mobile-composer-height", `${composerHeight}px`);
+    els.appShell?.style.setProperty("--thread-composer-height", `${composerHeight}px`);
+  }
+  if (headerHeight > 0) {
+    els.appShell?.style.setProperty("--thread-header-height", `${headerHeight}px`);
+  }
+  if (shellRect && messagesRect) {
+    const messagesTop = Math.max(0, Math.ceil(messagesRect.top - shellRect.top));
+    const messagesBottom = Math.max(0, Math.ceil(shellRect.bottom - messagesRect.bottom));
+    els.appShell?.style.setProperty("--thread-messages-top", `${messagesTop}px`);
+    els.appShell?.style.setProperty("--thread-messages-bottom", `${messagesBottom}px`);
   }
 }
 
@@ -989,6 +1238,7 @@ function applyStaticTranslations() {
   document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
     element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
   });
+  renderStatsPeriodOptions();
 }
 
 function restoreThreadHeaderAfterStaticTranslations() {
@@ -1094,6 +1344,10 @@ function configureSounds() {
   };
 }
 
+function configureComposerDisplay() {
+  document.body.classList.toggle("composer-counter-hidden", !settingBool("behavior.show_composer_counter", true));
+}
+
 function ntfyNotificationsActive() {
   return settingBool("notifications.ntfy_enabled", false) && Boolean(String(bootstrapSettingValue("notifications.ntfy_endpoint", "")).trim());
 }
@@ -1187,6 +1441,7 @@ function applyRuntimeSettings() {
   configureHotkeys();
   configureAutoRefresh();
   configureSounds();
+  configureComposerDisplay();
   applyStaticTranslations();
   restoreThreadHeaderAfterStaticTranslations();
   applyTheme(document.documentElement.dataset.theme || "light", { persist: false });
@@ -1206,6 +1461,12 @@ async function api(path, options = {}) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+    }
+    if (response.status === 503 && String(payload.error || "").includes("sign-in is not configured")) {
+      window.location.href = "/login?setup=1";
+    }
     throw new Error(payload.error || `Request failed: ${response.status}`);
   }
   return payload;
@@ -1225,8 +1486,179 @@ function settingSourceLabel(field) {
   return t("source.default");
 }
 
+function settingsAnchor(name) {
+  return `settings-${String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "section"}`;
+}
+
+function renderSettingsNav(sections) {
+  if (!els.settingsNav) return;
+  const items = [{ name: t("security.title"), anchor: "securitySettings" }].concat(
+    sections.map((section) => ({ name: section.name, anchor: settingsAnchor(section.name) })),
+  );
+  els.settingsNav.innerHTML = items
+    .map(
+      (item, index) => `
+        <button class="settings-nav-button ${index === 0 ? "active" : ""}" type="button" data-settings-anchor="${escapeHtml(item.anchor)}">
+          ${escapeHtml(item.name)}
+        </button>`,
+    )
+    .join("");
+}
+
+function backupCodeList(codes = []) {
+  if (!codes.length) return "";
+  return `
+    <div class="two-factor-codes" aria-label="${escapeHtml(t("security.backup_codes"))}">
+      ${codes.map((code) => `<code>${escapeHtml(code)}</code>`).join("")}
+    </div>`;
+}
+
+function renderTwoFactorSetup() {
+  const setup = state.twoFactorSetup;
+  if (!setup) return "";
+  const qrImage = setup.qr_svg
+    ? `<img class="two-factor-qr" src="${escapeHtml(setup.qr_svg)}" alt="${escapeHtml(t("security.scan_qr"))}" />`
+    : `<div class="two-factor-qr two-factor-qr-empty">${escapeHtml(t("security.manual_secret"))}</div>`;
+  return `
+    <div class="two-factor-setup">
+      <div class="two-factor-setup-hero">
+        ${qrImage}
+        <div class="two-factor-setup-copy">
+          <strong>${escapeHtml(t("security.scan_qr"))}</strong>
+          <p class="setting-help">${escapeHtml(t("security.setup_help"))}</p>
+          <div class="two-factor-secret-row">
+            <span>
+              <strong>${escapeHtml(t("security.manual_secret"))}</strong>
+              <code>${escapeHtml(setup.secret || "")}</code>
+            </span>
+            <button class="small-button" type="button" data-copy-two-factor="${escapeHtml(setup.secret || "")}">${escapeHtml(t("security.copy"))}</button>
+          </div>
+        </div>
+      </div>
+      <div class="two-factor-backups">
+        <strong>${escapeHtml(t("security.backup_codes"))}</strong>
+        <p class="setting-help">${escapeHtml(t("security.backup_codes_note"))}</p>
+        ${backupCodeList(setup.backup_codes || [])}
+      </div>
+      <label class="two-factor-inline-field">
+        <span>${escapeHtml(t("security.auth_code"))}</span>
+        <input class="two-factor-setup-code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="${escapeHtml(t("security.auth_code_placeholder"))}" />
+      </label>
+      <div class="two-factor-actions">
+        <button class="small-button done-button" type="button" data-two-factor-action="enable">${escapeHtml(t("security.verify_enable"))}</button>
+        <button class="small-button" type="button" data-two-factor-action="cancel-setup">${escapeHtml(t("common.cancel"))}</button>
+      </div>
+    </div>`;
+}
+
+function renderAccountSettings(status = state.twoFactor) {
+  const username = status?.username || "";
+  const disabled = status?.auth_disabled ? "disabled" : "";
+  return `
+    <div class="setting-field account-card">
+      <span>
+        <strong>${escapeHtml(t("security.account"))}</strong>
+        <small>${escapeHtml(t("security.account_help"))}</small>
+      </span>
+      <div class="account-settings-grid">
+        <label class="two-factor-inline-field">
+          <span>${escapeHtml(t("security.username"))}</span>
+          <input class="account-username" type="text" autocomplete="username" value="${escapeHtml(username)}" ${disabled} />
+        </label>
+        <label class="two-factor-inline-field">
+          <span>${escapeHtml(t("security.current_password"))}</span>
+          <input class="account-current-password" type="password" autocomplete="current-password" ${disabled} />
+        </label>
+        <label class="two-factor-inline-field">
+          <span>${escapeHtml(t("security.new_password"))}</span>
+          <input class="account-new-password" type="password" autocomplete="new-password" ${disabled} />
+        </label>
+        <label class="two-factor-inline-field">
+          <span>${escapeHtml(t("security.confirm_password"))}</span>
+          <input class="account-confirm-password" type="password" autocomplete="new-password" ${disabled} />
+        </label>
+      </div>
+      <div class="two-factor-actions">
+        <button class="small-button done-button" type="button" data-account-action="save" ${disabled}>${escapeHtml(t("security.save_account"))}</button>
+      </div>
+    </div>`;
+}
+
+function renderTwoFactorBackupCodes() {
+  if (!state.twoFactorBackupCodes.length) return "";
+  return `
+    <div class="two-factor-backups two-factor-backups-new">
+      <strong>${escapeHtml(t("security.backup_codes"))}</strong>
+      <p class="setting-help">${escapeHtml(t("security.backup_codes_note"))}</p>
+      ${backupCodeList(state.twoFactorBackupCodes)}
+    </div>`;
+}
+
+function renderTwoFactorSettings(status = state.twoFactor) {
+  if (!els.securitySettings) return;
+  const enabled = Boolean(status?.enabled);
+  const available = Boolean(status?.available);
+  const envManaged = Boolean(status?.env_managed);
+  const canDisable = Boolean(status?.can_disable);
+  const sourceLabel = envManaged ? t("security.2fa_env") : enabled ? t("security.2fa_enabled") : t("security.2fa_disabled");
+  const statusText = enabled ? t("security.enabled") : t("security.disabled");
+  const envNote = envManaged ? `<p class="setting-help">${escapeHtml(t("security.env_note"))}</p>` : "";
+  const passwordField = `
+    <label class="two-factor-inline-field">
+      <span>${escapeHtml(t("security.current_password"))}</span>
+      <input class="two-factor-current-password" type="password" autocomplete="current-password" placeholder="${escapeHtml(t("security.current_password_placeholder"))}" />
+    </label>`;
+  const codeField = `
+    <label class="two-factor-inline-field">
+      <span>${escapeHtml(t("security.auth_code"))}</span>
+      <input class="two-factor-current-code" type="text" autocomplete="one-time-code" placeholder="${escapeHtml(t("security.auth_code_placeholder"))}" />
+    </label>`;
+
+  let body = "";
+  if (!available) {
+    body = `<p class="setting-help">${escapeHtml(t("security.unavailable"))}</p>`;
+  } else if (state.twoFactorSetup) {
+    body = renderTwoFactorSetup();
+  } else if (enabled) {
+    body = `
+      <p class="setting-help">${escapeHtml(statusText)}</p>
+      ${envNote}
+      ${renderTwoFactorBackupCodes()}
+      ${passwordField}
+      ${codeField}
+      <div class="two-factor-actions">
+        <button class="small-button" type="button" data-two-factor-action="backup-codes">${escapeHtml(t("security.regenerate_backup"))}</button>
+        <button class="small-button danger-button" type="button" data-two-factor-action="disable" ${canDisable ? "" : "disabled"}>${escapeHtml(t("security.disable"))}</button>
+      </div>`;
+  } else {
+    body = `
+      <p class="setting-help">${escapeHtml(statusText)}</p>
+      ${renderTwoFactorBackupCodes()}
+      ${passwordField}
+      <div class="two-factor-actions">
+        <button class="small-button done-button" type="button" data-two-factor-action="setup">${escapeHtml(t("security.start_setup"))}</button>
+      </div>`;
+  }
+
+  els.securitySettings.innerHTML = `
+    <div class="settings-section-heading">
+      <h3>${escapeHtml(t("security.title"))}</h3>
+      <span class="settings-pill ${enabled ? "on" : ""}">${escapeHtml(sourceLabel)}</span>
+    </div>
+    ${renderAccountSettings(status)}
+    <div class="setting-field two-factor-card">
+      <span>
+        <strong>${escapeHtml(t("security.2fa"))}</strong>
+        <small>${escapeHtml(sourceLabel)}</small>
+      </span>
+      ${body}
+    </div>`;
+}
+
 function renderSettings(payload = state.bootstrap?.settings) {
   const sections = payload?.sections || [];
+  renderSettingsNav(sections);
+  renderTwoFactorSettings();
   if (!sections.length) {
     els.settingsSections.innerHTML = `<div class="empty-state">${escapeHtml(t("settings.empty"))}</div>`;
     return;
@@ -1234,8 +1666,10 @@ function renderSettings(payload = state.bootstrap?.settings) {
   els.settingsSections.innerHTML = sections
     .map(
       (section) => `
-        <section class="settings-section">
-          <h3>${escapeHtml(section.name)}</h3>
+        <section class="settings-section" id="${escapeHtml(settingsAnchor(section.name))}">
+          <div class="settings-section-heading">
+            <h3>${escapeHtml(section.name)}</h3>
+          </div>
           <div class="settings-fields">
             ${(section.fields || []).map(renderSettingField).join("")}
           </div>
@@ -1356,10 +1790,13 @@ function renderSettingField(field) {
 
 async function openSettings() {
   try {
-    const payload = await api("/api/settings");
+    const [payload, twoFactor] = await Promise.all([api("/api/settings"), api("/api/auth/2fa")]);
     if (state.bootstrap) {
       state.bootstrap.settings = payload;
     }
+    state.twoFactor = twoFactor;
+    state.twoFactorSetup = null;
+    state.twoFactorBackupCodes = [];
     renderSettings(payload);
     els.settingsModal.classList.remove("hidden");
     els.settingsModal.focus();
@@ -1370,6 +1807,176 @@ async function openSettings() {
 
 function closeSettings() {
   els.settingsModal.classList.add("hidden");
+  state.twoFactorSetup = null;
+  state.twoFactorBackupCodes = [];
+}
+
+function downloadDatabase() {
+  window.location.href = "/api/database/download";
+}
+
+async function signOut() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } finally {
+    window.location.href = "/login";
+  }
+}
+
+function accountPayload() {
+  return {
+    username: els.securitySettings?.querySelector(".account-username")?.value || "",
+    password: els.securitySettings?.querySelector(".account-current-password")?.value || "",
+    new_password: els.securitySettings?.querySelector(".account-new-password")?.value || "",
+    confirm_password: els.securitySettings?.querySelector(".account-confirm-password")?.value || "",
+  };
+}
+
+async function saveAccountSettings() {
+  const controls = els.securitySettings?.querySelectorAll(".account-card input, .account-card button") || [];
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    const payload = await api("/api/auth/account", {
+      method: "POST",
+      body: JSON.stringify(accountPayload()),
+    });
+    state.twoFactor = { ...(state.twoFactor || {}), ...(payload.auth || {}) };
+    renderTwoFactorSettings();
+    toast(t("security.account_saved"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    controls.forEach((control) => {
+      control.disabled = false;
+    });
+  }
+}
+
+function twoFactorPassword() {
+  return els.securitySettings?.querySelector(".two-factor-current-password")?.value || "";
+}
+
+function twoFactorCurrentCode() {
+  return els.securitySettings?.querySelector(".two-factor-current-code")?.value || "";
+}
+
+function setTwoFactorBusy(busy) {
+  els.securitySettings?.querySelectorAll("input, textarea, button").forEach((control) => {
+    control.disabled = busy;
+  });
+}
+
+async function refreshTwoFactorStatus() {
+  state.twoFactor = await api("/api/auth/2fa");
+  renderTwoFactorSettings();
+}
+
+async function startTwoFactorSetup() {
+  const password = twoFactorPassword();
+  setTwoFactorBusy(true);
+  try {
+    const payload = await api("/api/auth/2fa/setup", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+    state.twoFactor = payload.status;
+    state.twoFactorSetup = payload.setup;
+    state.twoFactorBackupCodes = [];
+    renderTwoFactorSettings();
+    els.securitySettings?.querySelector(".two-factor-setup-code")?.focus();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setTwoFactorBusy(false);
+  }
+}
+
+async function enableTwoFactor() {
+  const code = els.securitySettings?.querySelector(".two-factor-setup-code")?.value || "";
+  setTwoFactorBusy(true);
+  try {
+    const payload = await api("/api/auth/2fa/enable", {
+      method: "POST",
+      body: JSON.stringify({ setup_token: state.twoFactorSetup?.setup_token || "", code }),
+    });
+    state.twoFactor = payload.status;
+    state.twoFactorSetup = null;
+    state.twoFactorBackupCodes = [];
+    renderTwoFactorSettings();
+    toast(t("security.enabled_toast"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setTwoFactorBusy(false);
+  }
+}
+
+async function regenerateBackupCodes() {
+  const password = twoFactorPassword();
+  setTwoFactorBusy(true);
+  try {
+    const payload = await api("/api/auth/2fa/backup-codes", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+    state.twoFactor = payload.status;
+    state.twoFactorSetup = null;
+    state.twoFactorBackupCodes = payload.backup_codes || [];
+    renderTwoFactorSettings();
+    toast(t("security.backup_regenerated"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setTwoFactorBusy(false);
+  }
+}
+
+async function disableTwoFactor() {
+  if (!confirm(t("security.disable_confirm"))) return;
+  const password = twoFactorPassword();
+  const secondFactor = twoFactorCurrentCode();
+  setTwoFactorBusy(true);
+  try {
+    const payload = await api("/api/auth/2fa/disable", {
+      method: "POST",
+      body: JSON.stringify({ password, second_factor: secondFactor }),
+    });
+    state.twoFactor = payload.status;
+    state.twoFactorSetup = null;
+    state.twoFactorBackupCodes = [];
+    renderTwoFactorSettings();
+    toast(t("security.disabled_toast"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setTwoFactorBusy(false);
+  }
+}
+
+async function copyTwoFactorValue(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+    toast(t("security.copied"));
+  } catch {
+    toast(value);
+  }
+}
+
+async function handleTwoFactorAction(action) {
+  if (action === "setup") await startTwoFactorSetup();
+  if (action === "enable") await enableTwoFactor();
+  if (action === "backup-codes") await regenerateBackupCodes();
+  if (action === "disable") await disableTwoFactor();
+  if (action === "cancel-setup") {
+    state.twoFactorSetup = null;
+    await refreshTwoFactorStatus();
+  }
+}
+
+async function handleAccountAction(action) {
+  if (action === "save") await saveAccountSettings();
 }
 
 function statsLabel(key) {
@@ -1380,8 +1987,37 @@ function statsLabel(key) {
   return normalized.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function validStatsPeriod(value) {
+  const normalized = String(value || "all");
+  return STATS_PERIOD_OPTIONS.some((option) => option.value === normalized) ? normalized : "all";
+}
+
+function renderStatsPeriodOptions() {
+  if (!els.statsPeriod) return;
+  const current = validStatsPeriod(els.statsPeriod.value || localStorage.getItem(STATS_PERIOD_KEY));
+  els.statsPeriod.innerHTML = STATS_PERIOD_OPTIONS.map(
+    (option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(t(option.labelKey))}</option>`,
+  ).join("");
+  els.statsPeriod.value = current;
+}
+
+function currentStatsPeriod() {
+  return validStatsPeriod(els.statsPeriod?.value || localStorage.getItem(STATS_PERIOD_KEY));
+}
+
+async function loadStats() {
+  const period = currentStatsPeriod();
+  localStorage.setItem(STATS_PERIOD_KEY, period);
+  els.statsBody.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.loading"))}</div>`;
+  try {
+    renderStats(await api(`/api/stats?period=${encodeURIComponent(period)}`));
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function renderStatsList(items = []) {
-  if (!items.length) return `<div class="empty-state">${escapeHtml(t("settings.empty"))}</div>`;
+  if (!items.length) return `<div class="empty-state">${escapeHtml(t("stats.empty"))}</div>`;
   return items
     .map(
       ([label, value]) => `
@@ -1391,6 +2027,237 @@ function renderStatsList(items = []) {
         </div>`,
     )
     .join("");
+}
+
+function statsCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function statsChartBucketParts(bucket, bucketType = "day") {
+  const value = String(bucket || "");
+  let match = null;
+  if (bucketType === "hour") {
+    match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})$/);
+    if (match) {
+      return {
+        year: Number(match[1]),
+        month: Number(match[2]),
+        day: Number(match[3]),
+        hour: Number(match[4]),
+        minute: 0,
+      };
+    }
+  } else if (bucketType === "month") {
+    match = value.match(/^(\d{4})-(\d{2})$/);
+    if (match) {
+      return { year: Number(match[1]), month: Number(match[2]), day: 1, hour: 12, minute: 0 };
+    }
+  } else {
+    match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match) {
+      return {
+        year: Number(match[1]),
+        month: Number(match[2]),
+        day: Number(match[3]),
+        hour: 12,
+        minute: 0,
+      };
+    }
+  }
+  return null;
+}
+
+function statsBucketYear(bucket, bucketType = "day") {
+  return statsChartBucketParts(bucket, bucketType)?.year || "";
+}
+
+function statsBucketUnitLabel(bucketType = "day") {
+  return t(`stats.bucket_${bucketType}`) || bucketType;
+}
+
+function formatStatsChartBucket(bucket, bucketType = "day", full = false, optionsOverride = {}) {
+  const value = String(bucket || "");
+  const includeYear = Boolean(full || optionsOverride.includeYear);
+  const dateParts = statsChartBucketParts(bucket, bucketType);
+  if (!dateParts) return value;
+  let options = { month: "short", day: "numeric", timeZone: "UTC" };
+  if (bucketType === "hour") {
+    options = {
+      ...(full ? { month: "short", day: "numeric" } : {}),
+      ...(includeYear && full ? { year: "numeric" } : {}),
+      hour: "numeric",
+      hour12: state.language === "en",
+      timeZone: "UTC",
+    };
+  } else if (bucketType === "month") {
+    options = { month: "short", ...(includeYear ? { year: "numeric" } : {}), timeZone: "UTC" };
+  } else {
+    options = { ...(full ? { weekday: "short" } : {}), ...(includeYear ? { year: "numeric" } : {}), month: "short", day: "numeric", timeZone: "UTC" };
+  }
+  return new Intl.DateTimeFormat(localeForLanguage(), options).format(dateForDisplay(dateParts));
+}
+
+function normalizeStatsTimeline(payload) {
+  if (payload?.timeline?.points?.length) {
+    return {
+      bucket: payload.timeline.bucket || "day",
+      points: payload.timeline.points,
+    };
+  }
+  const points = (payload?.recent_days || [])
+    .filter((item) => item?.day)
+    .map((item) => ({
+      bucket: item.day,
+      count: item.count,
+      inbound: item.inbound,
+      outbound: item.outbound,
+    }))
+    .reverse();
+  return { bucket: "day", points };
+}
+
+function renderStatsTimelineChart(timeline = {}) {
+  const bucketType = timeline.bucket || "day";
+  const chartPoints = (timeline.points || [])
+    .filter((item) => item?.bucket)
+    .map((item) => ({
+      bucket: item.bucket,
+      count: Math.max(0, statsCount(item.count)),
+      inbound: Math.max(0, statsCount(item.inbound)),
+      outbound: Math.max(0, statsCount(item.outbound)),
+    }));
+  if (!chartPoints.length) return `<div class="empty-state">${escapeHtml(t("stats.empty"))}</div>`;
+
+  const years = chartPoints.map((item) => statsBucketYear(item.bucket, bucketType)).filter(Boolean);
+  const spansYears = new Set(years).size > 1;
+  const height = spansYears ? 330 : 300;
+  const padLeft = 54;
+  const padRight = 28;
+  const padTop = 26;
+  const padBottom = spansYears ? 86 : 58;
+  const pointSpacing = bucketType === "month" ? 30 : bucketType === "hour" ? 42 : 36;
+  const width = Math.max(1000, padLeft + padRight + Math.max(1, chartPoints.length - 1) * pointSpacing);
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+  const plotBottom = height - padBottom;
+  const maxCount = Math.max(1, ...chartPoints.map((item) => item.count));
+  const totalCount = chartPoints.reduce((sum, item) => sum + item.count, 0);
+  const dateRange = `${formatStatsChartBucket(chartPoints[0].bucket, bucketType, true)} - ${formatStatsChartBucket(
+    chartPoints[chartPoints.length - 1].bucket,
+    bucketType,
+    true,
+  )}`;
+  const coordinates = chartPoints.map((item, index) => {
+    const x = chartPoints.length === 1 ? padLeft + plotWidth / 2 : padLeft + (index / (chartPoints.length - 1)) * plotWidth;
+    const y = padTop + (1 - item.count / maxCount) * plotHeight;
+    return { ...item, x, y };
+  });
+  const linePoints = coordinates.map((item) => `${item.x.toFixed(2)},${item.y.toFixed(2)}`).join(" ");
+  const labelEvery = Math.max(1, Math.ceil(chartPoints.length / (spansYears ? 12 : 6)));
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((ratio) => {
+      const y = padTop + (1 - ratio) * plotHeight;
+      const value = Math.round(maxCount * ratio);
+      return `
+        <line class="stats-chart-grid-line" x1="${padLeft}" y1="${y.toFixed(2)}" x2="${width - padRight}" y2="${y.toFixed(2)}"></line>
+        <text class="stats-chart-y-label" x="${padLeft - 10}" y="${(y + 4).toFixed(2)}">${escapeHtml(value)}</text>`;
+    })
+    .join("");
+  const axisTitles = `
+    <text class="stats-chart-axis-title stats-chart-y-title" x="${padLeft}" y="17">${escapeHtml(t("stats.texts"))}</text>
+    <text class="stats-chart-axis-title stats-chart-x-title" x="${(padLeft + plotWidth / 2).toFixed(2)}" y="${
+      spansYears ? height - 66 : height - 40
+    }">${escapeHtml(statsBucketUnitLabel(bucketType))}</text>`;
+  const yearGuides = spansYears
+    ? (() => {
+        const labels = [];
+        const separators = [];
+        let groupStart = 0;
+        const addYearLabel = (startIndex, endIndex) => {
+          const year = statsBucketYear(coordinates[startIndex]?.bucket, bucketType);
+          if (!year) return;
+          const left =
+            startIndex === 0 ? padLeft : (coordinates[startIndex - 1].x + coordinates[startIndex].x) / 2;
+          const right =
+            endIndex === coordinates.length - 1
+              ? width - padRight
+              : (coordinates[endIndex].x + coordinates[endIndex + 1].x) / 2;
+          labels.push(`
+            <text class="stats-chart-year-label" x="${((left + right) / 2).toFixed(2)}" y="${height - 16}">
+              ${escapeHtml(year)}
+            </text>`);
+        };
+        for (let index = 1; index < coordinates.length; index += 1) {
+          const previousYear = statsBucketYear(coordinates[index - 1].bucket, bucketType);
+          const currentYear = statsBucketYear(coordinates[index].bucket, bucketType);
+          if (!previousYear || previousYear === currentYear) continue;
+          const x = (coordinates[index - 1].x + coordinates[index].x) / 2;
+          separators.push(
+            `<line class="stats-chart-year-line" x1="${x.toFixed(2)}" y1="${padTop}" x2="${x.toFixed(2)}" y2="${plotBottom}"></line>`,
+          );
+          addYearLabel(groupStart, index - 1);
+          groupStart = index;
+        }
+        addYearLabel(groupStart, coordinates.length - 1);
+        return separators.join("") + labels.join("");
+      })()
+    : "";
+  const axisLabels = coordinates
+    .map((item, index) => {
+      if (index !== 0 && index !== coordinates.length - 1 && index % labelEvery !== 0) return "";
+      const includeYear = !spansYears && bucketType !== "hour" && (index === 0 || index === coordinates.length - 1);
+      return `
+        <text class="stats-chart-x-label" x="${item.x.toFixed(2)}" y="${spansYears ? height - 44 : height - 18}">
+          ${escapeHtml(formatStatsChartBucket(item.bucket, bucketType, false, { includeYear }))}
+        </text>`;
+    })
+    .join("");
+  const dots = coordinates
+    .map((item) => {
+      const bucketLabel = formatStatsChartBucket(item.bucket, bucketType, true);
+      const countLabel = `${item.count} ${t("stats.texts")}`;
+      const detailLabel = `${item.inbound} ${t("stats.inbound_messages")} / ${item.outbound} ${t("stats.outbound_messages")}`;
+      const label = `${bucketLabel}: ${countLabel} (${detailLabel})`;
+      const tooltipWidth = 270;
+      const tooltipHeight = 58;
+      const tooltipX = clamp(item.x - tooltipWidth / 2, padLeft, width - padRight - tooltipWidth);
+      let tooltipY = item.y - tooltipHeight - 12;
+      if (tooltipY < 6) tooltipY = item.y + 14;
+      if (tooltipY + tooltipHeight > plotBottom) tooltipY = Math.max(6, plotBottom - tooltipHeight);
+      return `
+        <g class="stats-chart-point-group" tabindex="0" aria-label="${escapeHtml(label)}">
+          <title>${escapeHtml(label)}</title>
+          <circle class="stats-chart-point" cx="${item.x.toFixed(2)}" cy="${item.y.toFixed(2)}" r="5"></circle>
+          <g class="stats-chart-tooltip" transform="translate(${tooltipX.toFixed(2)} ${tooltipY.toFixed(2)})">
+            <rect width="${tooltipWidth}" height="${tooltipHeight}" rx="8"></rect>
+            <text class="stats-chart-tooltip-title" x="12" y="19">${escapeHtml(bucketLabel)}</text>
+            <text class="stats-chart-tooltip-count" x="12" y="36">${escapeHtml(countLabel)}</text>
+            <text class="stats-chart-tooltip-detail" x="12" y="51">${escapeHtml(detailLabel)}</text>
+          </g>
+        </g>`;
+    })
+    .join("");
+
+  return `
+    <div class="stats-chart">
+      <div class="stats-chart-summary">
+        <strong>${escapeHtml(totalCount)}</strong>
+        <span>${escapeHtml(t("stats.timeline_by", { metric: t("stats.texts"), bucket: statsBucketUnitLabel(bucketType) }))} · ${escapeHtml(dateRange)}</span>
+      </div>
+      <div class="stats-chart-plot">
+        <svg class="stats-chart-svg" style="min-width:${width}px" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(
+          `${totalCount} ${t("stats.texts")} ${dateRange}`,
+        )}">
+          ${gridLines}
+          ${yearGuides}
+          ${axisTitles}
+          <polyline class="stats-chart-line" points="${linePoints}"></polyline>
+          ${dots}
+          ${axisLabels}
+        </svg>
+      </div>
+    </div>`;
 }
 
 function renderStats(payload) {
@@ -1413,10 +2280,7 @@ function renderStats(payload) {
   const sourceItems = (payload?.by_source || []).map((item) => [statsLabel(item.source), item.count]);
   const typeItems = (payload?.by_type || []).map((item) => [statsLabel(item.message_type), item.count]);
   const directionItems = (payload?.by_direction || []).map((item) => [statsLabel(item.direction), item.count]);
-  const recentItems = (payload?.recent_days || []).map((item) => [
-    item.day,
-    `${item.count ?? 0} (${item.inbound ?? 0}/${item.outbound ?? 0})`,
-  ]);
+  const timeline = normalizeStatsTimeline(payload);
   els.statsBody.innerHTML = `
     <section class="stats-section">
       <h3>${escapeHtml(t("stats.totals"))}</h3>
@@ -1439,20 +2303,16 @@ function renderStats(payload) {
       <div class="stats-grid">${renderStatsList(directionItems)}</div>
     </section>
     <section class="stats-section">
-      <h3>${escapeHtml(t("stats.recent"))}</h3>
-      <div class="stats-grid">${renderStatsList(recentItems)}</div>
+      <h3>${escapeHtml(t("stats.timeline"))}</h3>
+      ${renderStatsTimelineChart(timeline)}
     </section>`;
 }
 
 async function openStats() {
-  els.statsBody.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.loading"))}</div>`;
+  renderStatsPeriodOptions();
   els.statsModal.classList.remove("hidden");
   els.statsModal.focus();
-  try {
-    renderStats(await api("/api/stats"));
-  } catch (error) {
-    toast(error.message);
-  }
+  await loadStats();
 }
 
 function closeStats() {
@@ -1947,14 +2807,15 @@ function valueIsTruthy(value) {
 function conversationIsRead(conversation) {
   if (!conversation) return false;
   if (conversation.manual_unread_at) return false;
-  if (conversation.needs_attention !== undefined && conversation.needs_attention !== null && conversation.needs_attention !== "") {
-    return !valueIsTruthy(conversation.needs_attention);
-  }
   const lastDirection = String(conversation.last_direction || "").toLowerCase();
   if (lastDirection && lastDirection !== "inbound") return true;
   const last = conversation?.last_occurred_at || conversation?.last_message_at || conversation?.sort_at || "";
   const dealt = conversation?.dealt_with_at || "";
-  return Boolean(last && dealt && dealt >= last);
+  if (last && dealt && dealt >= last) return true;
+  if (conversation.needs_attention !== undefined && conversation.needs_attention !== null && conversation.needs_attention !== "") {
+    return !valueIsTruthy(conversation.needs_attention);
+  }
+  return false;
 }
 
 function setContactNameEditor(visible) {
@@ -2512,6 +3373,39 @@ function mergeConversationIntoList(conversation) {
   }
 }
 
+function mergeConversationIntoLoadedState(conversation) {
+  if (!conversation?.id) return false;
+  const conversationId = Number(conversation.id);
+  const update = { ...conversation, id: conversationId };
+  if (state.currentConversationId === conversationId) {
+    const currentBase = Number(state.currentConversation?.id) === conversationId ? state.currentConversation : {};
+    state.currentConversation = { ...currentBase, ...update };
+  }
+  mergeConversationIntoList(update);
+  return state.currentConversationId === conversationId;
+}
+
+function markLoadedConversationRead(conversationId) {
+  const id = Number(conversationId);
+  if (!id) return;
+  const mark = (conversation) => {
+    if (!conversation || Number(conversation.id) !== id) return conversation;
+    return {
+      ...conversation,
+      dealt_with_at:
+        conversation.last_occurred_at ||
+        conversation.last_message_at ||
+        conversation.sort_at ||
+        conversation.dealt_with_at ||
+        "",
+      manual_unread_at: null,
+      needs_attention: 0,
+    };
+  };
+  state.currentConversation = mark(state.currentConversation);
+  state.conversations = state.conversations.map(mark);
+}
+
 function applyIdentityToLoadedState(identity) {
   if (!identity?.phone_number) return;
   state.messages = state.messages.map((message) => {
@@ -2579,7 +3473,8 @@ function renderRecipientSuggestions() {
       const active = index === state.recipientSuggestionIndex;
       const isManual = contact.kind === "manual";
       const label = !isManual && contact.label ? ` ${contact.label}` : "";
-      const title = isManual ? t("recipient.text_number") : contact.display_name;
+      const title = isManual ? t("recipient.text_number", { number: contact.phone_display }) : contact.display_name;
+      const detail = isManual ? "" : `${contact.phone_display}${label}`;
       return `
         <button
           class="recipient-suggestion ${isManual ? "manual-recipient" : ""} ${active ? "active" : ""}"
@@ -2590,7 +3485,7 @@ function renderRecipientSuggestions() {
           data-suggestion-index="${index}"
         >
           <strong>${escapeHtml(title)}</strong>
-          <span>${escapeHtml(contact.phone_display)}${escapeHtml(label)}</span>
+          ${detail ? `<span>${escapeHtml(detail)}</span>` : ""}
         </button>`;
     })
     .join("");
@@ -2959,6 +3854,8 @@ function renderMessages(messages, scrollMode = "bottom") {
         message.direction === "outbound" && message.identity_color
           ? ` style="--message-out:${escapeHtml(message.identity_color)}"`
           : "";
+      const canReact = messageCanBeReactedTo(message);
+      const messageId = message.id !== undefined && message.id !== null ? String(message.id) : "";
       const failureDetail =
         statusKind === "failed" || statusKind === "warning"
           ? `<div class="message-error ${statusKind}">
@@ -2968,7 +3865,7 @@ function renderMessages(messages, scrollMode = "bottom") {
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind}"${bubbleStyle}>
+        <article class="message-row ${message.direction} ${statusKind} ${canReact ? "reactable" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
               ${voicemailLabel}
@@ -3016,6 +3913,178 @@ function watchMessageMediaForBottomStick(scrollMode, wasNearBottom = false) {
   });
   window.setTimeout(keepBottomVisible, 350);
   window.setTimeout(keepBottomVisible, 1000);
+}
+
+function messageById(id) {
+  const targetId = String(id || "");
+  if (!targetId) return null;
+  return state.messages.find((message) => String(message.id) === targetId) || null;
+}
+
+function messageCanBeReactedTo(message) {
+  if (!message?.id || message.direction !== "inbound") return false;
+  if (message.source === "scheduled" || message.source === "optimistic") return false;
+  if (!cleanReactionText(message.text || "")) return false;
+  return !parseMessageReaction(message);
+}
+
+function reactionTargetFromEvent(event) {
+  if (event.target.closest("a, button, input, textarea, select, audio, video, object, [data-lightbox-src], .message-reaction")) {
+    return null;
+  }
+  const row = event.target.closest(".message-row[data-message-id]");
+  if (!row) return null;
+  return { row, message: messageById(row.dataset.messageId) };
+}
+
+function closeReactionMenu() {
+  state.reactionTargetId = null;
+  state.reactionLongPressTriggered = false;
+  if (!els.reactionMenu) return;
+  els.reactionMenu.classList.add("hidden");
+  els.reactionMenu.style.removeProperty("left");
+  els.reactionMenu.style.removeProperty("top");
+  els.reactionMenu.style.removeProperty("visibility");
+}
+
+function reactionMenuIsOpen() {
+  return Boolean(els.reactionMenu && !els.reactionMenu.classList.contains("hidden"));
+}
+
+function positionReactionMenu(row) {
+  if (!els.reactionMenu || !row) return;
+  const bubble = row.querySelector(".message-bubble") || row;
+  const bubbleRect = bubble.getBoundingClientRect();
+  els.reactionMenu.style.visibility = "hidden";
+  els.reactionMenu.classList.remove("hidden");
+  requestAnimationFrame(() => {
+    const menuRect = els.reactionMenu.getBoundingClientRect();
+    const gap = 8;
+    let top = bubbleRect.top - menuRect.height - gap;
+    if (top < gap) {
+      top = bubbleRect.bottom + gap;
+    }
+    top = clamp(top, gap, Math.max(gap, window.innerHeight - menuRect.height - gap));
+    const preferredLeft =
+      row.classList.contains("outbound") ? bubbleRect.right - menuRect.width : bubbleRect.left;
+    const left = clamp(preferredLeft, gap, Math.max(gap, window.innerWidth - menuRect.width - gap));
+    els.reactionMenu.style.left = `${left}px`;
+    els.reactionMenu.style.top = `${top}px`;
+    els.reactionMenu.style.visibility = "";
+  });
+}
+
+function openReactionMenu(row, message) {
+  if (!els.reactionMenu) return;
+  if (!messageCanBeReactedTo(message)) {
+    if (!message || message.direction !== "inbound" || parseMessageReaction(message)) return;
+    toast(t("message.react_requires_text"));
+    return;
+  }
+  state.reactionTargetId = String(message.id);
+  els.reactionMenu.innerHTML = MESSAGE_REACTION_OPTIONS.map(
+    (option) => `
+      <button class="reaction-option" type="button" role="menuitem" data-reaction-action="${escapeHtml(option.action)}" title="${escapeHtml(
+        t(option.labelKey),
+      )}" aria-label="${escapeHtml(t(option.labelKey))}">
+        <span>${escapeHtml(option.icon)}</span>
+      </button>`,
+  ).join("");
+  positionReactionMenu(row);
+}
+
+function reactionMessageText(action, message) {
+  const targetText = cleanReactionText(message?.text || "");
+  const verb = `${String(action || "").slice(0, 1).toUpperCase()}${String(action || "").slice(1)}`;
+  return `${verb} “${targetText}”`;
+}
+
+function removeOptimisticMessage(optimisticId, scrollMode = "preserve") {
+  const previousLength = state.messages.length;
+  state.messages = state.messages.filter((message) => message.id !== optimisticId);
+  if (state.messages.length !== previousLength) {
+    renderMessages(state.messages, scrollMode);
+  }
+}
+
+async function sendReaction(action) {
+  const message = messageById(state.reactionTargetId);
+  if (!messageCanBeReactedTo(message)) {
+    closeReactionMenu();
+    toast(t("message.react_requires_text"));
+    return;
+  }
+  const draft = {
+    conversation_id: state.currentConversationId,
+    from_number: els.fromNumber.value,
+    to_numbers: currentRecipients(),
+    text: reactionMessageText(action, message),
+    media_urls: [],
+  };
+  if (!draft.to_numbers.length) {
+    toast(t("recipient.add_one"));
+    return;
+  }
+  closeReactionMenu();
+  const optimisticMessageId = applyOptimisticOutgoingMessage(draft, null, { scrollMode: "preserve" });
+  try {
+    const payload = await api("/api/messages", {
+      method: "POST",
+      body: JSON.stringify(draft),
+    });
+    playMessageSound("send");
+    if (payload.conversation && Number(payload.conversation.id) === state.currentConversationId) {
+      mergeConversationIntoLoadedState(payload.conversation);
+      markLoadedConversationRead(state.currentConversationId);
+      renderThreadHeader();
+      renderConversations();
+    }
+    await loadConversations({ preserveScroll: true });
+    if (state.currentConversationId === Number(draft.conversation_id)) {
+      await refreshCurrentConversationStatus({ knownChanged: true, force: true });
+    }
+  } catch (error) {
+    removeOptimisticMessage(optimisticMessageId, "preserve");
+    showComposerError(error.message || t("message.react_failed"));
+    toast(error.message || t("message.react_failed"));
+  }
+}
+
+function clearReactionPressTimer() {
+  if (state.reactionPressTimer) {
+    clearTimeout(state.reactionPressTimer);
+    state.reactionPressTimer = null;
+  }
+  state.reactionPressPointerId = null;
+}
+
+function beginMessageReactionPress(event) {
+  if (event.button !== undefined && event.button !== 0) return;
+  const target = reactionTargetFromEvent(event);
+  if (!target || !messageCanBeReactedTo(target.message)) return;
+  clearReactionPressTimer();
+  state.reactionLongPressTriggered = false;
+  state.reactionPressPointerId = event.pointerId;
+  state.reactionPressStartX = event.clientX;
+  state.reactionPressStartY = event.clientY;
+  state.reactionPressTimer = setTimeout(() => {
+    state.reactionLongPressTriggered = true;
+    openReactionMenu(target.row, target.message);
+  }, 520);
+}
+
+function moveMessageReactionPress(event) {
+  if (state.reactionPressPointerId !== event.pointerId) return;
+  const dx = event.clientX - state.reactionPressStartX;
+  const dy = event.clientY - state.reactionPressStartY;
+  if (Math.hypot(dx, dy) > 10) {
+    clearReactionPressTimer();
+  }
+}
+
+function endMessageReactionPress(event) {
+  if (state.reactionPressPointerId !== event.pointerId) return;
+  clearReactionPressTimer();
 }
 
 function collectLightboxImages() {
@@ -3161,6 +4230,11 @@ function handleGlobalKeydown(event) {
     if (["Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
     }
+    return;
+  }
+  if (event.key === "Escape" && !els.reactionMenu?.classList.contains("hidden")) {
+    closeReactionMenu();
+    event.preventDefault();
     return;
   }
   if (event.key === "Escape" && closeDetailsOverlay({ restoreFocus: true })) {
@@ -3334,7 +4408,7 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
       state.lastThreadRefreshAt = Date.now();
       return;
     }
-    state.currentConversation = payload.conversation;
+    mergeConversationIntoLoadedState(payload.conversation);
     state.lastThreadRefreshAt = Date.now();
     if (messagesChanged) {
       trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: true });
@@ -3348,11 +4422,7 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     if (messagesChanged) {
       renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
     }
-    const current = state.conversations.find((conversation) => conversation.id === conversationId);
-    if (current) {
-      current.needs_attention = payload.conversation.needs_attention;
-      current.title = payload.conversation.title;
-      current.participants = payload.conversation.participants;
+    if (payload.conversation) {
       renderConversations();
     }
   } finally {
@@ -3554,6 +4624,12 @@ function bindColumnResizers() {
     updateComposerOffset();
   });
   window.visualViewport?.addEventListener("resize", updateComposerOffset);
+  if (window.ResizeObserver) {
+    state.layoutResizeObserver = new ResizeObserver(() => updateComposerOffset());
+    [els.threadHeader, els.messages, els.composer].filter(Boolean).forEach((element) => {
+      state.layoutResizeObserver.observe(element);
+    });
+  }
 }
 
 async function loadConversations({ append = false, preserveScroll = false, limit = 80, soundForNew = false } = {}) {
@@ -3601,11 +4677,28 @@ async function openConversation(id, options = {}) {
   const conversationId = Number(id);
   if (!conversationId) return;
   const requestSeq = ++state.openConversationSeq;
+  const previousConversationId = state.currentConversationId;
   const shouldOpenBeforeLoad = isDesktopLayout() || document.body.classList.contains("mobile-thread-open");
+  const selectionChanged = previousConversationId !== conversationId;
+  if (selectionChanged) {
+    state.currentConversationId = conversationId;
+    renderConversations();
+    scrollActiveConversationIntoView();
+  }
   if (shouldOpenBeforeLoad) {
     setMobileThreadOpen(true);
   }
-  const payload = await api(`/api/conversations/${id}/messages?limit=80`);
+  let payload;
+  try {
+    payload = await api(`/api/conversations/${id}/messages?limit=80`);
+  } catch (error) {
+    if (requestSeq === state.openConversationSeq && selectionChanged) {
+      state.currentConversationId = previousConversationId;
+      renderConversations();
+      scrollActiveConversationIntoView();
+    }
+    throw error;
+  }
   if (requestSeq !== state.openConversationSeq) return;
   state.currentConversationId = conversationId;
   state.currentConversation = payload.conversation;
@@ -3671,27 +4764,38 @@ async function setCurrentConversationArchived(archived) {
 async function setCurrentConversationRead(dealt, { silent = false } = {}) {
   if (!state.currentConversationId) return;
   const conversationId = state.currentConversationId;
+  const listIndex = state.conversations.findIndex((conversation) => Number(conversation.id) === conversationId);
+  const previousListConversation = listIndex >= 0 ? { ...state.conversations[listIndex] } : null;
+  const previousCurrentConversation =
+    state.currentConversation && Number(state.currentConversation.id) === conversationId ? { ...state.currentConversation } : null;
+  const timestamp = localIsoTimestamp();
+  const optimisticBase = previousCurrentConversation || previousListConversation || { id: conversationId };
+  const lastMessageTime =
+    optimisticBase.last_occurred_at || optimisticBase.last_message_at || optimisticBase.sort_at || timestamp;
+  mergeConversationIntoLoadedState({
+    ...optimisticBase,
+    id: conversationId,
+    dealt_with_at: dealt ? lastMessageTime : optimisticBase.dealt_with_at || "",
+    manual_unread_at: dealt ? null : timestamp,
+    needs_attention: dealt ? 0 : 1,
+  });
+  if (state.conversationCategory === "unread" && dealt) {
+    state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
+  }
+  renderConversations();
+  renderThreadHeader();
   els.dealtButton.disabled = true;
   try {
     const payload = await api(`/api/conversations/${conversationId}/dealt`, {
       method: "POST",
       body: JSON.stringify({ dealt }),
     });
-    const isCurrent = state.currentConversationId === conversationId;
-    if (isCurrent) {
-      state.currentConversation = payload.conversation;
-    }
-    const current = state.conversations.find((conversation) => conversation.id === conversationId);
-    if (current) {
-      current.dealt_with_at = payload.conversation.dealt_with_at;
-      current.manual_unread_at = payload.conversation.manual_unread_at;
-      current.needs_attention = payload.conversation.needs_attention;
-    }
+    const isCurrent = mergeConversationIntoLoadedState(payload.conversation);
     state.bootstrap = await api("/api/bootstrap");
     applyRuntimeSettings();
     renderBootstrap();
     if (state.conversationCategory === "unread" && dealt) {
-      state.conversations = state.conversations.filter((conversation) => conversation.id !== conversationId);
+      state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
     }
     renderConversations();
     if (isCurrent) {
@@ -3701,13 +4805,32 @@ async function setCurrentConversationRead(dealt, { silent = false } = {}) {
       toast(dealt ? t("conversation.marked_read") : t("conversation.marked_unread"));
     }
   } catch (error) {
+    const currentIndex = state.conversations.findIndex((conversation) => Number(conversation.id) === conversationId);
+    if (previousListConversation) {
+      if (currentIndex >= 0) {
+        state.conversations[currentIndex] = previousListConversation;
+      } else {
+        const insertAt = listIndex >= 0 ? Math.min(listIndex, state.conversations.length) : 0;
+        state.conversations.splice(insertAt, 0, previousListConversation);
+      }
+    } else if (currentIndex >= 0) {
+      state.conversations.splice(currentIndex, 1);
+    }
+    if (state.currentConversationId === conversationId) {
+      state.currentConversation = previousCurrentConversation;
+    }
     toast(error.message);
+    renderConversations();
     renderThreadHeader();
   }
 }
 
 async function toggleCurrentConversationRead() {
-  const shouldMarkRead = !conversationIsRead(state.currentConversation);
+  const conversation =
+    state.currentConversation && Number(state.currentConversation.id) === Number(state.currentConversationId)
+      ? state.currentConversation
+      : state.conversations.find((item) => Number(item.id) === Number(state.currentConversationId));
+  const shouldMarkRead = !conversationIsRead(conversation);
   await setCurrentConversationRead(shouldMarkRead);
 }
 
@@ -3798,7 +4921,7 @@ function addRecipient(raw, displayName = "") {
 }
 
 function commitPendingRecipientInput() {
-  if (state.currentConversation) return true;
+  if (state.currentConversation && Number(state.currentConversation.id) === Number(state.currentConversationId)) return true;
   const raw = els.recipientInput.value.trim();
   if (!raw) return true;
   const phone = normalizeDraftPhone(raw);
@@ -3811,7 +4934,7 @@ function commitPendingRecipientInput() {
 }
 
 function currentRecipients() {
-  if (state.currentConversation) {
+  if (state.currentConversation && Number(state.currentConversation.id) === Number(state.currentConversationId)) {
     return (state.currentConversation.participants || [])
       .filter((p) => p.role === "participant")
       .map((p) => p.phone_number);
@@ -3856,10 +4979,142 @@ function clearComposerDraft() {
   updateMessageCounter();
 }
 
+function composerSnapshot() {
+  return {
+    text: els.messageText.value,
+    mediaUrls: els.mediaUrls.value,
+    uploadedMedia: state.uploadedMedia.map((item) => ({ ...item })),
+  };
+}
+
+function composerIsEmpty() {
+  return !els.messageText.value && !els.mediaUrls.value && !state.uploadedMedia.length;
+}
+
+function restoreComposerSnapshot(snapshot, { onlyIfEmpty = true } = {}) {
+  if (!snapshot || (onlyIfEmpty && !composerIsEmpty())) return;
+  els.messageText.value = snapshot.text || "";
+  els.mediaUrls.value = snapshot.mediaUrls || "";
+  state.uploadedMedia = (snapshot.uploadedMedia || []).map((item) => ({ ...item }));
+  renderUploadedMedia();
+  updateMessageCounter();
+}
+
+function filenameFromUrl(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  try {
+    const url = new URL(raw, window.location.href);
+    return decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() || "");
+  } catch {
+    return decodeURIComponent(raw.split(/[?#]/, 1)[0].split("/").filter(Boolean).pop() || "");
+  }
+}
+
+function localIsoTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`;
+}
+
+function optimisticAttachmentsFromDraft(draft, uploadedMedia = []) {
+  const uploadedByUrl = new Map(uploadedMedia.filter((item) => item.url).map((item) => [item.url, item]));
+  return draft.media_urls.map((url, index) => {
+    const upload = uploadedByUrl.get(url) || {};
+    return {
+      id: `optimistic-attachment-${Date.now()}-${index}`,
+      remote_url: url,
+      filename: upload.original_filename || upload.filename || filenameFromUrl(url) || t("attachment.file"),
+      content_type: upload.content_type || "",
+      source: upload.url ? "upload" : "remote",
+    };
+  });
+}
+
+function applyOptimisticOutgoingMessage(draft, snapshot, { scrollMode = "bottom" } = {}) {
+  const timestamp = localIsoTimestamp();
+  const identity = activeIdentity();
+  const optimisticId = `optimistic-${Date.now()}`;
+  const message = {
+    id: optimisticId,
+    conversation_id: draft.conversation_id,
+    direction: "outbound",
+    from_number: draft.from_number,
+    from_display: identity?.label || phoneDisplay(draft.from_number),
+    to_numbers: [...draft.to_numbers],
+    text: draft.text,
+    attachments: optimisticAttachmentsFromDraft(draft, snapshot?.uploadedMedia || []),
+    message_type: draft.media_urls.length ? "mms" : "sms",
+    occurred_at: timestamp,
+    source: "optimistic",
+    status: "sending",
+    status_kind: "neutral",
+    status_label: t("status.sending"),
+    status_detail: "",
+    identity_label: identity?.label || "",
+    identity_color: identity?.color || "",
+  };
+  state.messages = [...state.messages, message];
+  renderMessages(state.messages, scrollMode);
+  if (draft.conversation_id) {
+    mergeConversationIntoLoadedState({
+      id: draft.conversation_id,
+      last_text: draft.text,
+      last_message_type: message.message_type,
+      last_direction: "outbound",
+      last_occurred_at: timestamp,
+      sort_at: timestamp,
+      last_status: "sending",
+      last_status_kind: "neutral",
+      last_status_label: t("status.sending"),
+      last_status_detail: "",
+      needs_attention: 0,
+      manual_unread_at: null,
+    });
+    markLoadedConversationRead(draft.conversation_id);
+    renderThreadHeader();
+    renderConversations();
+  }
+  return optimisticId;
+}
+
+function markOptimisticMessageFailed(optimisticId, detail, conversationId) {
+  const failureDetail = detail || t("message.send_failed");
+  const hasOptimisticMessage = state.messages.some((message) => message.id === optimisticId);
+  state.messages = state.messages.map((message) => {
+    if (message.id !== optimisticId) return message;
+    return {
+      ...message,
+      status: "delivery_failed",
+      status_kind: "failed",
+      status_label: t("status.delivery_failed"),
+      status_detail: failureDetail,
+    };
+  });
+  if (hasOptimisticMessage) {
+    renderMessages(state.messages, "bottom");
+  }
+  if (conversationId) {
+    mergeConversationIntoLoadedState({
+      id: conversationId,
+      last_status: "delivery_failed",
+      last_status_kind: "failed",
+      last_status_label: t("status.delivery_failed"),
+      last_status_detail: failureDetail,
+    });
+    renderThreadHeader();
+    renderConversations();
+  }
+}
+
 async function sendCurrentMessage() {
   if (!commitPendingRecipientInput()) return;
   const draft = currentComposerDraft();
   if (!validateComposerDraft(draft)) return;
+  const snapshot = composerSnapshot();
+  const optimisticMessageId = applyOptimisticOutgoingMessage(draft, snapshot);
+  clearComposerDraft();
   showComposerError("");
   els.sendButton.disabled = true;
   try {
@@ -3869,16 +5124,15 @@ async function sendCurrentMessage() {
     });
     playMessageSound("send");
     if (payload.conversation && Number(payload.conversation.id) === state.currentConversationId) {
-      state.currentConversation = payload.conversation;
-      const current = state.conversations.find((conversation) => conversation.id === state.currentConversationId);
-      if (current) {
-        current.dealt_with_at = payload.conversation.dealt_with_at;
-        current.manual_unread_at = payload.conversation.manual_unread_at;
-        current.needs_attention = payload.conversation.needs_attention;
-      }
+      mergeConversationIntoLoadedState(payload.conversation);
+      markLoadedConversationRead(state.currentConversationId);
       renderThreadHeader();
+      renderConversations();
+    } else if (state.currentConversationId) {
+      markLoadedConversationRead(state.currentConversationId);
+      renderThreadHeader();
+      renderConversations();
     }
-    clearComposerDraft();
     await loadConversations({ preserveScroll: true });
     if (state.currentConversationId) {
       await openConversation(state.currentConversationId);
@@ -3887,6 +5141,8 @@ async function sendCurrentMessage() {
       if (first) await openConversation(first.id);
     }
   } catch (error) {
+    markOptimisticMessageFailed(optimisticMessageId, error.message, draft.conversation_id);
+    restoreComposerSnapshot(snapshot);
     showComposerError(error.message);
     toast(error.message);
   } finally {
@@ -4150,8 +5406,7 @@ async function saveCurrentContactName() {
       }),
     });
     if (payload.conversation) {
-      state.currentConversation = payload.conversation;
-      mergeConversationIntoList(payload.conversation);
+      mergeConversationIntoLoadedState(payload.conversation);
     }
     state.messages = state.messages.map((message) =>
       message.from_number === participant.phone_number ? { ...message, from_display: displayName } : message,
@@ -4193,13 +5448,40 @@ function bindEvents() {
   els.settingsModal.addEventListener("click", (event) => {
     if (event.target === els.settingsModal) closeSettings();
   });
+  els.settingsNav.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-settings-anchor]");
+    if (!button) return;
+    els.settingsNav.querySelectorAll(".settings-nav-button").forEach((item) => item.classList.toggle("active", item === button));
+    document.getElementById(button.dataset.settingsAnchor)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  });
+	  els.securitySettings.addEventListener("click", (event) => {
+	    const accountButton = event.target.closest("[data-account-action]");
+	    if (accountButton) {
+	      handleAccountAction(accountButton.dataset.accountAction).catch((error) => toast(error.message));
+	      return;
+	    }
+	    const copyButton = event.target.closest("[data-copy-two-factor]");
+	    if (copyButton) {
+      copyTwoFactorValue(copyButton.dataset.copyTwoFactor || "");
+      return;
+    }
+    const actionButton = event.target.closest("[data-two-factor-action]");
+    if (actionButton) {
+      handleTwoFactorAction(actionButton.dataset.twoFactorAction).catch((error) => toast(error.message));
+    }
+  });
   els.settingsSections.addEventListener("change", (event) => {
     const voiceGreetingFile = event.target.closest(".setting-voice-greeting-file");
     if (voiceGreetingFile) uploadVoiceGreetingFile(voiceGreetingFile);
   });
   els.settingsForm.addEventListener("submit", saveSettings);
+  els.databaseDownloadButton.addEventListener("click", downloadDatabase);
+  els.logoutButton.addEventListener("click", signOut);
   els.statsButton.addEventListener("click", openStats);
   els.statsClose.addEventListener("click", closeStats);
+  els.statsPeriod.addEventListener("change", () => {
+    loadStats();
+  });
   els.statsModal.addEventListener("click", (event) => {
     if (event.target === els.statsModal) closeStats();
   });
@@ -4409,6 +5691,11 @@ function bindEvents() {
     state.uploadedMedia.splice(Number(button.dataset.removeUpload), 1);
     renderUploadedMedia();
   });
+  els.messages.addEventListener("pointerdown", beginMessageReactionPress);
+  els.messages.addEventListener("pointermove", moveMessageReactionPress);
+  els.messages.addEventListener("pointerup", endMessageReactionPress);
+  els.messages.addEventListener("pointerleave", endMessageReactionPress);
+  els.messages.addEventListener("pointercancel", endMessageReactionPress);
   els.messages.addEventListener("click", (event) => {
     if (event.target.closest("#loadOlderButton")) {
       loadOlderMessages().catch((error) => toast(error.message));
@@ -4424,7 +5711,42 @@ function bindEvents() {
     if (imageLink) {
       event.preventDefault();
       openLightbox(imageLink.dataset.lightboxSrc);
+      return;
     }
+    if (state.reactionLongPressTriggered) {
+      event.preventDefault();
+      state.reactionLongPressTriggered = false;
+      return;
+    }
+    const reactionTarget = reactionTargetFromEvent(event);
+    if (reactionTarget) {
+      event.preventDefault();
+      if (reactionMenuIsOpen()) {
+        closeReactionMenu();
+        return;
+      }
+      openReactionMenu(reactionTarget.row, reactionTarget.message);
+    }
+  });
+  els.reactionMenu?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-reaction-action]");
+    if (!button) return;
+    event.preventDefault();
+    sendReaction(button.dataset.reactionAction).catch((error) => {
+      toast(error.message || t("message.react_failed"));
+    });
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!reactionMenuIsOpen()) return;
+    if (event.target.closest("#reactionMenu")) return;
+    if (event.target.closest(".message-row[data-message-id]")) return;
+    closeReactionMenu();
+  });
+  document.addEventListener("click", (event) => {
+    if (!reactionMenuIsOpen()) return;
+    if (event.target.closest("#reactionMenu")) return;
+    if (event.target.closest(".message-row[data-message-id]")) return;
+    closeReactionMenu();
   });
   els.lightbox.addEventListener("click", (event) => {
     if (event.target === els.lightbox) closeLightbox();

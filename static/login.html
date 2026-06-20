@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#e6e8eb" />
+    <title>Sign in - Switchboard</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #eef1f4;
+        --panel: #ffffff;
+        --ink: #202832;
+        --muted: #667281;
+        --line: #cfd6df;
+        --accent: #1f6feb;
+        --danger: #b42318;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0c1117;
+          --panel: #151c24;
+          --ink: #f2f6fb;
+          --muted: #a9b4c2;
+          --line: #2c3745;
+          --accent: #58a6ff;
+          --danger: #ff8a8a;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100dvh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 22px;
+      }
+
+      main {
+        width: min(390px, 100%);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 24px;
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 30px;
+        line-height: 1.1;
+      }
+
+      p {
+        margin: 8px 0 22px;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+
+      form {
+        display: grid;
+        gap: 14px;
+      }
+
+      label {
+        display: grid;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 750;
+      }
+
+      input,
+      button {
+        min-height: 46px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font: inherit;
+      }
+
+      input {
+        width: 100%;
+        background: transparent;
+        color: var(--ink);
+        padding: 0 12px;
+      }
+
+      button {
+        margin-top: 4px;
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+        font-weight: 850;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
+
+      .error {
+        min-height: 20px;
+        color: var(--danger);
+        font-size: 13px;
+        font-weight: 750;
+      }
+
+      .hint {
+        margin: -6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Switchboard</h1>
+      <p id="intro">Sign in to continue.</p>
+      <form id="loginForm" method="post" action="/api/auth/login">
+        <input id="next" name="next" type="hidden" value="/" />
+        <label>
+          Username
+          <input id="username" name="username" type="text" autocomplete="username" required autofocus />
+        </label>
+        <label>
+          Password
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <label id="confirmField" hidden>
+          Confirm password
+          <input id="confirmPassword" name="confirm_password" type="password" autocomplete="new-password" />
+        </label>
+        <label id="twoFactorField" hidden>
+          Authenticator code
+          <input
+            id="secondFactor"
+            name="second_factor"
+            type="text"
+            autocomplete="one-time-code"
+            autocapitalize="characters"
+            spellcheck="false"
+            placeholder="123456 or backup code"
+          />
+        </label>
+        <p class="hint" id="twoFactorHint" hidden>Use your authenticator app, or one of your saved backup codes.</p>
+        <div class="error" id="error" role="alert" aria-live="polite"></div>
+        <button id="submit" type="submit">Sign in</button>
+      </form>
+    </main>
+    <script>
+      const form = document.querySelector("#loginForm");
+      const error = document.querySelector("#error");
+      const button = document.querySelector("#submit");
+      const title = document.querySelector("h1");
+      const intro = document.querySelector("#intro");
+      const confirmField = document.querySelector("#confirmField");
+      const confirmPassword = document.querySelector("#confirmPassword");
+      const twoFactorField = document.querySelector("#twoFactorField");
+      const twoFactorHint = document.querySelector("#twoFactorHint");
+      const secondFactor = document.querySelector("#secondFactor");
+      const params = new URLSearchParams(window.location.search);
+      const next = params.get("next") || "/";
+      const setupMode = params.get("setup") === "1";
+      form.next.value = next.startsWith("/") ? next : "/";
+      const showTwoFactor = () => {
+        twoFactorField.hidden = false;
+        twoFactorHint.hidden = false;
+        secondFactor.required = true;
+        button.textContent = "Verify";
+      };
+      if (setupMode) {
+        title.textContent = "Create your account";
+        intro.textContent = "Choose the username and password for this Switchboard.";
+        button.textContent = "Create account";
+        form.action = "/api/auth/setup";
+        form.password.autocomplete = "new-password";
+        confirmField.hidden = false;
+        confirmPassword.required = true;
+      }
+      if (params.get("error")) {
+        error.textContent = params.get("2fa") ? "Sign-in failed. Check the code." : "Sign-in failed. Check the username and password.";
+      }
+      if (params.get("2fa")) {
+        showTwoFactor();
+      }
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        error.textContent = "";
+        button.disabled = true;
+        try {
+          const response = await fetch(setupMode ? "/api/auth/setup" : "/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: form.username.value,
+              password: form.password.value,
+              confirm_password: form.confirm_password?.value || "",
+              second_factor: form.second_factor.value,
+              next: form.next.value,
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (payload.two_factor_required) {
+            showTwoFactor();
+            error.textContent = "Enter your authenticator code or a backup code.";
+            button.disabled = false;
+            secondFactor.focus();
+            return;
+          }
+          if (!response.ok) {
+            throw new Error(payload.error || "Sign-in failed.");
+          }
+          window.location.href = next.startsWith("/") ? next : "/";
+        } catch (err) {
+          error.textContent = err.message || "Sign-in failed.";
+          if (!twoFactorField.hidden) {
+            secondFactor.select();
+          }
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

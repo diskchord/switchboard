@@ -1,2 +1,2 @@
 cryptography>=43
-
+qrcode>=8

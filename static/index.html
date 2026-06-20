@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#e6e8eb" id="themeColor" />
     <title data-i18n="app.title">Switchboard</title>
     <link rel="icon" href="/static/favicon.ico" sizes="any" />
@@ -120,18 +120,22 @@
         <section class="messages" id="messages" tabindex="0" aria-label="Messages" data-i18n-aria-label="messages.aria"></section>
 
         <footer class="composer">
-          <textarea id="messageText" placeholder="Message" rows="2" data-i18n-placeholder="composer.message"></textarea>
-          <div class="composer-meta">
-            <span id="messageCounter">0/160</span>
+          <div class="composer-input-row">
+            <div class="composer-text-wrap">
+              <textarea id="messageText" placeholder="Message" rows="2" data-i18n-placeholder="composer.message"></textarea>
+              <input id="mediaUrls" type="hidden" autocomplete="off" />
+              <label class="icon-button upload-button" for="mediaFiles" title="Upload media" aria-label="Upload media" data-i18n-title="composer.upload" data-i18n-aria-label="composer.upload">📎</label>
+              <input id="mediaFiles" class="hidden-file-input" type="file" accept="image/*,video/*,audio/*,application/pdf" multiple />
+              <div class="composer-meta">
+                <span id="messageCounter">0/160</span>
+              </div>
+            </div>
+            <div class="composer-tools">
+              <button class="icon-button send-button" id="sendButton" title="Send" aria-label="Send" data-i18n-title="composer.send" data-i18n-aria-label="composer.send">➤</button>
+            </div>
           </div>
           <div class="composer-error hidden" id="composerError" role="alert"></div>
           <div class="upload-list hidden" id="uploadList"></div>
-          <div class="composer-tools">
-            <input id="mediaUrls" type="text" placeholder="Media URLs" autocomplete="off" data-i18n-placeholder="composer.media_urls" />
-            <label class="icon-button upload-button" for="mediaFiles" title="Upload media" aria-label="Upload media" data-i18n-title="composer.upload" data-i18n-aria-label="composer.upload">📎</label>
-            <input id="mediaFiles" class="hidden-file-input" type="file" accept="image/*,video/*,audio/*,application/pdf" multiple />
-            <button class="icon-button send-button" id="sendButton" title="Send" aria-label="Send" data-i18n-title="composer.send" data-i18n-aria-label="composer.send">➤</button>
-          </div>
         </footer>
       </main>
 
@@ -229,13 +233,21 @@
         <header class="settings-header">
           <div>
             <h2 data-i18n="settings.title">Settings</h2>
-            <p data-i18n="settings.description">Changes are saved locally and override matching .env values.</p>
+            <p data-i18n="settings.description">Changes are saved and written to .env when available.</p>
           </div>
           <button class="icon-button" id="settingsClose" type="button" aria-label="Close settings" data-i18n-aria-label="settings.close">×</button>
         </header>
-        <div class="settings-sections" id="settingsSections"></div>
+        <div class="settings-body">
+          <nav class="settings-nav" id="settingsNav" aria-label="Settings sections"></nav>
+          <div class="settings-main">
+            <section class="settings-section settings-security-section" id="securitySettings"></section>
+            <div class="settings-sections" id="settingsSections"></div>
+          </div>
+        </div>
         <footer class="settings-footer">
           <button class="small-button settings-stats-button" id="statsButton" type="button" data-i18n="stats.title">Stats</button>
+          <button class="small-button" id="databaseDownloadButton" type="button" data-i18n="settings.download_database">Download DB</button>
+          <button class="small-button" id="logoutButton" type="button" data-i18n="settings.sign_out">Sign out</button>
           <button class="small-button" id="settingsCancel" type="button" data-i18n="common.cancel">Cancel</button>
           <button class="small-button done-button" type="submit" data-i18n="common.save">Save</button>
         </footer>
@@ -248,7 +260,13 @@
             <h2 data-i18n="stats.title">Stats</h2>
             <p data-i18n="stats.description">Message and conversation totals.</p>
           </div>
-          <button class="icon-button" id="statsClose" type="button" aria-label="Close stats" data-i18n-aria-label="stats.close">×</button>
+          <div class="stats-header-actions">
+            <label class="stats-period-field">
+              <span data-i18n="stats.period">Period</span>
+              <select id="statsPeriod"></select>
+            </label>
+            <button class="icon-button" id="statsClose" type="button" aria-label="Close stats" data-i18n-aria-label="stats.close">×</button>
+          </div>
         </header>
         <div class="stats-body" id="statsBody"></div>
       </section>
@@ -260,6 +278,7 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
       <div class="lightbox-caption" id="lightboxCaption"></div>
     </div>
+    <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
     <script src="/static/app.js" type="module"></script>
   </body>
 </html>

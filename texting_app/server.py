@@ -6,17 +6,25 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
-from datetime import datetime
+import base64
+import hashlib
+import urllib.request
+from datetime import datetime, timedelta
+from io import BytesIO
 from email.parser import BytesParser
 from email.policy import default as email_policy
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import auth
 from . import config
 from .autoreply import (
     DEFAULT_AUTOREPLY_COOLDOWN_HOURS,
@@ -33,7 +41,7 @@ from .google_contacts import GoogleContactsError
 from .messaging import MessagingError, configured_messaging_providers
 from .messaging import send_message as send_provider_message
 from .phone import display_phone, normalize_phone
-from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values
+from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values, write_env_values
 from .telnyx import TelnyxError
 from .telnyx import handle_webhook as handle_telnyx_webhook
 from .timeutil import EASTERN, now_est
@@ -56,6 +64,40 @@ UPLOAD_CONTENT_PREFIXES = ("image/", "video/", "audio/")
 UPLOAD_CONTENT_TYPES = {"application/pdf"}
 CONVERTIBLE_VIDEO_EXTENSIONS = {".3gp", ".3gpp"}
 CONVERTIBLE_VIDEO_TYPES = {"video/3gpp", "video/3gp"}
+SESSION_MAX_AGE_SECONDS = config.AUTH_SESSION_DAYS * 24 * 60 * 60
+LOGIN_FAILURE_LIMIT = 8
+LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
+LOGIN_FAILURES: dict[str, list[float]] = {}
+LOGIN_FAILURE_LOCK = threading.Lock()
+BACKUP_CODE_METADATA_PREFIX = "auth.backup_code.used."
+AUTH_TOTP_METADATA_KEY = "auth.totp_secret"
+AUTH_BACKUP_CODES_METADATA_KEY = "auth.backup_code_hashes"
+TWO_FACTOR_SETUP_TOKEN_SECONDS = 10 * 60
+
+PUBLIC_GET_PATHS = {
+    "/api/auth/session",
+    "/api/health",
+    "/api/telnyx/voice",
+    "/api/twilio/voice",
+    "/apple-touch-icon.png",
+    "/favicon.ico",
+    "/favicon.svg",
+    "/login",
+}
+PUBLIC_POST_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/setup",
+    "/api/revai/webhook",
+    "/api/telnyx/voice",
+    "/api/telnyx/voice/recording",
+    "/api/telnyx/voice/transcription",
+    "/api/telnyx/webhook",
+    "/api/twilio/voice",
+    "/api/twilio/voice/recording",
+    "/api/twilio/voice/transcription",
+    "/api/twilio/webhook",
+}
 
 
 def _json_default(value):
@@ -216,6 +258,67 @@ def _local_upload_path_for_remote_url(remote_url: str | None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _cache_remote_attachment(conn, attachment: dict) -> dict:
+    if not get_bool("uploads.cache_attachments", config.MEDIA_CACHE_ATTACHMENTS):
+        return attachment
+    remote_url = str(attachment.get("remote_url") or "").strip()
+    if not remote_url:
+        return attachment
+    parsed = urlparse(remote_url)
+    if parsed.scheme not in {"http", "https"}:
+        return attachment
+    config.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    original_name = Path(unquote(parsed.path)).name
+    extension = Path(original_name).suffix
+    try:
+        request = urllib.request.Request(remote_url, headers={"User-Agent": "switchboard/0.1"})
+        with urllib.request.urlopen(request, timeout=45) as response:
+            payload = response.read()
+            response_type = response.headers.get_content_type() or ""
+    except Exception:
+        return attachment
+    if not payload:
+        return attachment
+    sha = hashlib.sha256(payload).hexdigest()
+    content_type = str(attachment.get("content_type") or response_type or "").split(";", 1)[0].strip()
+    extension = extension or mimetypes.guess_extension(content_type) or ""
+    filename = f"{sha}{extension}"
+    target = config.MEDIA_DIR / filename
+    if not target.exists():
+        target.write_bytes(payload)
+    stored_path = _stored_local_path(target)
+    conn.execute(
+        """
+        UPDATE attachments
+        SET local_path = ?,
+            content_type = COALESCE(NULLIF(content_type, ''), ?),
+            size = ?,
+            sha256 = COALESCE(NULLIF(sha256, ''), ?),
+            filename = COALESCE(NULLIF(filename, ''), ?),
+            source = ?
+        WHERE id = ?
+        """,
+        (
+            stored_path,
+            content_type,
+            target.stat().st_size,
+            sha,
+            original_name or filename,
+            attachment.get("source") or "cache",
+            attachment["id"],
+        ),
+    )
+    conn.commit()
+    return {
+        **attachment,
+        "local_path": stored_path,
+        "content_type": attachment.get("content_type") or content_type,
+        "size": target.stat().st_size,
+        "sha256": attachment.get("sha256") or sha,
+        "filename": attachment.get("filename") or original_name or filename,
+    }
+
+
 def _attachment_local_path(attachment: dict) -> Path | None:
     raw = str(attachment.get("local_path") or "").strip()
     if not raw:
@@ -326,6 +429,8 @@ def _attachment_dict(conn, row) -> dict:
         if local_path:
             attachment["local_path"] = str(local_path)
             attachment["source"] = "upload"
+    if not attachment.get("local_path"):
+        attachment = _cache_remote_attachment(conn, attachment)
     attachment = _convert_attachment_video(conn, attachment)
     return attachment
 
@@ -1082,94 +1187,403 @@ def bootstrap() -> dict:
     }
 
 
-def message_stats() -> dict:
+STATS_PERIOD_KEYS = {
+    "all",
+    "today",
+    "7d",
+    "last_week",
+    "30d",
+    "this_month",
+    "last_month",
+    "ytd",
+    "this_year",
+    "last_year",
+}
+
+
+def _stats_period(query: dict[str, list[str]] | None) -> dict[str, str | None]:
+    requested = ((query or {}).get("period") or ["all"])[0].strip().lower()
+    key = requested if requested in STATS_PERIOD_KEYS else "all"
+    if key == "this_year":
+        key = "ytd"
+
+    now = datetime.now(EASTERN).replace(microsecond=0)
+    today_start = now.replace(hour=0, minute=0, second=0)
+    tomorrow_start = today_start + timedelta(days=1)
+    this_month_start = today_start.replace(day=1)
+    this_year_start = today_start.replace(month=1, day=1)
+    current_week_start = today_start - timedelta(days=(today_start.weekday() + 1) % 7)
+    start: datetime | None = None
+    end: datetime | None = None
+
+    if key == "today":
+        start = today_start
+        end = tomorrow_start
+    elif key == "7d":
+        start = today_start - timedelta(days=6)
+        end = tomorrow_start
+    elif key == "last_week":
+        start = current_week_start - timedelta(days=7)
+        end = current_week_start
+    elif key == "30d":
+        start = today_start - timedelta(days=29)
+        end = tomorrow_start
+    elif key == "this_month":
+        start = this_month_start
+        end = tomorrow_start
+    elif key == "last_month":
+        end = this_month_start
+        if this_month_start.month == 1:
+            start = this_month_start.replace(year=this_month_start.year - 1, month=12)
+        else:
+            start = this_month_start.replace(month=this_month_start.month - 1)
+    elif key == "ytd":
+        start = this_year_start
+        end = tomorrow_start
+    elif key == "last_year":
+        start = this_year_start.replace(year=this_year_start.year - 1)
+        end = this_year_start
+
+    return {
+        "key": key,
+        "start": start.isoformat() if start else None,
+        "end": end.isoformat() if end else None,
+    }
+
+
+def _stats_message_where(period: dict[str, str | None], alias: str = "") -> tuple[str, list[str]]:
+    column = f"{alias}.occurred_at" if alias else "occurred_at"
+    clauses: list[str] = []
+    params: list[str] = []
+    if period.get("start"):
+        clauses.append(f"{column} >= ?")
+        params.append(period["start"] or "")
+    if period.get("end"):
+        clauses.append(f"{column} < ?")
+        params.append(period["end"] or "")
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else "", params)
+
+
+def _append_where(where_sql: str, condition: str) -> str:
+    return f"{where_sql} AND {condition}" if where_sql else f"WHERE {condition}"
+
+
+def _count(conn, sql: str, params: list[str] | tuple[str, ...] = ()) -> int:
+    row = conn.execute(sql, tuple(params)).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _parse_stats_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=EASTERN)
+    return parsed.astimezone(EASTERN).replace(microsecond=0)
+
+
+def _stats_month_start(value: datetime) -> datetime:
+    return value.astimezone(EASTERN).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _add_stats_months(value: datetime, months: int) -> datetime:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    return value.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _stats_bucket_start(value: str, bucket: str) -> datetime | None:
+    try:
+        if bucket == "hour":
+            return datetime.fromisoformat(f"{value}:00:00").replace(tzinfo=EASTERN)
+        if bucket == "day":
+            return datetime.fromisoformat(f"{value}T00:00:00").replace(tzinfo=EASTERN)
+        if bucket == "month":
+            return datetime.fromisoformat(f"{value}-01T00:00:00").replace(tzinfo=EASTERN)
+    except ValueError:
+        return None
+    return None
+
+
+def _stats_bucket_key(value: datetime, bucket: str) -> str:
+    local = value.astimezone(EASTERN)
+    if bucket == "hour":
+        return local.strftime("%Y-%m-%dT%H")
+    if bucket == "month":
+        return local.strftime("%Y-%m")
+    return local.strftime("%Y-%m-%d")
+
+
+def _align_stats_bucket_start(value: datetime, bucket: str) -> datetime:
+    local = value.astimezone(EASTERN).replace(microsecond=0)
+    if bucket == "hour":
+        return local.replace(minute=0, second=0)
+    if bucket == "month":
+        return _stats_month_start(local)
+    return local.replace(hour=0, minute=0, second=0)
+
+
+def _advance_stats_bucket(value: datetime, bucket: str) -> datetime:
+    if bucket == "hour":
+        return value + timedelta(hours=1)
+    if bucket == "month":
+        return _add_stats_months(value, 1)
+    return value + timedelta(days=1)
+
+
+def _align_stats_bucket_end(value: datetime, bucket: str) -> datetime:
+    start = _align_stats_bucket_start(value, bucket)
+    return start if start == value else _advance_stats_bucket(start, bucket)
+
+
+def _stats_timeline_bucket(period_key: str) -> str:
+    if period_key == "today":
+        return "hour"
+    if period_key in {"ytd", "last_year", "all"}:
+        return "month"
+    return "day"
+
+
+def _stats_timeline(conn, period: dict[str, str | None], where_sql: str, params: list[str]) -> dict:
+    bucket = _stats_timeline_bucket(period.get("key") or "all")
+    bucket_expr = {
+        "hour": "substr(occurred_at, 1, 13)",
+        "day": "substr(occurred_at, 1, 10)",
+        "month": "substr(occurred_at, 1, 7)",
+    }[bucket]
+    rows = [
+        _row_dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT {bucket_expr} AS bucket,
+              COUNT(*) AS count,
+              SUM(direction = 'inbound') AS inbound,
+              SUM(direction = 'outbound') AS outbound
+            FROM messages
+            {where_sql}
+            GROUP BY bucket
+            ORDER BY bucket
+            """,
+            params,
+        ).fetchall()
+        if row["bucket"]
+    ]
+    counts = {str(row["bucket"]): row for row in rows}
+    start = _parse_stats_datetime(period.get("start"))
+    end = _parse_stats_datetime(period.get("end"))
+    now = datetime.now(EASTERN).replace(microsecond=0)
+
+    if start is None and rows:
+        start = _stats_bucket_start(str(rows[0]["bucket"]), bucket)
+    if end is None and rows:
+        last_start = _stats_bucket_start(str(rows[-1]["bucket"]), bucket)
+        end = _advance_stats_bucket(last_start, bucket) if last_start else None
+    if start is None:
+        return {"bucket": bucket, "points": []}
+
+    start = _align_stats_bucket_start(start, bucket)
+    if period.get("key") == "today":
+        end = _advance_stats_bucket(_align_stats_bucket_start(now, bucket), bucket)
+    elif end is None:
+        end = _advance_stats_bucket(_align_stats_bucket_start(now, bucket), bucket)
+    else:
+        end = _align_stats_bucket_end(end, bucket)
+    if end <= start:
+        end = _advance_stats_bucket(start, bucket)
+
+    points = []
+    cursor = start
+    while cursor < end:
+        key = _stats_bucket_key(cursor, bucket)
+        row = counts.get(key, {})
+        points.append(
+            {
+                "bucket": key,
+                "count": int(row.get("count") or 0),
+                "inbound": int(row.get("inbound") or 0),
+                "outbound": int(row.get("outbound") or 0),
+            }
+        )
+        cursor = _advance_stats_bucket(cursor, bucket)
+    return {"bucket": bucket, "points": points}
+
+
+def message_stats(query: dict[str, list[str]] | None = None) -> dict:
+    period = _stats_period(query)
     conn = connect()
     init_db(conn)
-    totals = _row_dict(
-        conn.execute(
+    where_sql, params = _stats_message_where(period)
+    where_m_sql, params_m = _stats_message_where(period, "m")
+    has_period_filter = bool(period.get("start") or period.get("end"))
+    inbound_where = _append_where(where_sql, "direction = 'inbound'")
+    outbound_where = _append_where(where_sql, "direction = 'outbound'")
+    voicemail_where = _append_where(where_sql, "message_type = 'Voicemail'")
+    failed_where = _append_where(where_sql, "status IN ('delivery_failed', 'failed', 'undelivered', 'rejected', 'expired')")
+    pending_where = _append_where(where_sql, "status IN ('queued', 'sending', 'sent', 'accepted', 'finalized')")
+
+    totals = {
+        "messages": _count(conn, f"SELECT COUNT(*) FROM messages {where_sql}", params),
+        "inbound_messages": _count(conn, f"SELECT COUNT(*) FROM messages {inbound_where}", params),
+        "outbound_messages": _count(conn, f"SELECT COUNT(*) FROM messages {outbound_where}", params),
+        "voicemails": _count(conn, f"SELECT COUNT(*) FROM messages {voicemail_where}", params),
+        "failed_messages": _count(
+            conn,
             f"""
-            SELECT
-              (SELECT COUNT(*) FROM conversations) AS conversations,
-              (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 0) AS inbox_conversations,
-              (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 1) AS hidden_conversations,
-              (SELECT COUNT(*) FROM conversations c WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_conversations,
-              (SELECT COUNT(*) FROM messages) AS messages,
-              (SELECT COUNT(*) FROM messages WHERE direction = 'inbound') AS inbound_messages,
-              (SELECT COUNT(*) FROM messages WHERE direction = 'outbound') AS outbound_messages,
-              (SELECT COUNT(*) FROM messages WHERE message_type = 'Voicemail') AS voicemails,
-              (SELECT COUNT(*) FROM messages WHERE status IN ('delivery_failed', 'failed', 'undelivered', 'rejected', 'expired')) AS failed_messages,
-              (SELECT COUNT(*) FROM messages WHERE status IN ('queued', 'sending', 'sent', 'accepted', 'finalized')) AS pending_messages,
-              (SELECT COUNT(*) FROM attachments) AS attachments,
-              (SELECT COUNT(*) FROM contacts) AS contacts
-            """
-        ).fetchone()
-    )
+            SELECT COUNT(*)
+            FROM messages
+            {failed_where}
+            """,
+            params,
+        ),
+        "pending_messages": _count(
+            conn,
+            f"""
+            SELECT COUNT(*)
+            FROM messages
+            {pending_where}
+            """,
+            params,
+        ),
+        "attachments": _count(
+            conn,
+            f"""
+            SELECT COUNT(*)
+            FROM attachments a
+            JOIN messages m ON m.id = a.message_id
+            {where_m_sql}
+            """,
+            params_m,
+        ),
+    }
+    if has_period_filter:
+        totals.update(
+            {
+                "conversations": _count(
+                    conn,
+                    f"SELECT COUNT(DISTINCT m.conversation_id) FROM messages m {where_m_sql}",
+                    params_m,
+                ),
+                "inbox_conversations": _count(
+                    conn,
+                    f"""
+                    SELECT COUNT(DISTINCT m.conversation_id)
+                    FROM messages m
+                    JOIN conversations c ON c.id = m.conversation_id
+                    {_append_where(where_m_sql, "COALESCE(c.is_archived, 0) = 0")}
+                    """,
+                    params_m,
+                ),
+                "hidden_conversations": _count(
+                    conn,
+                    f"""
+                    SELECT COUNT(DISTINCT m.conversation_id)
+                    FROM messages m
+                    JOIN conversations c ON c.id = m.conversation_id
+                    {_append_where(where_m_sql, "COALESCE(c.is_archived, 0) = 1")}
+                    """,
+                    params_m,
+                ),
+                "unread_conversations": _count(
+                    conn,
+                    f"""
+                    SELECT COUNT(DISTINCT m.conversation_id)
+                    FROM messages m
+                    JOIN conversations c ON c.id = m.conversation_id
+                    {_append_where(_append_where(where_m_sql, "COALESCE(c.is_archived, 0) = 0"), UNREAD_CONVERSATION_CLAUSE)}
+                    """,
+                    params_m,
+                ),
+                "contacts": _count(
+                    conn,
+                    f"""
+                    SELECT COUNT(DISTINCT cp.phone_number)
+                    FROM messages m
+                    JOIN conversation_participants cp ON cp.conversation_id = m.conversation_id
+                    {_append_where(where_m_sql, "cp.role = 'participant' AND cp.phone_number <> ''")}
+                    """,
+                    params_m,
+                ),
+            }
+        )
+    else:
+        totals.update(
+            {
+                "conversations": _count(conn, "SELECT COUNT(*) FROM conversations"),
+                "inbox_conversations": _count(conn, "SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 0"),
+                "hidden_conversations": _count(conn, "SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 1"),
+                "unread_conversations": _count(
+                    conn,
+                    f"SELECT COUNT(*) FROM conversations c WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}",
+                ),
+                "contacts": _count(conn, "SELECT COUNT(*) FROM contacts"),
+            }
+        )
+
     by_status = [
         _row_dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT status, COUNT(*) AS count
             FROM messages
+            {where_sql}
             GROUP BY status
             ORDER BY count DESC, status
-            """
+            """,
+            params,
         ).fetchall()
     ]
     by_source = [
         _row_dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT source, COUNT(*) AS count
             FROM messages
+            {where_sql}
             GROUP BY source
             ORDER BY count DESC, source
-            """
+            """,
+            params,
         ).fetchall()
     ]
     by_type = [
         _row_dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT message_type, COUNT(*) AS count
             FROM messages
+            {where_sql}
             GROUP BY message_type
             ORDER BY count DESC, message_type
-            """
+            """,
+            params,
         ).fetchall()
     ]
     by_direction = [
         _row_dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT direction, COUNT(*) AS count
             FROM messages
+            {where_sql}
             GROUP BY direction
             ORDER BY count DESC, direction
-            """
+            """,
+            params,
         ).fetchall()
     ]
-    recent_days = [
-        _row_dict(row)
-        for row in conn.execute(
-            """
-            SELECT substr(occurred_at, 1, 10) AS day,
-              COUNT(*) AS count,
-              SUM(direction = 'inbound') AS inbound,
-              SUM(direction = 'outbound') AS outbound
-            FROM messages
-            GROUP BY day
-            ORDER BY day DESC
-            LIMIT 14
-            """
-        ).fetchall()
-    ]
+    timeline = _stats_timeline(conn, period, where_sql, params)
     return {
+        "period": period,
         "totals": totals,
         "by_status": by_status,
         "by_source": by_source,
         "by_type": by_type,
         "by_direction": by_direction,
-        "recent_days": recent_days,
+        "timeline": timeline,
         "server_time": now_est(),
     }
 
@@ -1683,6 +2097,362 @@ def start_scheduled_sender() -> None:
     thread.start()
 
 
+def login_limited(key: str) -> bool:
+    now = time.time()
+    with LOGIN_FAILURE_LOCK:
+        failures = [stamp for stamp in LOGIN_FAILURES.get(key, []) if now - stamp < LOGIN_FAILURE_WINDOW_SECONDS]
+        LOGIN_FAILURES[key] = failures
+        return len(failures) >= LOGIN_FAILURE_LIMIT
+
+
+def record_login_failure(key: str) -> None:
+    now = time.time()
+    with LOGIN_FAILURE_LOCK:
+        failures = [stamp for stamp in LOGIN_FAILURES.get(key, []) if now - stamp < LOGIN_FAILURE_WINDOW_SECONDS]
+        failures.append(now)
+        LOGIN_FAILURES[key] = failures
+
+
+def clear_login_failures(key: str) -> None:
+    with LOGIN_FAILURE_LOCK:
+        LOGIN_FAILURES.pop(key, None)
+
+
+def database_backup_bytes() -> tuple[str, bytes]:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"switchboard-{datetime.now(EASTERN):%Y%m%d-%H%M%S}.sqlite"
+    temp_path: Path | None = None
+    source = None
+    destination = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="switchboard-backup-", suffix=".sqlite", dir=config.DATA_DIR, delete=False) as handle:
+            temp_path = Path(handle.name)
+        source = connect()
+        destination = sqlite3.connect(temp_path)
+        source.backup(destination)
+        destination.close()
+        source.close()
+        destination = None
+        source = None
+        return filename, temp_path.read_bytes()
+    finally:
+        if destination is not None:
+            destination.close()
+        if source is not None:
+            source.close()
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _metadata_values(keys: tuple[str, ...]) -> dict[str, str]:
+    conn = connect()
+    init_db(conn)
+    try:
+        placeholders = ",".join("?" for _ in keys)
+        return {
+            row["key"]: row["value"]
+            for row in conn.execute(f"SELECT key, value FROM app_metadata WHERE key IN ({placeholders})", keys).fetchall()
+        }
+    finally:
+        conn.close()
+
+
+def _split_backup_hashes(raw: str) -> list[str]:
+    return [part.strip() for part in str(raw or "").replace("\n", ",").split(",") if part.strip()]
+
+
+def two_factor_material() -> dict:
+    values = _metadata_values((AUTH_TOTP_METADATA_KEY, AUTH_BACKUP_CODES_METADATA_KEY))
+    saved_secret = values.get(AUTH_TOTP_METADATA_KEY, "").strip()
+    saved_hashes_raw = values.get(AUTH_BACKUP_CODES_METADATA_KEY, "").strip()
+    saved_hashes = _split_backup_hashes(saved_hashes_raw)
+    secret = saved_secret or config.AUTH_TOTP_SECRET
+    backup_hashes = saved_hashes if saved_hashes_raw else list(config.AUTH_BACKUP_CODE_HASHES)
+    app_managed = bool(saved_secret or saved_hashes_raw)
+    env_enabled = auth.two_factor_enabled(config.AUTH_TOTP_SECRET, config.AUTH_BACKUP_CODE_HASHES)
+    return {
+        "secret": secret,
+        "backup_hashes": backup_hashes,
+        "enabled": auth.two_factor_enabled(secret, backup_hashes),
+        "app_managed": app_managed,
+        "env_enabled": env_enabled,
+        "source": "settings" if app_managed else "env" if env_enabled else "none",
+    }
+
+
+def auth_status_payload() -> dict:
+    status = auth.auth_status()
+    material = two_factor_material()
+    status.update(
+        {
+            "two_factor_enabled": bool(auth.auth_configured() and material["enabled"]),
+            "two_factor_source": material["source"],
+            "two_factor_app_managed": material["app_managed"],
+            "two_factor_env_managed": bool(material["env_enabled"] and not material["app_managed"]),
+            "backup_codes_configured": len(material["backup_hashes"]) if auth.auth_configured() else 0,
+        }
+    )
+    return status
+
+
+def two_factor_status_payload() -> dict:
+    material = two_factor_material()
+    available = bool(auth.auth_configured() and not auth.auth_disabled())
+    enabled = bool(available and material["enabled"])
+    return {
+        "available": available,
+        "configured": auth.auth_configured(),
+        "auth_disabled": auth.auth_disabled(),
+        "enabled": enabled,
+        "source": material["source"] if enabled else "none",
+        "app_managed": bool(enabled and material["app_managed"]),
+        "env_managed": bool(enabled and material["env_enabled"] and not material["app_managed"]),
+        "can_disable": bool(enabled and material["app_managed"]),
+        "backup_codes_configured": len(material["backup_hashes"]) if enabled else 0,
+        "username": config.AUTH_USERNAME if auth.auth_configured() else "",
+    }
+
+
+def _require_auth_password(payload: dict) -> None:
+    if auth.auth_disabled():
+        raise ValueError("Sign-in is disabled, so two-factor authentication cannot be managed.")
+    if not auth.auth_configured():
+        raise ValueError("Set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH before enabling 2FA.")
+    if not auth.verify_password(str(payload.get("password") or ""), config.AUTH_PASSWORD_HASH):
+        raise ValueError("Current password is incorrect.")
+
+
+def _ensure_auth_secret_key(env_updates: dict[str, str]) -> None:
+    if config.AUTH_SECRET_KEY:
+        return
+    secret_key = secrets.token_urlsafe(48)
+    env_updates["TEXTING_AUTH_SECRET_KEY"] = secret_key
+    config.AUTH_SECRET_KEY = secret_key
+
+
+def _apply_auth_config(username: str, password_hash: str, secret_key: str | None = None) -> None:
+    config.AUTH_USERNAME = username
+    config.AUTH_PASSWORD_HASH = password_hash
+    if secret_key is not None:
+        config.AUTH_SECRET_KEY = secret_key
+
+
+def _validate_account_password(password: str) -> None:
+    if len(password) < 8:
+        raise ValueError("Password must be at least 8 characters.")
+
+
+def setup_auth_account(payload: dict) -> dict:
+    if auth.auth_configured() and not auth.auth_disabled():
+        raise ValueError("Sign-in is already configured.")
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    confirm = str(payload.get("confirm_password") or payload.get("confirm") or "")
+    if not username:
+        raise ValueError("Enter a username.")
+    _validate_account_password(password)
+    if password != confirm:
+        raise ValueError("Passwords do not match.")
+    password_hash = auth.hash_password(password)
+    env_updates = {
+        "TEXTING_AUTH_USERNAME": username,
+        "TEXTING_AUTH_PASSWORD_HASH": password_hash,
+        "TEXTING_AUTH_DISABLED": "0",
+    }
+    _ensure_auth_secret_key(env_updates)
+    write_env_values(env_updates)
+    _apply_auth_config(username, password_hash, env_updates.get("TEXTING_AUTH_SECRET_KEY"))
+    config.AUTH_DISABLED = False
+    return auth_status_payload()
+
+
+def update_auth_account(payload: dict) -> dict:
+    _require_auth_password(payload)
+    username = str(payload.get("username") or config.AUTH_USERNAME or "").strip()
+    new_password = str(payload.get("new_password") or "")
+    confirm = str(payload.get("confirm_password") or "")
+    if not username:
+        raise ValueError("Enter a username.")
+    env_updates = {"TEXTING_AUTH_USERNAME": username}
+    password_hash = config.AUTH_PASSWORD_HASH
+    if new_password:
+        _validate_account_password(new_password)
+        if new_password != confirm:
+            raise ValueError("New passwords do not match.")
+        password_hash = auth.hash_password(new_password)
+        env_updates["TEXTING_AUTH_PASSWORD_HASH"] = password_hash
+    _ensure_auth_secret_key(env_updates)
+    write_env_values(env_updates)
+    _apply_auth_config(username, password_hash, env_updates.get("TEXTING_AUTH_SECRET_KEY"))
+    return auth_status_payload()
+
+
+def qr_svg_data_uri(value: str) -> str:
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except Exception:
+        return ""
+    image = qrcode.make(value, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2)
+    output = BytesIO()
+    image.save(output)
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def _store_two_factor_material(secret: str, backup_hashes: list[str]) -> dict:
+    timestamp = now_est()
+    write_env_values(
+        {
+            "TEXTING_AUTH_TOTP_SECRET": auth.normalize_totp_secret(secret),
+            "TEXTING_AUTH_BACKUP_CODE_HASHES": ",".join(backup_hashes),
+        }
+    )
+    config.AUTH_TOTP_SECRET = auth.normalize_totp_secret(secret)
+    config.AUTH_BACKUP_CODE_HASHES = backup_hashes
+    conn = connect()
+    init_db(conn)
+    try:
+        conn.execute(
+            """
+            INSERT INTO app_metadata(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (AUTH_TOTP_METADATA_KEY, auth.normalize_totp_secret(secret), timestamp),
+        )
+        conn.execute(
+            """
+            INSERT INTO app_metadata(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (AUTH_BACKUP_CODES_METADATA_KEY, ",".join(backup_hashes), timestamp),
+        )
+        conn.execute("DELETE FROM app_metadata WHERE key LIKE ?", (BACKUP_CODE_METADATA_PREFIX + "%",))
+        conn.commit()
+    finally:
+        conn.close()
+    return two_factor_status_payload()
+
+
+def _store_backup_hashes(backup_hashes: list[str]) -> dict:
+    timestamp = now_est()
+    write_env_values({"TEXTING_AUTH_BACKUP_CODE_HASHES": ",".join(backup_hashes)})
+    config.AUTH_BACKUP_CODE_HASHES = backup_hashes
+    conn = connect()
+    init_db(conn)
+    try:
+        conn.execute(
+            """
+            INSERT INTO app_metadata(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (AUTH_BACKUP_CODES_METADATA_KEY, ",".join(backup_hashes), timestamp),
+        )
+        conn.execute("DELETE FROM app_metadata WHERE key LIKE ?", (BACKUP_CODE_METADATA_PREFIX + "%",))
+        conn.commit()
+    finally:
+        conn.close()
+    return two_factor_status_payload()
+
+
+def _clear_app_two_factor_material() -> dict:
+    material = two_factor_material()
+    if material["env_enabled"] and not material["app_managed"]:
+        raise ValueError("2FA is configured in .env. Remove the 2FA env values to disable it.")
+    write_env_values({"TEXTING_AUTH_TOTP_SECRET": "", "TEXTING_AUTH_BACKUP_CODE_HASHES": ""})
+    config.AUTH_TOTP_SECRET = ""
+    config.AUTH_BACKUP_CODE_HASHES = []
+    conn = connect()
+    init_db(conn)
+    try:
+        conn.execute("DELETE FROM app_metadata WHERE key IN (?, ?)", (AUTH_TOTP_METADATA_KEY, AUTH_BACKUP_CODES_METADATA_KEY))
+        conn.execute("DELETE FROM app_metadata WHERE key LIKE ?", (BACKUP_CODE_METADATA_PREFIX + "%",))
+        conn.commit()
+    finally:
+        conn.close()
+    return two_factor_status_payload()
+
+
+def start_two_factor_setup(payload: dict) -> dict:
+    _require_auth_password(payload)
+    secret = auth.generate_totp_secret()
+    backup_codes = auth.generate_backup_codes(10)
+    backup_hashes = [auth.backup_code_hash(code) for code in backup_codes]
+    setup_token = auth.create_signed_payload(
+        {"secret": secret, "backup_hashes": backup_hashes},
+        "2fa-setup",
+        TWO_FACTOR_SETUP_TOKEN_SECONDS,
+    )
+    uri = auth.totp_uri(config.AUTH_USERNAME, secret, config.AUTH_TOTP_ISSUER)
+    return {
+        "setup": {
+            "secret": secret,
+            "uri": uri,
+            "qr_svg": qr_svg_data_uri(uri),
+            "backup_codes": backup_codes,
+            "setup_token": setup_token,
+            "expires_seconds": TWO_FACTOR_SETUP_TOKEN_SECONDS,
+        },
+        "status": two_factor_status_payload(),
+    }
+
+
+def enable_two_factor(payload: dict) -> dict:
+    setup = auth.verify_signed_payload(str(payload.get("setup_token") or ""), "2fa-setup")
+    if not setup:
+        raise ValueError("2FA setup expired. Start setup again.")
+    secret = auth.normalize_totp_secret(str(setup.get("secret") or ""))
+    backup_hashes = [str(value) for value in setup.get("backup_hashes") or [] if str(value).strip()]
+    if not auth.verify_totp(str(payload.get("code") or ""), secret):
+        raise ValueError("Authenticator code is incorrect.")
+    return {"status": _store_two_factor_material(secret, backup_hashes)}
+
+
+def regenerate_backup_codes(payload: dict) -> dict:
+    _require_auth_password(payload)
+    material = two_factor_material()
+    if not material["enabled"]:
+        raise ValueError("Enable 2FA before generating backup codes.")
+    backup_codes = auth.generate_backup_codes(10)
+    backup_hashes = [auth.backup_code_hash(code) for code in backup_codes]
+    return {"backup_codes": backup_codes, "status": _store_backup_hashes(backup_hashes)}
+
+
+def disable_two_factor(payload: dict) -> dict:
+    _require_auth_password(payload)
+    material = two_factor_material()
+    if not material["enabled"]:
+        return {"status": two_factor_status_payload()}
+    second_factor = str(payload.get("second_factor") or payload.get("code") or "")
+    factor = auth.verify_second_factor(second_factor, material["secret"], material["backup_hashes"])
+    if not factor:
+        raise ValueError("Two-factor code is incorrect.")
+    factor_type, backup_hash = factor
+    if factor_type == "backup" and backup_hash and not claim_backup_code(backup_hash):
+        raise ValueError("That backup code has already been used.")
+    return {"status": _clear_app_two_factor_material()}
+
+
+def claim_backup_code(encoded: str) -> bool:
+    fingerprint = auth.backup_code_fingerprint(encoded)
+    conn = connect()
+    init_db(conn)
+    try:
+        conn.execute(
+            "INSERT INTO app_metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            (BACKUP_CODE_METADATA_PREFIX + fingerprint, "1", now_est()),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
 class TextingHandler(BaseHTTPRequestHandler):
     server_version = "Switchboard/0.1"
 
@@ -1692,9 +2462,19 @@ class TextingHandler(BaseHTTPRequestHandler):
     def log_upload(self, fmt: str, *args) -> None:
         self.log_message("upload " + fmt, *args)
 
-    def _send_headers(self, status: int, content_type: str, length: int | None = None) -> None:
+    def _send_headers(
+        self,
+        status: int,
+        content_type: str,
+        length: int | None = None,
+        headers: dict[str, str] | None = None,
+        cache_control: str | None = None,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "DENY")
         no_store_types = (
             "application/json",
             "text/html",
@@ -1703,21 +2483,43 @@ class TextingHandler(BaseHTTPRequestHandler):
             "application/javascript",
             "text/javascript",
         )
-        cache_control = "no-store" if content_type.startswith(no_store_types) else "public, max-age=3600"
+        cache_control = cache_control or ("no-store" if content_type.startswith(no_store_types) else "public, max-age=3600")
         self.send_header("Cache-Control", cache_control)
         if length is not None:
             self.send_header("Content-Length", str(length))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
 
-    def _send_json(self, payload: dict, status: int = 200) -> None:
+    def _send_json(self, payload: dict, status: int = 200, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, default=_json_default).encode("utf-8")
-        self._send_headers(status, "application/json; charset=utf-8", len(body))
+        self._send_headers(status, "application/json; charset=utf-8", len(body), headers=headers, cache_control="no-store")
         self.wfile.write(body)
 
     def _send_xml(self, body: str, status: int = 200) -> None:
         data = body.encode("utf-8")
         self._send_headers(status, "text/xml; charset=utf-8", len(data))
         self.wfile.write(data)
+
+    def _send_html(self, body: str, status: int = 200, headers: dict[str, str] | None = None) -> None:
+        data = body.encode("utf-8")
+        self._send_headers(status, "text/html; charset=utf-8", len(data), headers=headers, cache_control="no-store")
+        self.wfile.write(data)
+
+    def _send_bytes(
+        self,
+        body: bytes,
+        content_type: str,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        cache_control: str | None = None,
+    ) -> None:
+        self._send_headers(status, content_type, len(body), headers=headers, cache_control=cache_control)
+        self.wfile.write(body)
+
+    def _send_redirect(self, location: str, status: int = HTTPStatus.FOUND, headers: dict[str, str] | None = None) -> None:
+        merged = {"Location": location, **(headers or {})}
+        self._send_headers(status, "text/plain; charset=utf-8", 0, headers=merged, cache_control="no-store")
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -1735,6 +2537,81 @@ class TextingHandler(BaseHTTPRequestHandler):
         host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",", 1)[0].strip()
         return f"{proto}://{host}{self.path}" if host else self.path
 
+    def _request_is_secure(self) -> bool:
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+        return proto == "https" or self.headers.get("X-Forwarded-Ssl", "").lower() == "on"
+
+    def _request_host(self) -> str:
+        return (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",", 1)[0].strip().lower()
+
+    def _client_key(self) -> str:
+        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+        return forwarded or self.client_address[0]
+
+    def _session_token(self) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return None
+        cookies = SimpleCookie()
+        try:
+            cookies.load(raw)
+        except Exception:
+            return None
+        morsel = cookies.get(auth.SESSION_COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    def _current_user(self) -> str | None:
+        return auth.verify_session_token(self._session_token())
+
+    def _is_public_request(self, method: str, path: str) -> bool:
+        if path.startswith("/static/") or path.startswith("/uploads/"):
+            return True
+        if method == "GET":
+            return path in PUBLIC_GET_PATHS
+        if method == "POST":
+            return path in PUBLIC_POST_PATHS
+        return False
+
+    def _same_origin_request(self) -> bool:
+        host = self._request_host()
+        if not host:
+            return True
+        for header in ("Origin", "Referer"):
+            value = self.headers.get(header, "").strip()
+            if not value:
+                continue
+            parsed = urlparse(value)
+            if parsed.netloc and parsed.netloc.lower() != host:
+                return False
+        return True
+
+    def _redirect_to_login(self) -> None:
+        next_path = self.path if self.path.startswith("/") else "/"
+        self._send_redirect(f"/login?next={quote(next_path, safe='')}")
+
+    def _require_auth(self, method: str, path: str) -> bool:
+        if auth.auth_disabled() or self._is_public_request(method, path):
+            return True
+        if not auth.auth_configured():
+            if method == "GET" and not path.startswith("/api/"):
+                self._send_redirect("/login?setup=1")
+            else:
+                self._send_json(
+                    {"error": "Switchboard sign-in is not configured. Set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH in .env."},
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            return False
+        if not self._current_user():
+            if method == "GET" and not path.startswith("/api/") and not path.startswith("/media/"):
+                self._redirect_to_login()
+            else:
+                self._send_json({"error": "Login required."}, HTTPStatus.UNAUTHORIZED)
+            return False
+        if method in {"POST", "PUT", "DELETE"} and not self._same_origin_request():
+            self._send_json({"error": "Cross-origin request blocked."}, HTTPStatus.FORBIDDEN)
+            return False
+        return True
+
     def _serve_file(self, path: Path) -> None:
         if not path.exists() or not path.is_file():
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -1744,19 +2621,138 @@ class TextingHandler(BaseHTTPRequestHandler):
         self._send_headers(200, content_type, len(data))
         self.wfile.write(data)
 
+    def _serve_login(self) -> None:
+        self._serve_file(STATIC_DIR / "login.html")
+
+    def _read_login_payload(self) -> tuple[str, str, str, str, bool]:
+        content_type = (self.headers.get("Content-Type") or "").lower()
+        raw = self._read_raw()
+        if "application/json" in content_type:
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            second_factor = payload.get("second_factor") or payload.get("two_factor") or payload.get("code") or payload.get("otp")
+            return (
+                str(payload.get("username") or ""),
+                str(payload.get("password") or ""),
+                str(second_factor or ""),
+                str(payload.get("next") or "/"),
+                True,
+            )
+        parsed = parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=True)
+        second_factor = (
+            parsed.get("second_factor")
+            or parsed.get("two_factor")
+            or parsed.get("code")
+            or parsed.get("otp")
+            or [""]
+        )[0]
+        return (
+            (parsed.get("username") or [""])[0],
+            (parsed.get("password") or [""])[0],
+            second_factor,
+            (parsed.get("next") or ["/"])[0],
+            False,
+        )
+
+    def _handle_login(self) -> None:
+        if not auth.auth_configured() and not auth.auth_disabled():
+            self._send_json(
+                {"error": "Switchboard sign-in is not configured. Set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH in .env."},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        username, password, second_factor, next_path, wants_json = self._read_login_payload()
+        next_path = next_path if next_path.startswith("/") else "/"
+        login_next = quote(next_path, safe="")
+        client_key = self._client_key()
+        if login_limited(client_key):
+            self._send_json({"error": "Too many sign-in attempts. Try again in a few minutes."}, HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        valid = auth.auth_disabled() or (
+            secrets.compare_digest(username, config.AUTH_USERNAME) and auth.verify_password(password, config.AUTH_PASSWORD_HASH)
+        )
+        if not valid:
+            record_login_failure(client_key)
+            if wants_json:
+                self._send_json({"error": "Invalid username or password."}, HTTPStatus.UNAUTHORIZED)
+            else:
+                self._send_redirect(f"/login?error=1&next={login_next}", HTTPStatus.SEE_OTHER)
+            return
+        material = two_factor_material()
+        if not auth.auth_disabled() and material["enabled"]:
+            if not second_factor.strip():
+                if wants_json:
+                    self._send_json(
+                        {"two_factor_required": True, "error": "Two-factor code required."},
+                        HTTPStatus.ACCEPTED,
+                    )
+                else:
+                    self._send_redirect(f"/login?2fa=1&next={login_next}", HTTPStatus.SEE_OTHER)
+                return
+            factor = auth.verify_second_factor(second_factor, material["secret"], material["backup_hashes"])
+            if not factor:
+                record_login_failure(client_key)
+                if wants_json:
+                    self._send_json({"error": "Invalid two-factor code."}, HTTPStatus.UNAUTHORIZED)
+                else:
+                    self._send_redirect(f"/login?2fa=1&error=1&next={login_next}", HTTPStatus.SEE_OTHER)
+                return
+            factor_type, backup_hash = factor
+            if factor_type == "backup" and backup_hash and not claim_backup_code(backup_hash):
+                record_login_failure(client_key)
+                if wants_json:
+                    self._send_json({"error": "That backup code has already been used."}, HTTPStatus.UNAUTHORIZED)
+                else:
+                    self._send_redirect(f"/login?2fa=1&error=1&next={login_next}", HTTPStatus.SEE_OTHER)
+                return
+        clear_login_failures(client_key)
+        token = auth.create_session_token(config.AUTH_USERNAME or username or "local", SESSION_MAX_AGE_SECONDS)
+        cookie = auth.session_cookie(token, self._request_is_secure(), SESSION_MAX_AGE_SECONDS)
+        if wants_json:
+            self._send_json({"ok": True, "user": config.AUTH_USERNAME or username}, headers={"Set-Cookie": cookie})
+        else:
+            self._send_redirect(next_path, HTTPStatus.SEE_OTHER, headers={"Set-Cookie": cookie})
+
+    def _handle_logout(self) -> None:
+        cookie = auth.clear_session_cookie(self._request_is_secure())
+        self._send_json({"ok": True}, headers={"Set-Cookie": cookie})
+
+    def _handle_account_setup(self) -> None:
+        status = setup_auth_account(self._read_json())
+        token = auth.create_session_token(config.AUTH_USERNAME, SESSION_MAX_AGE_SECONDS)
+        cookie = auth.session_cookie(token, self._request_is_secure(), SESSION_MAX_AGE_SECONDS)
+        self._send_json({"ok": True, "auth": status}, headers={"Set-Cookie": cookie})
+
+    def _send_database_download(self) -> None:
+        filename, data = database_backup_bytes()
+        self._send_bytes(
+            data,
+            "application/vnd.sqlite3",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            cache_control="no-store",
+        )
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
         try:
+            if not self._require_auth("GET", path):
+                return
             if path == "/api/health":
                 self._send_json({"ok": True, "app": config.APP_SLUG})
+            elif path == "/api/auth/session":
+                self._send_json({"authenticated": bool(self._current_user()), "auth": auth_status_payload()})
+            elif path == "/api/auth/2fa":
+                self._send_json(two_factor_status_payload())
             elif path == "/api/bootstrap":
                 self._send_json(bootstrap())
             elif path == "/api/settings":
                 self._send_json(configured_values())
             elif path == "/api/stats":
-                self._send_json(message_stats())
+                self._send_json(message_stats(query))
             elif path == "/api/mobile/notifications":
                 self._send_json(mobile_notifications(query))
             elif path == "/api/refresh":
@@ -1771,6 +2767,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(get_messages(int(match.group(1)), query))
             elif path == "/api/contacts":
                 self._send_json(search_contacts(query))
+            elif path == "/api/database/download":
+                self._send_database_download()
             elif path in {"/api/twilio/voice", "/api/telnyx/voice"}:
                 provider = "twilio" if "twilio" in path else "telnyx"
                 params = {key: values[-1] if values else "" for key, values in query.items()}
@@ -1786,6 +2784,11 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path.startswith("/static/"):
                 rel = Path(unquote(path.removeprefix("/static/")))
                 self._serve_file(STATIC_DIR / rel.name)
+            elif path == "/login":
+                if self._current_user() and auth.auth_configured():
+                    self._send_redirect("/")
+                else:
+                    self._serve_login()
             elif path in {"/", "/index.html"}:
                 self._serve_file(STATIC_DIR / "index.html")
             else:
@@ -1797,7 +2800,28 @@ class TextingHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
-            if path == "/api/messages":
+            if not self._require_auth("POST", path):
+                return
+            if path == "/api/auth/login":
+                self._handle_login()
+            elif path == "/api/auth/setup":
+                self._handle_account_setup()
+            elif path == "/api/auth/logout":
+                self._handle_logout()
+            elif path == "/api/auth/account":
+                status = update_auth_account(self._read_json())
+                token = auth.create_session_token(config.AUTH_USERNAME, SESSION_MAX_AGE_SECONDS)
+                cookie = auth.session_cookie(token, self._request_is_secure(), SESSION_MAX_AGE_SECONDS)
+                self._send_json({"auth": status}, headers={"Set-Cookie": cookie})
+            elif path == "/api/auth/2fa/setup":
+                self._send_json(start_two_factor_setup(self._read_json()))
+            elif path == "/api/auth/2fa/enable":
+                self._send_json(enable_two_factor(self._read_json()))
+            elif path == "/api/auth/2fa/backup-codes":
+                self._send_json(regenerate_backup_codes(self._read_json()))
+            elif path == "/api/auth/2fa/disable":
+                self._send_json(disable_two_factor(self._read_json()))
+            elif path == "/api/messages":
                 self._send_json(send_api_message(self._read_json()))
             elif path == "/api/messages/schedule":
                 self._send_json(schedule_api_message(self._read_json()))
@@ -1909,6 +2933,8 @@ class TextingHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            if not self._require_auth("PUT", path):
+                return
             if match := re.fullmatch(r"/api/identities/(\d+)", path):
                 self._send_json(update_identity(int(match.group(1)), self._read_json()))
             else:

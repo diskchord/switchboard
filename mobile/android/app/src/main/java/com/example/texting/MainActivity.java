@@ -5,11 +5,14 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.webkit.HttpAuthHandler;
@@ -42,6 +45,7 @@ public class MainActivity extends Activity {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
+        applySystemBarInsets();
         swipeRefreshLayout.setOnChildScrollUpCallback(
             (parent, child) -> !nativePullRefreshEnabled || (webView != null && webView.getScrollY() > 0)
         );
@@ -72,6 +76,7 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setMediaPlaybackRequiresUserGesture(false);
         webView.addJavascriptInterface(new AndroidBridge(), "SwitchboardAndroid");
 
@@ -89,6 +94,30 @@ public class MainActivity extends Activity {
             }
         });
         webView.loadUrl(urlForIntent(getIntent()));
+    }
+
+    private void applySystemBarInsets() {
+        swipeRefreshLayout.setOnApplyWindowInsetsListener((View view, WindowInsets insets) -> {
+            int left;
+            int top;
+            int right;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = bars.bottom;
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(left, top, right, bottom);
+            return insets.consumeSystemWindowInsets();
+        });
+        swipeRefreshLayout.requestApplyInsets();
     }
 
     private void setNativePullRefreshEnabled(boolean enabled) {
@@ -246,9 +275,10 @@ public class MainActivity extends Activity {
         }
         webView.evaluateJavascript(
             "(function(){"
-                + "if(document.body && (document.body.classList.contains('mobile-thread-open')"
-                + "|| document.body.classList.contains('conversation-selecting')"
-                + "|| (document.querySelector('#statsModal') && !document.querySelector('#statsModal').classList.contains('hidden'))"
+	                + "if(document.body && (document.body.classList.contains('mobile-thread-open')"
+	                + "|| document.body.classList.contains('conversation-selecting')"
+	                + "|| (document.querySelector('#conversationSearch') && document.querySelector('#conversationSearch').value)"
+	                + "|| (document.querySelector('#statsModal') && !document.querySelector('#statsModal').classList.contains('hidden'))"
                 + "|| document.body.classList.contains('details-overlay-open'))){"
                 + "if(window.textingCloseThreadForNativeBack){window.textingCloseThreadForNativeBack();}"
                 + "else if(history.length > 1){history.back();}"
