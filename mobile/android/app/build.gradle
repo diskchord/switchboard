@@ -19,8 +19,12 @@ if (!switchboardAppUrl) {
             "as a Gradle property, or in the environment before building the Android app."
     )
 }
-if (!switchboardAppUrl.startsWith("https://") && !switchboardAppUrl.startsWith("http://10.") && !switchboardAppUrl.startsWith("http://192.168.")) {
-    throw new GradleException("SWITCHBOARD_APP_URL should be an HTTPS URL, or a private LAN HTTP URL for local testing.")
+def localHttpAppUrl = switchboardAppUrl.startsWith("http://10.") ||
+    switchboardAppUrl.startsWith("http://192.168.") ||
+    switchboardAppUrl.startsWith("http://127.0.0.1") ||
+    switchboardAppUrl.startsWith("http://localhost")
+if (!switchboardAppUrl.startsWith("https://") && !localHttpAppUrl) {
+    throw new GradleException("SWITCHBOARD_APP_URL should be an HTTPS URL, or a local/private LAN HTTP URL for testing.")
 }
 
 android {
@@ -34,6 +38,9 @@ android {
         versionCode 1
         versionName "0.1.0"
         resValue "string", "app_url", switchboardAppUrl
+        manifestPlaceholders = [
+            usesCleartextTraffic: switchboardAppUrl.startsWith("http://") ? "true" : "false"
+        ]
     }
 }
 

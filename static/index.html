@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#e6e8eb" id="themeColor" />
     <title data-i18n="app.title">Switchboard</title>
-    <link rel="icon" href="/static/favicon.ico" sizes="any" />
-    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
-    <link rel="manifest" href="/static/manifest.webmanifest" />
+    <link rel="icon" href="/static/favicon.ico?v=a2385ee2" sizes="any" />
+    <link rel="icon" href="/static/favicon.svg?v=a2385ee2" type="image/svg+xml" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=a2385ee2" />
+    <link rel="manifest" href="/static/manifest.webmanifest?v=a2385ee2" />
     <script>
       (() => {
         const saved = localStorage.getItem("textingTheme");
@@ -16,7 +16,7 @@
         document.documentElement.dataset.theme = saved || (prefersDark ? "dark" : "light");
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=b175af4a" />
   </head>
   <body>
     <div class="app-shell">
@@ -279,6 +279,6 @@
       <div class="lightbox-caption" id="lightboxCaption"></div>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js" type="module"></script>
+    <script src="/static/app.js?v=9b438619" type="module"></script>
   </body>
 </html>

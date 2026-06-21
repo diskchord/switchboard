@@ -172,7 +172,7 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         "Uploads",
         "text",
         str(config.PUBLIC_UPLOAD_DIR),
-        help="Writable server path that your public web server exposes for MMS media.",
+        help="Writable server path for outbound MMS files and voicemail greeting uploads served by Switchboard at /uploads.",
         env_names=("TEXTING_PUBLIC_UPLOAD_DIR",),
     ),
     SettingDef(
@@ -181,7 +181,7 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         "Uploads",
         "url",
         config.PUBLIC_UPLOAD_BASE_URL,
-        help="Public URL matching the upload directory, without the filename.",
+        help="Optional override. Leave blank to use the same public Switchboard origin plus /uploads.",
         env_names=("TEXTING_PUBLIC_UPLOAD_BASE_URL",),
     ),
     SettingDef(

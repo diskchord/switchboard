@@ -146,8 +146,18 @@ def _configured_upload_dir() -> Path:
     return path if path.is_absolute() else config.ROOT / path
 
 
-def _configured_upload_base_url() -> str:
-    return get_value("uploads.public_base_url", config.PUBLIC_UPLOAD_BASE_URL).strip().rstrip("/")
+def _upload_base_url_from_request(request_url: str) -> str:
+    parsed = urlparse(request_url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}/uploads"
+
+
+def _configured_upload_base_url(default_base_url: str = "") -> str:
+    configured = get_value("uploads.public_base_url", config.PUBLIC_UPLOAD_BASE_URL).strip().rstrip("/")
+    if configured:
+        return configured
+    return default_base_url.strip().rstrip("/")
 
 
 def _upload_max_bytes() -> int:
@@ -184,10 +194,10 @@ def _parse_upload(content_type: str, body: bytes) -> tuple[str, str, bytes]:
     raise ValueError("Upload did not include a file.")
 
 
-def save_uploaded_media(content_type: str, body: bytes) -> dict:
-    base_url = _configured_upload_base_url()
+def save_uploaded_media(content_type: str, body: bytes, request_url: str = "") -> dict:
+    base_url = _configured_upload_base_url(_upload_base_url_from_request(request_url))
     if not base_url:
-        raise ValueError("Set Uploads > Public upload base URL before uploading media.")
+        raise ValueError("Set Uploads > Public upload base URL or access Switchboard through its public URL before uploading media.")
     upload_dir = _configured_upload_dir()
     source_name, file_type, data = _parse_upload(content_type, body)
     if not data:
@@ -212,9 +222,10 @@ def save_uploaded_media(content_type: str, body: bytes) -> dict:
     }
 
 
-def upload_diagnostics() -> dict:
+def upload_diagnostics(request_url: str = "") -> dict:
     upload_dir = _configured_upload_dir()
-    base_url = _configured_upload_base_url()
+    auto_base_url = _upload_base_url_from_request(request_url)
+    base_url = _configured_upload_base_url(auto_base_url)
     recent_files = []
     if upload_dir.is_dir():
         found = []
@@ -240,6 +251,8 @@ def upload_diagnostics() -> dict:
         "directory_is_dir": upload_dir.is_dir(),
         "directory_writable": os.access(upload_dir, os.W_OK) if upload_dir.exists() else os.access(upload_dir.parent, os.W_OK),
         "base_url": base_url,
+        "auto_base_url": auto_base_url,
+        "base_url_source": "configured" if get_value("uploads.public_base_url", config.PUBLIC_UPLOAD_BASE_URL).strip() else "request",
         "max_file_mb": get_int("uploads.max_file_mb", config.UPLOAD_MAX_FILE_MB),
         "cwd": os.getcwd(),
         "process_uid": os.getuid(),
@@ -2758,7 +2771,7 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path == "/api/refresh":
                 self._send_json(refresh_state(query))
             elif path == "/api/uploads/diagnostics":
-                self._send_json(upload_diagnostics())
+                self._send_json(upload_diagnostics(self._request_url()))
             elif path == "/api/conversations":
                 self._send_json(list_conversations(query))
             elif path == "/api/conversations/match":
@@ -2846,14 +2859,14 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path == "/api/settings":
                 self._send_json(update_values(self._read_json()))
             elif path == "/api/uploads":
-                diagnostics = upload_diagnostics()
+                diagnostics = upload_diagnostics(self._request_url())
                 self.log_upload(
                     "attempt directory=%s exists=%s base_url=%s",
                     diagnostics["directory"],
                     diagnostics["directory_exists"],
                     diagnostics["base_url"] or "(blank)",
                 )
-                payload = save_uploaded_media(self.headers.get("Content-Type", ""), self._read_raw())
+                payload = save_uploaded_media(self.headers.get("Content-Type", ""), self._read_raw(), self._request_url())
                 self.log_upload(
                     "saved original=%s filename=%s directory=%s url=%s size=%s",
                     payload["original_filename"],
@@ -2908,7 +2921,7 @@ class TextingHandler(BaseHTTPRequestHandler):
             ContactsError,
         ) as exc:
             if path == "/api/uploads":
-                diagnostics = upload_diagnostics()
+                diagnostics = upload_diagnostics(self._request_url())
                 self.log_upload(
                     "failed directory=%s exists=%s base_url=%s error=%s",
                     diagnostics["directory"],
@@ -2919,7 +2932,7 @@ class TextingHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
             if path == "/api/uploads":
-                diagnostics = upload_diagnostics()
+                diagnostics = upload_diagnostics(self._request_url())
                 self.log_upload(
                     "error directory=%s exists=%s base_url=%s error=%s",
                     diagnostics["directory"],

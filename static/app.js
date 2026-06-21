@@ -49,6 +49,12 @@ const state = {
   pullRefresh: null,
   isRefreshingFromPull: false,
   layoutResizeObserver: null,
+  pendingPassiveMessageRender: false,
+  messageBottomStickToken: 0,
+  messageUserScrolledAwayFromBottom: false,
+  messageUserScrollIntent: false,
+  messageBottomStickStartedAt: 0,
+  messageScrollAnchor: null,
   audioContext: null,
   audioUnlocked: false,
   latestInboundSoundKey: "",
@@ -380,8 +386,9 @@ const I18N = {
     "messages.aria": "Messages",
     "messages.empty": "No messages yet.",
     "messages.load_older": "Load older ({count})",
-    "message.reaction_preview": "Reacted {icon}",
-    "message.reaction_title": "{name} reacted {icon}",
+    "message.reaction_preview": "{icon}",
+    "message.reaction_badge": "{name} reacted",
+    "message.reaction_badge_count": "{name} +{count} reacted",
     "message.react": "React",
     "message.react_like": "Like",
     "message.react_love": "Love",
@@ -610,8 +617,9 @@ const I18N = {
     "messages.aria": "Mensajes",
     "messages.empty": "Aún no hay mensajes.",
     "messages.load_older": "Cargar anteriores ({count})",
-    "message.reaction_preview": "Reaccionó {icon}",
-    "message.reaction_title": "{name} reaccionó {icon}",
+    "message.reaction_preview": "{icon}",
+    "message.reaction_badge": "{name} reaccionó",
+    "message.reaction_badge_count": "{name} +{count} reaccionaron",
     "message.react": "Reaccionar",
     "message.react_like": "Me gusta",
     "message.react_love": "Me encanta",
@@ -840,8 +848,9 @@ const I18N = {
     "messages.aria": "Messages",
     "messages.empty": "Aucun message pour le moment.",
     "messages.load_older": "Charger les anciens ({count})",
-    "message.reaction_preview": "Réaction {icon}",
-    "message.reaction_title": "{name} a réagi {icon}",
+    "message.reaction_preview": "{icon}",
+    "message.reaction_badge": "{name} a réagi",
+    "message.reaction_badge_count": "{name} +{count} ont réagi",
     "message.react": "Réagir",
     "message.react_like": "J'aime",
     "message.react_love": "J'adore",
@@ -1128,7 +1137,7 @@ window.textingOpenConversationFromNative = (id) => {
 };
 
 window.textingRefreshIfStaleFromNative = () => {
-  refreshForegroundData().catch((error) => toast(error.message));
+  refreshForegroundData({ passive: true }).catch((error) => toast(error.message));
   return true;
 };
 
@@ -2652,24 +2661,40 @@ function cleanReactionText(value) {
     .trim();
 }
 
-function hasEmojiLikeSymbol(value) {
-  return [...String(value || "")].some((char) => {
+function emojiLikeSymbolFromText(value) {
+  const chars = [...String(value || "")];
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
     const code = char.codePointAt(0);
-    return (
+    const isEmojiLike =
       (code >= 0x1f000 && code <= 0x1faff) ||
       (code >= 0x2600 && code <= 0x27bf) ||
       code === 0x203c ||
-      code === 0x2049
-    );
-  });
+      code === 0x2049;
+    if (!isEmojiLike) continue;
+    let symbol = char;
+    while (index + 1 < chars.length) {
+      const nextCode = chars[index + 1].codePointAt(0);
+      const isModifier = nextCode === 0xfe0f || (nextCode >= 0x1f3fb && nextCode <= 0x1f3ff);
+      if (!isModifier) break;
+      index += 1;
+      symbol += chars[index];
+    }
+    return symbol === "❤" ? "❤️" : symbol;
+  }
+  return "";
 }
 
 function normalizeReactionIcon(value) {
   const icon = cleanReactionText(value);
+  const reactedMatch = icon.match(/^reacted\s+(.+)$/iu);
+  if (reactedMatch) return normalizeReactionIcon(reactedMatch[1]);
   const wordIcon = REACTION_WORDS.get(icon.toLowerCase());
   if (wordIcon) return wordIcon;
   if (icon === "❤") return "❤️";
-  if (REACTION_SYMBOLS.has(icon) || hasEmojiLikeSymbol(icon)) return icon;
+  if (REACTION_SYMBOLS.has(icon)) return icon;
+  const emojiIcon = emojiLikeSymbolFromText(icon);
+  if (emojiIcon) return emojiIcon;
   return "";
 }
 
@@ -2719,6 +2744,15 @@ function messagesWithInlineReactions(messages) {
         id: rawMessage.id,
         from_display: rawMessage.from_display,
         from_number: rawMessage.from_number,
+      });
+      return;
+    }
+    if (reaction) {
+      visibleMessages.push({
+        ...rawMessage,
+        text: "",
+        standalone_reaction: reaction,
+        inline_reactions: [...(rawMessage.inline_reactions || [])],
       });
       return;
     }
@@ -3679,22 +3713,34 @@ function reactionActorName(reaction) {
   return reaction.from_display || phoneDisplay(reaction.from_number) || t("conversation.unknown");
 }
 
+function reactionActorFirstName(name) {
+  const cleaned = String(name || "").trim();
+  if (!cleaned || cleaned === t("conversation.unknown")) return "";
+  return cleaned.split(/\s+/)[0] || "";
+}
+
 function groupedReactions(reactions) {
   const groups = new Map();
   reactions.forEach((reaction) => {
-    const key = reaction.icon;
-    if (!groups.has(key)) groups.set(key, { icon: reaction.icon, count: 0, names: new Set() });
+    const icon = normalizeReactionIcon(reaction.icon) || cleanReactionText(reaction.icon);
+    if (!icon) return;
+    const key = icon;
+    if (!groups.has(key)) groups.set(key, { icon, count: 0, names: new Set(), firstNames: new Set() });
     const group = groups.get(key);
+    const actorName = reactionActorName(reaction);
     group.count += 1;
-    group.names.add(reactionActorName(reaction));
+    group.names.add(actorName);
+    const firstName = reactionActorFirstName(actorName);
+    if (firstName) group.firstNames.add(firstName);
   });
   return [...groups.values()];
 }
 
-function reactionGroupName(group) {
-  const names = [...group.names];
-  if (names.length <= 2) return names.join(", ");
-  return `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+function reactionBadgeText(group) {
+  const [name] = [...group.firstNames];
+  if (!name) return "";
+  if (group.count > 1) return t("message.reaction_badge_count", { name, count: group.count - 1 });
+  return t("message.reaction_badge", { name });
 }
 
 function renderMessageReactions(message) {
@@ -3702,10 +3748,12 @@ function renderMessageReactions(message) {
   if (!reactions.length) return "";
   return `<div class="message-reactions">${groupedReactions(reactions)
     .map((group) => {
-      const title = t("message.reaction_title", { name: reactionGroupName(group), icon: group.icon });
-      return `<span class="message-reaction" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
-        <span class="message-reaction-icon">${escapeHtml(group.icon)}</span>
-        ${group.count > 1 ? `<span class="message-reaction-count">${escapeHtml(group.count)}</span>` : ""}
+      const label = group.icon;
+      const badgeText = reactionBadgeText(group);
+      const accessibleLabel = badgeText ? `${badgeText} ${label}` : label;
+      return `<span class="message-reaction" title="${escapeHtml(accessibleLabel)}" aria-label="${escapeHtml(accessibleLabel)}">
+        ${badgeText ? `<span class="message-reaction-text">${escapeHtml(badgeText)}</span>` : ""}
+        <span class="message-reaction-icon">${escapeHtml(label)}</span>
       </span>`;
     })
     .join("")}</div>`;
@@ -3738,6 +3786,112 @@ function normalizedMediaKey(url) {
 
 function mediaElementKey(element) {
   return element.dataset.mediaKey || normalizedMediaKey(element.currentSrc || element.getAttribute("src") || "");
+}
+
+function messageMediaIsPlaying() {
+  return [...els.messages.querySelectorAll("audio, video")].some((element) => !element.paused && !element.ended);
+}
+
+function elementIndex(element, selector) {
+  const parent = element.parentElement;
+  if (!parent) return -1;
+  return [...parent.querySelectorAll(selector)].indexOf(element);
+}
+
+function messageScrollAnchorKey(element) {
+  const row = element.closest(".message-row[data-message-id]");
+  if (row) {
+    const messageId = row.dataset.messageId;
+    const attachment = element.closest(".attachment-grid > *");
+    if (attachment && row.contains(attachment)) {
+      const index = elementIndex(attachment, ".attachment-grid > *");
+      if (index >= 0) return `message:${messageId}:attachment:${index}`;
+    }
+    if (element.closest(".message-text")) return `message:${messageId}:text`;
+    if (element.closest(".message-meta")) return `message:${messageId}:meta`;
+    if (element.closest(".message-reactions")) return `message:${messageId}:reactions`;
+    return `message:${messageId}:row`;
+  }
+  const dayDivider = element.closest(".day-divider");
+  if (dayDivider) {
+    const index = [...els.messages.querySelectorAll(".day-divider")].indexOf(dayDivider);
+    if (index >= 0) return `day:${index}`;
+  }
+  const olderRow = element.closest(".older-row");
+  if (olderRow) return "older";
+  return "";
+}
+
+function resolveMessageScrollAnchor(key) {
+  if (!key) return null;
+  if (key === "older") return els.messages.querySelector(".older-row");
+  if (key.startsWith("day:")) {
+    return els.messages.querySelectorAll(".day-divider")[Number(key.slice(4))] || null;
+  }
+  const match = key.match(/^message:([^:]+):(row|text|meta|reactions|attachment(?::(\d+))?)$/);
+  if (!match) return null;
+  const [, messageId, kind, attachmentIndex] = match;
+  const row = [...els.messages.querySelectorAll(".message-row[data-message-id]")].find(
+    (item) => item.dataset.messageId === messageId,
+  );
+  if (!row) return null;
+  if (kind === "row") return row;
+  if (kind === "text") return row.querySelector(".message-text") || row;
+  if (kind === "meta") return row.querySelector(".message-meta") || row;
+  if (kind === "reactions") return row.querySelector(".message-reactions") || row;
+  if (kind.startsWith("attachment")) {
+    const index = Number(attachmentIndex || 0);
+    return row.querySelectorAll(".attachment-grid > *")[index] || row.querySelector(".attachment-grid") || row;
+  }
+  return row;
+}
+
+function captureMessageScrollAnchor() {
+  const viewport = els.messages.getBoundingClientRect();
+  const anchorLine = viewport.top + Math.min(48, Math.max(8, viewport.height * 0.12));
+  const candidates = [
+    ...els.messages.querySelectorAll(
+      ".attachment-grid > *, .message-text, .message-meta, .message-reactions, .message-row[data-message-id], .day-divider, .older-row",
+    ),
+  ];
+  const visible = candidates
+    .map((item) => ({ item, rect: item.getBoundingClientRect(), key: messageScrollAnchorKey(item) }))
+    .filter(({ rect, key }) => key && rect.bottom >= viewport.top && rect.top <= viewport.bottom);
+  const anchored =
+    visible.find(({ rect }) => rect.top <= anchorLine && rect.bottom >= anchorLine) ||
+    visible.sort((a, b) => Math.abs(a.rect.top - anchorLine) - Math.abs(b.rect.top - anchorLine))[0];
+  if (!anchored) return null;
+  return {
+    key: anchored.key,
+    offsetTop: anchored.rect.top - viewport.top,
+  };
+}
+
+function captureFallbackMessageRowAnchor() {
+  const viewport = els.messages.getBoundingClientRect();
+  const row =
+    [...els.messages.querySelectorAll(".message-row[data-message-id]")].find((item) => {
+      const rect = item.getBoundingClientRect();
+      return rect.bottom >= viewport.top && rect.top <= viewport.bottom;
+    }) || els.messages.querySelector(".message-row[data-message-id]");
+  if (!row) return null;
+  return {
+    key: `message:${row.dataset.messageId}:row`,
+    offsetTop: row.getBoundingClientRect().top - viewport.top,
+  };
+}
+
+function restoreMessageScrollAnchor(anchor, fallbackScrollTop) {
+  if (!anchor?.key) {
+    els.messages.scrollTop = Math.max(0, fallbackScrollTop);
+    return true;
+  }
+  const row = resolveMessageScrollAnchor(anchor.key) || resolveMessageScrollAnchor(captureFallbackMessageRowAnchor()?.key);
+  if (!row) return false;
+  const viewport = els.messages.getBoundingClientRect();
+  const nextOffsetTop = row.getBoundingClientRect().top - viewport.top;
+  els.messages.scrollTop += nextOffsetTop - anchor.offsetTop;
+  return true;
 }
 
 function captureMessageMediaPlayback() {
@@ -3814,17 +3968,37 @@ function restoreMessageMediaPlayback(states) {
   });
 }
 
+function beginMessageBottomStick() {
+  state.messageBottomStickToken += 1;
+  state.messageUserScrolledAwayFromBottom = false;
+  state.messageUserScrollIntent = false;
+  state.messageBottomStickStartedAt = performance.now();
+  state.messageScrollAnchor = null;
+  return state.messageBottomStickToken;
+}
+
+function cancelMessageBottomStick() {
+  state.messageBottomStickToken += 1;
+  state.messageUserScrolledAwayFromBottom = false;
+}
+
+function messageBottomStickIsActive(token) {
+  return token === state.messageBottomStickToken && !state.messageUserScrolledAwayFromBottom;
+}
+
 function renderMessages(messages, scrollMode = "bottom") {
-  const wasNearBottom = isNearMessageBottom();
+  state.pendingPassiveMessageRender = false;
   const mediaPlayback = captureMessageMediaPlayback();
+  const bottomStickToken = scrollMode === "bottom" ? beginMessageBottomStick() : null;
+  if (scrollMode !== "bottom") cancelMessageBottomStick();
+  const scrollAnchor = scrollMode === "preserve" ? captureMessageScrollAnchor() : null;
   const visibleMessages = messagesWithInlineReactions(messages);
   if (!visibleMessages.length) {
     els.messages.innerHTML = `<div class="empty-state">${escapeHtml(t("messages.empty"))}</div>`;
     updateComposerOffset();
-    watchMessageMediaForBottomStick(scrollMode, wasNearBottom);
+    watchMessageMediaForScrollMode(scrollMode, null, els.messages.scrollTop, bottomStickToken);
     return;
   }
-  const oldScrollHeight = els.messages.scrollHeight;
   const oldScrollTop = els.messages.scrollTop;
   let lastDay = "";
   const loadOlder = state.hasMoreMessages
@@ -3842,6 +4016,12 @@ function renderMessages(messages, scrollMode = "bottom") {
       const attachmentGridClass = messageAttachments.some((attachment) => isAudioAttachment(attachment, mediaUrl(attachment)))
         ? "attachment-grid audio-attachment-grid"
         : "attachment-grid";
+      const standaloneReactionIcon = message.standalone_reaction
+        ? normalizeReactionIcon(message.standalone_reaction.icon) || cleanReactionText(message.standalone_reaction.icon)
+        : "";
+      const standaloneReaction = standaloneReactionIcon
+        ? `<div class="standalone-reaction-icon" title="${escapeHtml(standaloneReactionIcon)}" aria-label="${escapeHtml(standaloneReactionIcon)}">${escapeHtml(standaloneReactionIcon)}</div>`
+        : "";
       const reactions = renderMessageReactions(message);
       const voicemailLabel = isVoicemailMessage(message)
         ? `<div class="message-type-label">${escapeHtml(t("message.voicemail"))}</div>`
@@ -3877,6 +4057,7 @@ function renderMessages(messages, scrollMode = "bottom") {
             <div class="message-bubble">
               ${voicemailLabel}
               ${attachments ? `<div class="${attachmentGridClass}">${attachments}</div>` : ""}
+              ${standaloneReaction}
               ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
               ${queuedDetail}
               ${failureDetail}
@@ -3895,31 +4076,54 @@ function renderMessages(messages, scrollMode = "bottom") {
   restoreMessageMediaPlayback(mediaPlayback);
   updateComposerOffset();
   if (scrollMode === "preserve") {
-    els.messages.scrollTop = els.messages.scrollHeight - oldScrollHeight + oldScrollTop;
+    restoreMessageScrollAnchor(scrollAnchor, oldScrollTop);
+    state.messageScrollAnchor = captureMessageScrollAnchor() || scrollAnchor;
   } else if (scrollMode === "bottom") {
-    scrollMessagesToBottom();
+    scrollMessagesToBottom(bottomStickToken);
   }
-  watchMessageMediaForBottomStick(scrollMode, wasNearBottom);
+  watchMessageMediaForScrollMode(scrollMode, scrollAnchor, els.messages.scrollTop, bottomStickToken);
 }
 
-function watchMessageMediaForBottomStick(scrollMode, wasNearBottom = false) {
-  const shouldStick = scrollMode === "bottom" || wasNearBottom;
-  const media = [...els.messages.querySelectorAll("img, video, audio")];
+function watchMessageMediaForScrollMode(
+  scrollMode,
+  scrollAnchor = null,
+  initialScrollTop = els.messages.scrollTop,
+  bottomStickToken = null,
+) {
+  const shouldStick = scrollMode === "bottom";
+  const shouldPreserve = scrollMode === "preserve" && Boolean(scrollAnchor);
+  const media = [...els.messages.querySelectorAll("img, video, audio, object")];
   if (!media.length) return;
-  const keepBottomVisible = () => {
+  let expectedScrollTop = initialScrollTop;
+  const keepScrollPosition = () => {
     updateComposerOffset();
-    if (shouldStick || isNearMessageBottom()) {
-      scrollMessagesToBottom();
+    if (shouldStick) {
+      if (messageBottomStickIsActive(bottomStickToken)) {
+        scrollMessagesToBottom(bottomStickToken);
+      } else if (state.messageScrollAnchor) {
+        restoreMessageScrollAnchor(state.messageScrollAnchor, els.messages.scrollTop);
+      }
+      expectedScrollTop = els.messages.scrollTop;
+      return;
+    }
+    const activeAnchor = state.messageScrollAnchor || scrollAnchor;
+    if (!shouldPreserve || !activeAnchor) {
+      expectedScrollTop = els.messages.scrollTop;
+      return;
+    }
+    if (restoreMessageScrollAnchor(activeAnchor, expectedScrollTop)) {
+      expectedScrollTop = els.messages.scrollTop;
     }
   };
   media.forEach((item) => {
     if (item.tagName === "IMG" && item.complete) return;
-    item.addEventListener("load", keepBottomVisible, { once: true });
-    item.addEventListener("loadedmetadata", keepBottomVisible, { once: true });
-    item.addEventListener("error", keepBottomVisible, { once: true });
+    item.addEventListener("load", keepScrollPosition, { once: true });
+    item.addEventListener("loadedmetadata", keepScrollPosition, { once: true });
+    item.addEventListener("error", keepScrollPosition, { once: true });
   });
-  window.setTimeout(keepBottomVisible, 350);
-  window.setTimeout(keepBottomVisible, 1000);
+  window.setTimeout(keepScrollPosition, 120);
+  window.setTimeout(keepScrollPosition, 350);
+  window.setTimeout(keepScrollPosition, 1000);
 }
 
 function messageById(id) {
@@ -4137,9 +4341,10 @@ function stepLightbox(offset) {
   renderLightbox();
 }
 
-function scrollMessagesToBottom() {
+function scrollMessagesToBottom(bottomStickToken = null) {
   updateComposerOffset();
   const scroll = () => {
+    if (bottomStickToken !== null && !messageBottomStickIsActive(bottomStickToken)) return;
     els.messages.scrollTop = els.messages.scrollHeight;
   };
   requestAnimationFrame(() => {
@@ -4151,6 +4356,30 @@ function scrollMessagesToBottom() {
 
 function isNearMessageBottom() {
   return els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight < 120;
+}
+
+function markMessageUserScrollIntent() {
+  state.messageUserScrollIntent = true;
+}
+
+function markMessageKeyboardScrollIntent(event) {
+  if (!["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) return;
+  if (isEditableKeyTarget(event.target)) return;
+  markMessageUserScrollIntent();
+}
+
+function handleMessagesScroll() {
+  if (isNearMessageBottom()) {
+    state.messageUserScrolledAwayFromBottom = false;
+    state.messageUserScrollIntent = false;
+    state.messageScrollAnchor = null;
+    return;
+  }
+  const initializingBottomStick = performance.now() - state.messageBottomStickStartedAt < 180;
+  if (state.messageUserScrollIntent || !initializingBottomStick) {
+    state.messageUserScrolledAwayFromBottom = true;
+    state.messageScrollAnchor = captureMessageScrollAnchor() || state.messageScrollAnchor;
+  }
 }
 
 function isEditableKeyTarget(target) {
@@ -4279,7 +4508,7 @@ function scheduleStatusPoll() {
   clearStatusPoll();
   if (!state.currentConversationId || !hasPendingOutboundMessages() || document.hidden) return;
   state.statusPollTimer = setTimeout(() => {
-    refreshCurrentConversationStatus().catch((error) => toast(error.message));
+    refreshCurrentConversationStatus({ passive: true }).catch((error) => toast(error.message));
   }, 5000);
 }
 
@@ -4300,6 +4529,16 @@ function scheduleAutoRefresh() {
 
 function refreshQuery() {
   return state.currentConversationId ? `?conversation_id=${encodeURIComponent(state.currentConversationId)}` : "";
+}
+
+function renderPendingPassiveMessages() {
+  if (!state.pendingPassiveMessageRender || messageMediaIsPlaying()) return;
+  renderMessages(state.messages, "preserve");
+}
+
+function queuePendingPassiveMessageRender() {
+  state.pendingPassiveMessageRender = true;
+  window.setTimeout(renderPendingPassiveMessages, 500);
 }
 
 function conversationPayloadMatchesState(payload) {
@@ -4350,7 +4589,7 @@ function trackInboundSoundKey(key, { play = false } = {}) {
   }
 }
 
-async function pollForChanges({ prime = false, force = false } = {}) {
+async function pollForChanges({ prime = false, force = false, passive = true } = {}) {
   if (!state.bootstrap || state.autoRefreshInFlight || document.hidden) return;
   state.autoRefreshInFlight = true;
   try {
@@ -4378,7 +4617,7 @@ async function pollForChanges({ prime = false, force = false } = {}) {
       });
     }
     if (conversationChanged && state.currentConversationId === conversationId) {
-      await refreshCurrentConversationStatus({ knownChanged: true, force });
+      await refreshCurrentConversationStatus({ knownChanged: true, force, passive });
     }
   } finally {
     state.autoRefreshInFlight = false;
@@ -4386,11 +4625,12 @@ async function pollForChanges({ prime = false, force = false } = {}) {
   }
 }
 
-async function refreshCurrentConversationStatus({ knownChanged = false, force = false } = {}) {
+async function refreshCurrentConversationStatus({ knownChanged = false, force = false, passive = false } = {}) {
   if (!state.currentConversationId || state.statusPollInFlight) return;
   state.statusPollInFlight = true;
   const conversationId = state.currentConversationId;
-  const shouldStickToBottom = isNearMessageBottom();
+    const shouldStickToBottom = !passive && isNearMessageBottom();
+  const mediaWasPlaying = messageMediaIsPlaying();
   const limit = Math.max(80, state.messages.length || 0);
   try {
     if (!knownChanged && !force) {
@@ -4409,8 +4649,8 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     }
     const payload = await api(`/api/conversations/${conversationId}/messages?limit=${limit}`);
     if (state.currentConversationId !== conversationId) return;
-    const conversationChanged = force || !conversationPayloadMatchesState(payload);
-    const messagesChanged = force || !messagePayloadMatchesState(payload);
+    const conversationChanged = !conversationPayloadMatchesState(payload);
+    const messagesChanged = !messagePayloadMatchesState(payload);
     if (!conversationChanged && !messagesChanged) {
       state.lastThreadRefreshAt = Date.now();
       return;
@@ -4418,7 +4658,7 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     mergeConversationIntoLoadedState(payload.conversation);
     state.lastThreadRefreshAt = Date.now();
     if (messagesChanged) {
-      trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: true });
+      trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: !(passive && mediaWasPlaying) });
       state.messages = payload.messages;
       state.hasMoreMessages = payload.has_more;
       state.olderCount = payload.older_count;
@@ -4427,7 +4667,11 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
       renderThreadHeader();
     }
     if (messagesChanged) {
-      renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
+      if (passive && mediaWasPlaying) {
+        queuePendingPassiveMessageRender();
+      } else {
+        renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
+      }
     }
     if (payload.conversation) {
       renderConversations();
@@ -4460,7 +4704,7 @@ function syncNativePullRefreshEnabled() {
   bridge.setPullRefreshEnabled(canUsePullRefresh() || state.isRefreshingFromPull);
 }
 
-async function refreshForegroundData({ force = false } = {}) {
+async function refreshForegroundData({ force = false, passive = true } = {}) {
   if (!state.bootstrap || state.foregroundRefreshInFlight || document.hidden) return;
   const now = Date.now();
   const listIsStale = force || now - state.lastListRefreshAt > FOREGROUND_STALE_MS;
@@ -4469,7 +4713,7 @@ async function refreshForegroundData({ force = false } = {}) {
   if (!listIsStale && !threadIsStale) return;
   state.foregroundRefreshInFlight = true;
   try {
-    await pollForChanges({ force });
+    await pollForChanges({ force, passive });
   } finally {
     state.foregroundRefreshInFlight = false;
   }
@@ -5698,11 +5942,18 @@ function bindEvents() {
     state.uploadedMedia.splice(Number(button.dataset.removeUpload), 1);
     renderUploadedMedia();
   });
+  els.messages.addEventListener("wheel", markMessageUserScrollIntent, { passive: true });
+  els.messages.addEventListener("touchstart", markMessageUserScrollIntent, { passive: true });
+  els.messages.addEventListener("pointerdown", markMessageUserScrollIntent, { passive: true });
+  els.messages.addEventListener("scroll", handleMessagesScroll, { passive: true });
+  document.addEventListener("keydown", markMessageKeyboardScrollIntent, true);
   els.messages.addEventListener("pointerdown", beginMessageReactionPress);
   els.messages.addEventListener("pointermove", moveMessageReactionPress);
   els.messages.addEventListener("pointerup", endMessageReactionPress);
   els.messages.addEventListener("pointerleave", endMessageReactionPress);
   els.messages.addEventListener("pointercancel", endMessageReactionPress);
+  els.messages.addEventListener("pause", renderPendingPassiveMessages, true);
+  els.messages.addEventListener("ended", renderPendingPassiveMessages, true);
   els.messages.addEventListener("click", (event) => {
     if (event.target.closest("#loadOlderButton")) {
       loadOlderMessages().catch((error) => toast(error.message));
