@@ -4,6 +4,8 @@ Switchboard is a local-first communications console for SMS, MMS, group texting,
 
 The server stores conversations, messages, scheduled messages, contacts, sender identities, app settings, voice rules, voicemail recording metadata, and media metadata in SQLite. It can import historical HTML exports, receive Telnyx SMS/MMS/fax and Twilio Messaging webhooks, send outbound Telnyx or Twilio messages, handle TeXML/TwiML-compatible voice callbacks, sync contacts from Fastmail or Google Contacts, and optionally notify an ntfy topic or the Android wrapper when inbound texts arrive.
 
+![Switchboard desktop interface showing a conversation inbox and message thread](docs/Screenshot_Desktop_General.png)
+
 Authored by [Alexander Peppe](https://www.alexanderpeppe.com/).
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
