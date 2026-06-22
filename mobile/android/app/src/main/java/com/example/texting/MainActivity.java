@@ -41,8 +41,9 @@ public class MainActivity extends Activity {
     private static final int TEXT_PRIMARY = Color.rgb(242, 246, 251);
     private static final int TEXT_MUTED = Color.rgb(169, 180, 194);
     private static final int ACCENT = Color.rgb(88, 166, 255);
-    private static final int REFRESH_START_MARGIN_DP = 8;
-    private static final int REFRESH_END_OFFSET_DP = 64;
+    private static final int CONTENT_TOP_MARGIN_DP = 7;
+    private static final int REFRESH_START_MARGIN_DP = 4;
+    private static final int REFRESH_END_OFFSET_DP = 48;
     private WebView webView;
     private FrameLayout rootLayout;
     private SwipeRefreshLayout swipeRefreshLayout;
@@ -303,8 +304,9 @@ public class MainActivity extends Activity {
                 right = insets.getSystemWindowInsetRight();
                 bottom = insets.getSystemWindowInsetBottom();
             }
-            view.setPadding(left, top, right, bottom);
-            updateRefreshIndicatorOffset(top);
+            int contentTopPadding = dp(CONTENT_TOP_MARGIN_DP);
+            view.setPadding(left, contentTopPadding, right, bottom);
+            updateRefreshIndicatorOffset(top + contentTopPadding);
             return insets.consumeSystemWindowInsets();
         });
         swipeRefreshLayout.requestApplyInsets();

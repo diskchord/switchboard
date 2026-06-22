@@ -26,7 +26,7 @@ from .db import (
 )
 from .phone import normalize_phone
 from .telnyx import _contact_name_for_phone, _notify_incoming_message
-from .timeutil import now_est
+from .timeutil import normalize_iso_timestamp, now_est
 
 
 class TwilioError(RuntimeError):
@@ -140,15 +140,78 @@ def _download_media(url: str, content_type: str | None = None) -> tuple[str | No
 
 def _webhook_url(request_url: str) -> str:
     configured = app_settings.get_value("twilio.webhook_url", config.TWILIO_WEBHOOK_URL).strip()
-    return configured or request_url
+    if not configured:
+        return request_url
+    request_query = urlparse(request_url).query
+    if request_query and not urlparse(configured).query:
+        return f"{configured}?{request_query}"
+    return configured
 
 
 def _form_params(raw_body: bytes) -> dict[str, list[str]]:
     return parse_qs(raw_body.decode("utf-8", errors="replace"), keep_blank_values=True)
 
 
-def _flat_params(params: dict[str, list[str]]) -> dict[str, str]:
-    return {key: values[-1] if values else "" for key, values in params.items()}
+def _flat_params(params: dict[str, list[str]]) -> dict[str, Any]:
+    return {key: values[-1] if len(values) == 1 else values for key, values in params.items()}
+
+
+def _param_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _first_param(params: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        if key not in params:
+            continue
+        values = _param_values(params.get(key))
+        for value in reversed(values):
+            if value is not None:
+                return str(value)
+    return ""
+
+
+def _decode_phone_values(value: Any) -> list[str]:
+    phones: list[str] = []
+    for item in _param_values(value):
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            for key in ("phone_number", "phoneNumber", "address", "number", "value"):
+                phones.extend(_decode_phone_values(item.get(key)))
+            continue
+        if not isinstance(item, str):
+            item = str(item)
+        item = item.strip()
+        if not item:
+            continue
+        if item.startswith("["):
+            try:
+                phones.extend(_decode_phone_values(json.loads(item)))
+                continue
+            except json.JSONDecodeError:
+                pass
+        if "," in item:
+            phones.extend(part.strip() for part in item.split(",") if part.strip())
+        else:
+            phones.append(item)
+    return phones
+
+
+def _phone_list(*values: Any) -> list[str]:
+    seen: set[str] = set()
+    phones: list[str] = []
+    for value in values:
+        for phone in _decode_phone_values(value):
+            normalized = normalize_phone(phone)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                phones.append(normalized)
+    return phones
 
 
 def _verify_form_signature(raw_body: bytes, signature: str, request_url: str, auth_token: str) -> bool:
@@ -172,7 +235,15 @@ def _verify_json_signature(raw_body: bytes, signature: str, request_url: str, au
             return False
     digest = hmac.new(auth_token.encode("utf-8"), signed.encode("utf-8"), hashlib.sha1).digest()
     expected = base64.b64encode(digest).decode("ascii")
-    return hmac.compare_digest(expected, signature)
+    if hmac.compare_digest(expected, signature):
+        return True
+
+    # Twilio Event Streams webhooks validate against the raw body rather than
+    # form fields, and older sink examples may not include a bodySHA256 query.
+    body_text = raw_body.decode("utf-8", errors="replace")
+    body_digest = hmac.new(auth_token.encode("utf-8"), (signed + body_text).encode("utf-8"), hashlib.sha1).digest()
+    body_expected = base64.b64encode(body_digest).decode("ascii")
+    return hmac.compare_digest(body_expected, signature)
 
 
 def verify_signature(raw_body: bytes, headers: dict[str, str], request_url: str) -> bool:
@@ -188,40 +259,67 @@ def verify_signature(raw_body: bytes, headers: dict[str, str], request_url: str)
     return _verify_form_signature(raw_body, signature, request_url, auth_token)
 
 
-def _message_sid(params: dict[str, str]) -> str:
-    for key in ("MessageSid", "SmsSid", "SmsMessageSid", "MessageId"):
-        value = str(params.get(key) or "").strip()
+def _message_sid(params: dict[str, Any]) -> str:
+    for key in ("MessageSid", "SmsSid", "SmsMessageSid", "MessageId", "messageSid", "sid"):
+        value = _first_param(params, key).strip()
         if value:
             return value
     return ""
 
 
-def _status(params: dict[str, str]) -> str:
-    for key in OUTBOUND_STATUS_KEYS:
-        value = str(params.get(key) or "").strip().lower()
+def _status(params: dict[str, Any]) -> str:
+    for key in (*OUTBOUND_STATUS_KEYS, "status"):
+        value = _first_param(params, key).strip().lower()
         if value:
             return value
     return "received"
 
 
-def _looks_like_inbound_message(params: dict[str, str]) -> bool:
-    return bool(params.get("From") and params.get("To") and (params.get("Body") or params.get("NumMedia")))
+def _recipient_numbers(params: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    exact_keys = {"Recipients", "recipients", "Recipients[]", "recipients[]", "Recipient", "recipient"}
+    for key in exact_keys:
+        if key in params:
+            values.append(params[key])
+    for key, value in params.items():
+        lowered = key.lower().rstrip("[]0123456789")
+        if lowered in {"recipient", "recipients"} and key not in exact_keys:
+            values.append(value)
+    return _phone_list(*values)
 
 
-def _media_items(params: dict[str, str]) -> list[dict[str, str]]:
+def _to_numbers(params: dict[str, Any]) -> list[str]:
+    to_number = normalize_phone(_first_param(params, "To", "to"))
+    recipients = _recipient_numbers(params)
+    return _phone_list([to_number] if to_number else [], recipients)
+
+
+def _media_count(params: dict[str, Any]) -> int:
     try:
-        count = int(params.get("NumMedia") or "0")
+        return int(_first_param(params, "NumMedia", "numMedia") or "0")
     except ValueError:
-        count = 0
+        return 0
+
+
+def _looks_like_inbound_message(params: dict[str, Any]) -> bool:
+    return bool(
+        _first_param(params, "From", "from")
+        and _to_numbers(params)
+        and (_first_param(params, "Body", "body") or _media_count(params))
+    )
+
+
+def _media_items(params: dict[str, Any]) -> list[dict[str, str]]:
+    count = _media_count(params)
     items = []
     for index in range(max(count, 0)):
-        url = params.get(f"MediaUrl{index}") or ""
+        url = _first_param(params, f"MediaUrl{index}", f"mediaUrl{index}")
         if not url:
             continue
         items.append(
             {
                 "url": url,
-                "content_type": params.get(f"MediaContentType{index}") or "",
+                "content_type": _first_param(params, f"MediaContentType{index}", f"mediaContentType{index}"),
             }
         )
     return items
@@ -235,7 +333,7 @@ def _find_message_id(conn: sqlite3.Connection, sid: str) -> int | None:
     return int(row["id"]) if row else None
 
 
-def _update_status_callback(conn: sqlite3.Connection, params: dict[str, str]) -> int | None:
+def _update_status_callback(conn: sqlite3.Connection, params: dict[str, Any]) -> int | None:
     sid = _message_sid(params)
     status = _status(params)
     if not sid or not status:
@@ -257,13 +355,19 @@ def _update_status_callback(conn: sqlite3.Connection, params: dict[str, str]) ->
     return message_id
 
 
-def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, str]) -> int | None:
+def _message_timestamp(params: dict[str, Any]) -> str:
+    raw = _first_param(params, "Timestamp", "timestamp", "DateCreated", "dateCreated")
+    return normalize_iso_timestamp(raw) if raw else now_est()
+
+
+def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, Any]) -> int | None:
     sid = _message_sid(params)
-    from_number = normalize_phone(params.get("From"))
-    to_number = normalize_phone(params.get("To"))
-    text = params.get("Body") or ""
+    from_number = normalize_phone(_first_param(params, "From", "from"))
+    to_numbers = _to_numbers(params)
+    primary_to = normalize_phone(_first_param(params, "To", "to")) or (to_numbers[0] if to_numbers else "")
+    text = _first_param(params, "Body", "body")
     media_items = _media_items(params)
-    if not from_number or not to_number or (not text and not media_items):
+    if not from_number or not to_numbers or (not text and not media_items):
         return None
 
     existing_id = _find_message_id(conn, sid) if sid else None
@@ -279,10 +383,10 @@ def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, str]) -> 
         return existing_id
 
     known_self = self_numbers(conn)
-    remote_numbers = [from_number] if from_number else []
-    self_participants = [to_number] if to_number else []
+    participants = {from_number, *to_numbers}
+    remote_numbers = sorted(n for n in participants if n and n != primary_to) or ([from_number] if from_number else [])
+    self_participants = [primary_to] if primary_to else []
     if known_self:
-        participants = {from_number, to_number}
         remote_numbers = sorted(n for n in participants if n and n not in known_self)
         self_participants = sorted(n for n in participants if n in known_self)
     conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
@@ -291,11 +395,11 @@ def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, str]) -> 
         conversation_id=conversation_id,
         direction="inbound",
         from_number=from_number,
-        to_numbers=[to_number],
+        to_numbers=to_numbers,
         cc_numbers=[],
         text=text,
-        occurred_at=now_est(),
-        message_type="MMS" if media_items else "SMS",
+        occurred_at=_message_timestamp(params),
+        message_type="MMS" if media_items or len(to_numbers) > 1 else "SMS",
         status="received",
         source="twilio",
         telnyx_id=sid or None,
@@ -330,7 +434,7 @@ def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, str]) -> 
         maybe_send_autoreply(
             conversation_id=conversation_id,
             from_number=from_number,
-            self_numbers=self_participants or [to_number],
+            self_numbers=self_participants or ([primary_to] if primary_to else to_numbers),
             remote_numbers=remote_numbers,
             trigger_message_id=message_id,
         )
@@ -402,20 +506,81 @@ def send_message(
     return {"message_id": message_id, "twilio": responses}
 
 
+def _json_event_data(event: Any) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    data = event.get("data")
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            data = parsed if isinstance(parsed, dict) else data
+        except json.JSONDecodeError:
+            pass
+    if isinstance(data, dict) and (
+        str(event.get("type") or "").startswith("com.twilio.messaging.")
+        or data.get("messageSid")
+        or data.get("MessageSid")
+    ):
+        return data
+    return event
+
+
+def _params_from_json_event(event: Any) -> dict[str, Any]:
+    data = _json_event_data(event)
+    params = dict(data)
+    aliases = {
+        "messageSid": "MessageSid",
+        "accountSid": "AccountSid",
+        "messagingServiceSid": "MessagingServiceSid",
+        "from": "From",
+        "to": "To",
+        "body": "Body",
+        "numMedia": "NumMedia",
+        "numSegments": "NumSegments",
+        "timestamp": "Timestamp",
+        "dateCreated": "DateCreated",
+    }
+    for source, target in aliases.items():
+        if source in data and target not in params:
+            params[target] = data[source]
+    if "recipients" in data and "Recipients" not in params:
+        params["Recipients"] = data["recipients"]
+    return params
+
+
+def _params_from_json_body(raw_body: bytes) -> list[dict[str, Any]]:
+    payload = json.loads(raw_body.decode("utf-8") or "{}")
+    events = payload if isinstance(payload, list) else [payload]
+    return [_params_from_json_event(event) for event in events]
+
+
 def handle_webhook(raw_body: bytes, headers: dict[str, str], request_url: str) -> dict[str, Any]:
     if not verify_signature(raw_body, headers, request_url):
         raise TwilioError("Twilio webhook signature verification failed.")
     content_type = headers.get("content-type", "").lower()
     if "application/json" in content_type:
-        payload = json.loads(raw_body.decode("utf-8") or "{}")
-        params = {str(key): str(value) for key, value in payload.items()}
+        params_list = _params_from_json_body(raw_body)
     else:
-        params = _flat_params(_form_params(raw_body))
+        params_list = [_flat_params(_form_params(raw_body))]
 
     conn = connect()
     init_db(conn)
-    message_id = _update_status_callback(conn, params)
-    if message_id is None:
-        message_id = _store_inbound_message(conn, params)
+    message_ids: list[int] = []
+    last_params: dict[str, Any] = {}
+    for params in params_list:
+        if not params:
+            continue
+        last_params = params
+        message_id = _update_status_callback(conn, params)
+        if message_id is None:
+            message_id = _store_inbound_message(conn, params)
+        if message_id is not None:
+            message_ids.append(message_id)
     conn.commit()
-    return {"provider": "twilio", "message_id": message_id, "message_sid": _message_sid(params), "status": _status(params)}
+    return {
+        "provider": "twilio",
+        "message_id": message_ids[-1] if message_ids else None,
+        "message_ids": message_ids,
+        "message_sid": _message_sid(last_params),
+        "status": _status(last_params),
+    }

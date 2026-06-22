@@ -191,6 +191,8 @@ https://switchboard.example/api/twilio/webhook
 
 Use the same URL, or `TWILIO_STATUS_CALLBACK_URL`, for delivery status callbacks.
 
+For inbound Twilio Group MMS, create a Twilio Event Streams webhook sink that points to the same URL and subscribe it to `com.twilio.messaging.inbound-message.received` schema v5 or newer. Switchboard uses the Event Streams `recipients` list to identify the full group. The regular incoming SMS/MMS webhook may not include those other recipients.
+
 Use this endpoint for Twilio voice:
 
 ```text

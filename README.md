@@ -243,7 +243,9 @@ The Twilio webhook endpoint is:
 /api/twilio/webhook
 ```
 
-Use it for incoming Messaging webhooks and, if you want delivery updates, as the status callback URL. Twilio posts form-encoded webhook payloads; when `TWILIO_AUTH_TOKEN` is configured, the app validates `X-Twilio-Signature`. If Apache, Tailscale Serve, or another proxy changes the public URL, prefer preserving the public `Host` and `X-Forwarded-Proto` headers. `TWILIO_WEBHOOK_URL` is a single exact-URL override used by Twilio signature verification, so it is best for simple deployments where all Twilio callbacks validate against the same configured URL.
+Use it for incoming Messaging webhooks and, if you want delivery updates, as the status callback URL. Twilio posts form-encoded webhook payloads for regular Messaging callbacks; when `TWILIO_AUTH_TOKEN` is configured, the app validates `X-Twilio-Signature`. If Apache, Tailscale Serve, or another proxy changes the public URL, prefer preserving the public `Host` and `X-Forwarded-Proto` headers. `TWILIO_WEBHOOK_URL` is a single exact-URL override used by Twilio signature verification, so it is best for simple deployments where all Twilio callbacks validate against the same configured URL.
+
+For inbound Twilio Group MMS, also create a Twilio Event Streams webhook sink that points to the same `/api/twilio/webhook` URL and subscribe it to `com.twilio.messaging.inbound-message.received` schema v5 or newer. Switchboard reads the Event Streams `recipients` array and stores the sender plus the other group recipients as conversation participants. Without that Event Streams payload, Twilio's regular incoming-message webhook may only include the sender and your Twilio number.
 
 ### Call Forwarding and Voicemail
 
