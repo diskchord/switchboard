@@ -1997,6 +1997,25 @@ def cancel_scheduled_message(scheduled_id: int) -> dict:
     }
 
 
+def send_scheduled_message_now(scheduled_id: int) -> dict:
+    conn = connect()
+    init_db(conn)
+    row = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
+    if not row:
+        raise ValueError("Scheduled message not found.")
+    status = str(row["status"] or "")
+    if status != "queued":
+        raise ValueError("Only queued scheduled messages can be sent now.")
+    conversation_id = int(row["conversation_id"]) if row["conversation_id"] else None
+    _send_scheduled_row(conn, row)
+    updated = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
+    return {
+        "conversation_id": conversation_id,
+        "scheduled_message": _scheduled_message_dict(updated),
+        "sent": str(updated["status"] or "") == "sent",
+    }
+
+
 def _send_scheduled_row(conn, row) -> None:
     scheduled = _scheduled_message_dict(row)
     scheduled_id = int(scheduled["id"])
@@ -2840,6 +2859,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(schedule_api_message(self._read_json()))
             elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/cancel", path):
                 self._send_json(cancel_scheduled_message(int(match.group(1))))
+            elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/send-now", path):
+                self._send_json(send_scheduled_message_now(int(match.group(1))))
             elif path == "/api/conversations":
                 self._send_json(create_conversation(self._read_json()))
             elif match := re.fullmatch(r"/api/conversations/(\d+)/archive", path):

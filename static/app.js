@@ -30,6 +30,7 @@ const state = {
   recipientSuggestionIndex: -1,
   recipientSuggestionSeq: 0,
   draftMatchSeq: 0,
+  contactNameParticipantPhone: "",
   columnWidths: { left: 340, right: 330 },
   uploadedMedia: [],
   isUploadingMedia: false,
@@ -46,15 +47,19 @@ const state = {
   reactionLongPressTriggered: false,
   sendPressTimer: null,
   sendHoldTriggered: false,
+  nativeKeyboardInset: 0,
   pullRefresh: null,
   isRefreshingFromPull: false,
   layoutResizeObserver: null,
   pendingPassiveMessageRender: false,
   messageBottomStickToken: 0,
+  messageLayoutToken: 0,
   messageUserScrolledAwayFromBottom: false,
   messageUserScrollIntent: false,
   messageBottomStickStartedAt: 0,
   messageScrollAnchor: null,
+  lastVisualViewportHeight: 0,
+  lastLayoutKeyboardInset: 0,
   audioContext: null,
   audioUnlocked: false,
   latestInboundSoundKey: "",
@@ -414,6 +419,9 @@ const I18N = {
     "schedule.queued_for": "Queued for {time}",
     "schedule.cancel": "Cancel",
     "schedule.cancelled": "Scheduled message canceled.",
+    "schedule.send_now": "Send Now",
+    "schedule.sent_now": "Queued message sent.",
+    "schedule.send_now_failed": "Queued send failed.",
     "schedule.choose_time": "Choose a send time.",
     "schedule.future_time": "Choose a future time.",
     "upload.default": "Upload",
@@ -645,6 +653,9 @@ const I18N = {
     "schedule.queued_for": "En cola para {time}",
     "schedule.cancel": "Cancelar",
     "schedule.cancelled": "Mensaje programado cancelado.",
+    "schedule.send_now": "Enviar ahora",
+    "schedule.sent_now": "Mensaje encolado enviado.",
+    "schedule.send_now_failed": "Falló el envío encolado.",
     "schedule.choose_time": "Elige una hora de envío.",
     "schedule.future_time": "Elige una hora futura.",
     "upload.default": "Subida",
@@ -876,6 +887,9 @@ const I18N = {
     "schedule.queued_for": "En file pour {time}",
     "schedule.cancel": "Annuler",
     "schedule.cancelled": "Message programmé annulé.",
+    "schedule.send_now": "Envoyer maintenant",
+    "schedule.sent_now": "Message en file envoyé.",
+    "schedule.send_now_failed": "Échec de l'envoi en file.",
     "schedule.choose_time": "Choisissez une heure d'envoi.",
     "schedule.future_time": "Choisissez une heure future.",
     "upload.default": "Téléversement",
@@ -999,6 +1013,10 @@ function clamp(value, min, max) {
 
 function isDesktopLayout() {
   return window.matchMedia("(min-width: 761px)").matches;
+}
+
+function isMobileLayout() {
+  return !isDesktopLayout();
 }
 
 function isDetailsOverlayLayout() {
@@ -1160,6 +1178,108 @@ function updateComposerOffset() {
     els.appShell?.style.setProperty("--thread-messages-top", `${messagesTop}px`);
     els.appShell?.style.setProperty("--thread-messages-bottom", `${messagesBottom}px`);
   }
+}
+
+function syncVisualViewportMetrics() {
+  const viewport = window.visualViewport;
+  const height = Math.ceil(viewport?.height || window.innerHeight || document.documentElement.clientHeight || 0);
+  const offsetTop = Math.ceil(viewport?.offsetTop || 0);
+  const viewportKeyboardInset = viewport
+    ? Math.max(0, Math.ceil(window.innerHeight - viewport.height - viewport.offsetTop))
+    : 0;
+  const nativeKeyboardInset = state.nativeKeyboardInset || 0;
+  const keyboardInset = Math.max(viewportKeyboardInset, nativeKeyboardInset);
+  const layoutKeyboardInset = viewportKeyboardInset > 0 ? 0 : nativeKeyboardInset;
+  const layoutChanged =
+    Boolean(state.lastVisualViewportHeight) &&
+    (Math.abs(height - state.lastVisualViewportHeight) > 1 || layoutKeyboardInset !== state.lastLayoutKeyboardInset);
+  const viewportState = layoutChanged
+    ? captureMessageViewportState({ preferStickyBottom: composerHasFocus() })
+    : null;
+  document.documentElement.style.setProperty("--visual-viewport-height", `${height}px`);
+  document.documentElement.style.setProperty("--visual-viewport-offset-top", `${offsetTop}px`);
+  document.documentElement.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
+  document.documentElement.style.setProperty("--layout-keyboard-inset", `${layoutKeyboardInset}px`);
+  document.body.classList.toggle("keyboard-open", keyboardInset > 0);
+  state.lastVisualViewportHeight = height;
+  state.lastLayoutKeyboardInset = layoutKeyboardInset;
+  if (viewportState) {
+    scheduleMessageViewportRestore(viewportState);
+  } else {
+    requestAnimationFrame(updateComposerOffset);
+  }
+}
+
+window.textingSetNativeKeyboardInset = (inset) => {
+  const value = Math.max(0, Math.ceil(Number(inset) || 0));
+  state.nativeKeyboardInset = value;
+  syncVisualViewportMetrics();
+  if (document.activeElement === els.messageText || document.activeElement === els.mediaUrls) {
+    requestAnimationFrame(keepComposerInputVisible);
+  }
+  return true;
+};
+
+function keepComposerInputVisible() {
+  if (!isMobileLayout()) return;
+  const viewportState = captureMessageViewportState({ preferStickyBottom: true });
+  syncVisualViewportMetrics();
+  window.setTimeout(() => {
+    scheduleMessageViewportRestore(viewportState);
+  }, 80);
+}
+
+function composerHasFocus() {
+  return document.activeElement === els.messageText || document.activeElement === els.mediaUrls;
+}
+
+function shouldPreserveMessageViewport() {
+  return (
+    isMobileLayout() &&
+    Boolean(state.currentConversationId) &&
+    Boolean(els.messages) &&
+    document.body.classList.contains("mobile-thread-open")
+  );
+}
+
+function captureMessageViewportState({ preferStickyBottom = false } = {}) {
+  if (!shouldPreserveMessageViewport()) return null;
+  const stickToBottom = isNearMessageBottom() || (preferStickyBottom && !state.messageUserScrolledAwayFromBottom);
+  return {
+    stickToBottom,
+    anchor: stickToBottom ? null : captureMessageScrollAnchor(),
+    scrollTop: els.messages.scrollTop,
+  };
+}
+
+function restoreMessageViewportState(viewportState) {
+  updateComposerOffset();
+  if (!viewportState) return;
+  if (viewportState.stickToBottom) {
+    els.messages.scrollTop = els.messages.scrollHeight;
+    state.messageScrollAnchor = null;
+    return;
+  }
+  if (viewportState.anchor && restoreMessageScrollAnchor(viewportState.anchor, viewportState.scrollTop)) {
+    state.messageScrollAnchor = viewportState.anchor;
+  }
+}
+
+function scheduleMessageViewportRestore(viewportState) {
+  if (!viewportState) {
+    requestAnimationFrame(updateComposerOffset);
+    return;
+  }
+  const token = ++state.messageLayoutToken;
+  const restore = () => {
+    if (token !== state.messageLayoutToken) return;
+    restoreMessageViewportState(viewportState);
+  };
+  requestAnimationFrame(() => {
+    restore();
+    requestAnimationFrame(restore);
+  });
+  [90, 180, 320].forEach((delay) => window.setTimeout(restore, delay));
 }
 
 function isDetailColumnVisible() {
@@ -2642,6 +2762,39 @@ function initials(name) {
   return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "?";
 }
 
+function participantInitials(participant) {
+  const saved = participantSavedName(participant);
+  return initials(saved || participant?.display || phoneDisplay(participant?.phone_number));
+}
+
+function conversationAvatarHtml(conversation, selected = false) {
+  if (selected) return "✓";
+  const title = conversation.title || t("conversation.unknown");
+  const participants = (conversation.participants || []).filter((participant) => participant.role === "participant");
+  if (conversation.kind !== "group" || participants.length < 2) {
+    return escapeHtml(initials(title));
+  }
+  if (participants.length === 2) {
+    return `<span class="avatar-group avatar-group-two" aria-hidden="true">
+      ${participants
+        .slice(0, 2)
+        .map((participant) => `<span class="avatar-part">${escapeHtml(participantInitials(participant))}</span>`)
+        .join("")}
+    </span>`;
+  }
+  const cells = participants.slice(0, 4);
+  while (cells.length < 4) cells.push(null);
+  return `<span class="avatar-group avatar-group-many" aria-hidden="true">
+    ${cells
+      .map((participant) =>
+        participant
+          ? `<span class="avatar-part">${escapeHtml(participantInitials(participant))}</span>`
+          : `<span class="avatar-part avatar-part-empty"></span>`,
+      )
+      .join("")}
+  </span>`;
+}
+
 function phoneDisplay(phone) {
   const digits = String(phone || "").replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("1")) {
@@ -2769,6 +2922,24 @@ function participantDisplay(participant) {
   return `${participant.display} ${phone}`;
 }
 
+function participantTitleDisplay(participant) {
+  return participantSavedName(participant) || phoneDisplay(participant?.phone_number);
+}
+
+function groupTitleHtml(participants) {
+  return participants
+    .map(
+      (participant) => `<button class="participant-name-button thread-title-participant-button" type="button" data-participant-phone="${escapeHtml(
+        participant.phone_number,
+      )}" title="${escapeHtml(t("contact.rename"))}">${escapeHtml(participantTitleDisplay(participant))}</button>`,
+    )
+    .join("");
+}
+
+function updateParticipantRowVisibility() {
+  els.participantLine?.parentElement?.classList.toggle("hidden", Boolean(els.contactNameToggle?.hidden));
+}
+
 function normalizeDraftPhone(raw) {
   const text = String(raw || "").trim();
   const digits = String(raw || "").replace(/\D/g, "");
@@ -2809,6 +2980,18 @@ function currentDirectParticipant(conversation = state.currentConversation) {
   return conversation?.kind === "direct" && participants.length === 1 ? participants[0] : null;
 }
 
+function participantByPhone(phone, conversation = state.currentConversation) {
+  const normalized = String(phone || "");
+  if (!normalized) return null;
+  return (conversation?.participants || []).find(
+    (participant) => participant.role === "participant" && participant.phone_number === normalized,
+  ) || null;
+}
+
+function currentContactNameParticipant(conversation = state.currentConversation) {
+  return participantByPhone(state.contactNameParticipantPhone, conversation) || currentDirectParticipant(conversation);
+}
+
 function participantSavedName(participant) {
   if (!participant) return "";
   const phone = phoneDisplay(participant.phone_number);
@@ -2824,6 +3007,7 @@ function isContactNameModalOpen() {
 function closeContactNameModal({ restoreFocus = false } = {}) {
   if (!els.contactNameModal) return;
   els.contactNameModal.classList.add("hidden");
+  state.contactNameParticipantPhone = "";
   if (restoreFocus) {
     els.threadTitle?.focus();
   }
@@ -2831,6 +3015,7 @@ function closeContactNameModal({ restoreFocus = false } = {}) {
 
 function openContactNameModal(participant) {
   if (!participant || !els.contactNameModal || !els.contactNameModalInput) return;
+  state.contactNameParticipantPhone = participant.phone_number;
   els.contactNameForm.classList.add("hidden");
   els.contactNameModalInput.value = participantSavedName(participant);
   els.contactNameModal.classList.remove("hidden");
@@ -2859,28 +3044,29 @@ function conversationIsRead(conversation) {
   return false;
 }
 
-function setContactNameEditor(visible) {
-  const participant = currentDirectParticipant();
+function setContactNameEditor(visible, participant = currentDirectParticipant()) {
   if (!participant || !visible) {
     els.contactNameForm.classList.add("hidden");
     closeContactNameModal();
     return;
   }
-  if (!isDesktopLayout()) {
+  state.contactNameParticipantPhone = participant.phone_number;
+  if (!isDesktopLayout() || state.currentConversation?.kind === "group") {
     openContactNameModal(participant);
     return;
   }
   closeContactNameModal();
+  state.contactNameParticipantPhone = participant.phone_number;
   els.contactNameInput.value = participantSavedName(participant);
   els.contactNameForm.classList.remove("hidden");
   els.contactNameInput.focus();
   els.contactNameInput.select();
 }
 
-function openContactRename() {
-  const participant = currentDirectParticipant();
+function openContactRename(participant = currentDirectParticipant()) {
+  if (!participant?.phone_number) participant = currentDirectParticipant();
   if (!participant) return;
-  setContactNameEditor(true);
+  setContactNameEditor(true, participant);
 }
 
 function activeIdentity() {
@@ -3196,7 +3382,7 @@ function renderConversations() {
       return `
         <button class="conversation-item ${active} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}">
           <span class="avatar conversation-selector" role="checkbox" aria-checked="${selected ? "true" : "false"}" title="${escapeHtml(t("selection.actions"))}">
-            ${selected ? "✓" : escapeHtml(initials(title))}
+            ${conversationAvatarHtml(conversation, selected)}
           </span>
           <div class="conversation-copy">
             <div class="conversation-top">
@@ -3602,11 +3788,13 @@ function renderThreadHeader() {
     els.threadKind.textContent = t("thread.new");
     els.threadTitle.textContent = t("conversation.new");
     els.threadTitle.classList.remove("thread-title-clickable");
+    els.threadTitle.classList.remove("thread-title-group");
     els.threadTitle.removeAttribute("role");
     els.threadTitle.removeAttribute("tabindex");
     els.threadTitle.removeAttribute("title");
-    els.participantLine.textContent = state.recipientDraft.map((phone) => draftRecipientDisplay(phone, { includePhone: true })).join(", ");
+    els.participantLine.textContent = "";
     els.contactNameToggle.hidden = true;
+    updateParticipantRowVisibility();
     setContactNameEditor(false);
     els.recipientBar.classList.remove("hidden");
     els.threadPane.classList.add("recipients-visible");
@@ -3619,13 +3807,16 @@ function renderThreadHeader() {
   }
   const conversation = state.currentConversation;
   const archived = Boolean(conversation.is_archived);
+  const participants = (conversation.participants || []).filter((p) => p.role === "participant");
   els.threadKind.textContent = conversation.kind === "group" ? t("thread.group") : t("thread.direct");
-  els.threadTitle.textContent = conversation.title || t("thread.conversation");
-  els.participantLine.textContent = (conversation.participants || [])
-    .filter((p) => p.role === "participant")
-    .map(participantDisplay)
-    .join(", ");
+  if (conversation.kind === "group" && participants.length) {
+    els.threadTitle.innerHTML = groupTitleHtml(participants);
+  } else {
+    els.threadTitle.textContent = conversation.title || t("thread.conversation");
+  }
+  els.participantLine.textContent = "";
   const participant = currentDirectParticipant(conversation);
+  els.threadTitle.classList.toggle("thread-title-group", conversation.kind === "group" && participants.length > 0);
   els.threadTitle.classList.toggle("thread-title-clickable", Boolean(participant));
   if (participant) {
     els.threadTitle.setAttribute("role", "button");
@@ -3638,7 +3829,10 @@ function renderThreadHeader() {
   }
   els.contactNameToggle.hidden = !participant || Boolean(participantSavedName(participant));
   els.contactNameToggle.textContent = t("contact.name");
-  if (!participant) setContactNameEditor(false);
+  updateParticipantRowVisibility();
+  if (!participant) {
+    els.contactNameForm.classList.add("hidden");
+  }
   els.recipientBar.classList.add("hidden");
   els.threadPane.classList.remove("recipients-visible");
   els.dealtButton.disabled = false;
@@ -4037,6 +4231,13 @@ function renderMessages(messages, scrollMode = "bottom") {
       const cancelScheduledAction = isQueuedScheduledMessage
         ? `<button class="message-inline-action" type="button" data-cancel-scheduled-id="${escapeHtml(scheduledMessageId)}">${escapeHtml(t("schedule.cancel"))}</button>`
         : "";
+      const sendScheduledNowAction = isQueuedScheduledMessage
+        ? `<button class="message-inline-action primary-inline-action" type="button" data-send-scheduled-id="${escapeHtml(scheduledMessageId)}">${escapeHtml(t("schedule.send_now"))}</button>`
+        : "";
+      const scheduledActions = sendScheduledNowAction || cancelScheduledAction
+        ? `<span class="message-inline-actions">${sendScheduledNowAction}${cancelScheduledAction}</span>`
+        : "";
+      const hasAudioAttachment = messageAttachments.some((attachment) => isAudioAttachment(attachment, mediaUrl(attachment)));
       const bubbleStyle =
         message.direction === "outbound" && message.identity_color
           ? ` style="--message-out:${escapeHtml(message.identity_color)}"`
@@ -4052,7 +4253,7 @@ function renderMessages(messages, scrollMode = "bottom") {
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind} ${canReact ? "reactable" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
+        <article class="message-row ${message.direction} ${statusKind} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
               ${voicemailLabel}
@@ -4065,7 +4266,7 @@ function renderMessages(messages, scrollMode = "bottom") {
                 <span>${escapeHtml(message.from_display || phoneDisplay(message.from_number))}</span>
                 <time>${escapeHtml(formatTime(message.occurred_at))}</time>
                 <span class="message-status ${escapeHtml(statusKind)}" title="${escapeHtml(statusDetail)}">${escapeHtml(statusLabel)}</span>
-                ${cancelScheduledAction}
+                ${scheduledActions}
               </div>
             </div>
             ${reactions}
@@ -4870,13 +5071,16 @@ function bindColumnResizers() {
   window.addEventListener("pointerup", endDrag);
   window.addEventListener("pointercancel", endDrag);
   window.addEventListener("resize", () => {
+    const viewportState = captureMessageViewportState({ preferStickyBottom: composerHasFocus() });
     syncDetailsLayout();
     applyColumnWidths();
-    updateComposerOffset();
+    scheduleMessageViewportRestore(viewportState);
   });
-  window.visualViewport?.addEventListener("resize", updateComposerOffset);
   if (window.ResizeObserver) {
-    state.layoutResizeObserver = new ResizeObserver(() => updateComposerOffset());
+    state.layoutResizeObserver = new ResizeObserver(() => {
+      const viewportState = captureMessageViewportState({ preferStickyBottom: composerHasFocus() });
+      scheduleMessageViewportRestore(viewportState);
+    });
     [els.threadHeader, els.messages, els.composer].filter(Boolean).forEach((element) => {
       state.layoutResizeObserver.observe(element);
     });
@@ -5530,6 +5734,35 @@ async function cancelScheduledMessage(scheduledId, button) {
   }
 }
 
+async function sendScheduledMessageNow(scheduledId, button) {
+  const id = Number(scheduledId);
+  if (!id) return;
+  if (button) button.disabled = true;
+  try {
+    const payload = await api(`/api/messages/schedule/${encodeURIComponent(id)}/send-now`, {
+      method: "POST",
+      body: "{}",
+    });
+    await loadConversations({
+      preserveScroll: true,
+      limit: Math.max(80, state.conversations.length || 0),
+    });
+    const conversationId = Number(payload.conversation_id || state.currentConversationId || 0);
+    if (conversationId && state.currentConversationId === conversationId) {
+      await refreshCurrentConversationStatus();
+    }
+    if (payload.sent) {
+      playMessageSound("send");
+      toast(t("schedule.sent_now"));
+    } else {
+      toast(payload.scheduled_message?.failure || t("schedule.send_now_failed"));
+    }
+  } catch (error) {
+    toast(error.message);
+    if (button) button.disabled = false;
+  }
+}
+
 function clearSendPressTimer() {
   if (state.sendPressTimer) {
     clearTimeout(state.sendPressTimer);
@@ -5634,7 +5867,7 @@ async function searchContacts() {
 }
 
 async function saveCurrentContactName() {
-  const participant = currentDirectParticipant();
+  const participant = currentContactNameParticipant();
   const form = isContactNameModalOpen() ? els.contactNameModalForm : els.contactNameForm;
   const input = isContactNameModalOpen() ? els.contactNameModalInput : els.contactNameInput;
   const displayName = input.value.trim();
@@ -5815,14 +6048,28 @@ function bindEvents() {
   });
   els.newConversationButton.addEventListener("click", startNewConversation);
   els.mobilePanelButton?.addEventListener("click", toggleDetailsPanel);
-  els.threadTitle.addEventListener("click", openContactRename);
+  els.threadTitle.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-participant-phone]");
+    if (button) {
+      const participant = participantByPhone(button.dataset.participantPhone);
+      if (participant) openContactRename(participant);
+      return;
+    }
+    openContactRename();
+  });
   els.threadTitle.addEventListener("keydown", (event) => {
     if (!["Enter", " "].includes(event.key)) return;
     if (!currentDirectParticipant()) return;
     event.preventDefault();
     openContactRename();
   });
-  els.contactNameToggle.addEventListener("click", openContactRename);
+  els.participantLine.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-participant-phone]");
+    if (!button) return;
+    const participant = participantByPhone(button.dataset.participantPhone);
+    if (participant) openContactRename(participant);
+  });
+  els.contactNameToggle.addEventListener("click", () => openContactRename());
   els.contactNameCancel.addEventListener("click", () => setContactNameEditor(false));
   els.contactNameForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -5932,9 +6179,15 @@ function bindEvents() {
   });
   els.messageText.addEventListener("input", () => {
     updateMessageCounter();
+    keepComposerInputVisible();
     showComposerError("");
   });
-  els.mediaUrls.addEventListener("input", () => showComposerError(""));
+  els.messageText.addEventListener("focus", keepComposerInputVisible);
+  els.mediaUrls.addEventListener("input", () => {
+    keepComposerInputVisible();
+    showComposerError("");
+  });
+  els.mediaUrls.addEventListener("focus", keepComposerInputVisible);
   els.mediaFiles.addEventListener("change", () => uploadSelectedMedia(els.mediaFiles.files));
   els.uploadList.addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-upload]");
@@ -5963,6 +6216,12 @@ function bindEvents() {
     if (cancelScheduledButton) {
       event.preventDefault();
       cancelScheduledMessage(cancelScheduledButton.dataset.cancelScheduledId, cancelScheduledButton).catch((error) => toast(error.message));
+      return;
+    }
+    const sendScheduledButton = event.target.closest("[data-send-scheduled-id]");
+    if (sendScheduledButton) {
+      event.preventDefault();
+      sendScheduledMessageNow(sendScheduledButton.dataset.sendScheduledId, sendScheduledButton).catch((error) => toast(error.message));
       return;
     }
     const imageLink = event.target.closest("[data-lightbox-src]");
@@ -6035,6 +6294,10 @@ function bindEvents() {
     event.returnValue = "";
   });
   window.addEventListener("popstate", handleNavigationPop);
+  window.addEventListener("resize", syncVisualViewportMetrics);
+  window.addEventListener("orientationchange", () => window.setTimeout(syncVisualViewportMetrics, 120));
+  window.visualViewport?.addEventListener("resize", syncVisualViewportMetrics);
+  window.visualViewport?.addEventListener("scroll", syncVisualViewportMetrics);
   els.toggleDetailsButton.addEventListener("click", toggleDetailsPanel);
   els.mobileDetailCloseButton?.addEventListener("click", () => {
     setDetailsOverlayOpen(false, { restoreFocus: true });
@@ -6101,6 +6364,7 @@ async function init() {
   const initialConversationId = initialConversationIdFromLocation();
   replaceNavigationState("list");
   bindEvents();
+  syncVisualViewportMetrics();
   updateComposerOffset();
   updateMessageCounter();
   updateConversationSearchClear();

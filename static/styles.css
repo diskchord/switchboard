@@ -39,6 +39,8 @@
   --message-shadow: 0 4px 14px rgba(17, 24, 39, 0.08);
   --composer-shadow: 0 -8px 22px rgba(17, 24, 39, 0.08);
   --shadow: 0 10px 28px rgba(17, 24, 39, 0.12);
+  --mobile-screen-top-space: 36px;
+  --layout-keyboard-inset: 0px;
 }
 
 :root[data-theme="dark"] {
@@ -538,6 +540,68 @@ select:focus {
   background: var(--avatar-bg);
   color: var(--avatar-ink);
   font-weight: 800;
+  overflow: hidden;
+}
+
+.avatar-group {
+  display: block;
+  height: 100%;
+  position: relative;
+  width: 100%;
+}
+
+.avatar-part {
+  align-items: center;
+  background: color-mix(in srgb, var(--avatar-bg) 84%, var(--panel));
+  color: var(--avatar-ink);
+  display: flex;
+  font-size: 9px;
+  font-weight: 850;
+  justify-content: center;
+  letter-spacing: 0;
+  line-height: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.avatar-group-two .avatar-part {
+  bottom: 0;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.avatar-group-two .avatar-part:first-child {
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+  justify-content: flex-start;
+  padding: 0 0 14px 6px;
+}
+
+.avatar-group-two .avatar-part:nth-child(2) {
+  background: color-mix(in srgb, var(--avatar-bg) 68%, var(--accent));
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  justify-content: flex-end;
+  padding: 14px 6px 0 0;
+}
+
+.avatar-group-many {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.avatar-group-many .avatar-part:nth-child(2),
+.avatar-group-many .avatar-part:nth-child(3) {
+  background: color-mix(in srgb, var(--avatar-bg) 74%, var(--accent));
+}
+
+.avatar-group-many .avatar-part:nth-child(4) {
+  background: color-mix(in srgb, var(--avatar-bg) 62%, var(--accent-2));
+}
+
+.avatar-part-empty {
+  opacity: 0.42;
 }
 
 .conversation-selector {
@@ -671,6 +735,10 @@ select:focus {
   min-width: 0;
 }
 
+.participant-row.hidden {
+  display: none;
+}
+
 .participant-line {
   color: var(--muted);
   flex: 0 1 auto;
@@ -679,6 +747,42 @@ select:focus {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.participant-name-button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-height: 24px;
+  padding: 1px 3px;
+}
+
+.participant-name-button:not(:last-child)::after {
+  content: ",";
+}
+
+.participant-name-button:hover,
+.participant-name-button:focus-visible {
+  color: var(--accent);
+  outline: 0;
+  text-decoration: underline;
+}
+
+.thread-title-group {
+  color: var(--ink);
+}
+
+.thread-title-participant-button {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  min-height: 0;
+  padding: 0 2px;
+  vertical-align: baseline;
 }
 
 .name-contact-button {
@@ -881,6 +985,15 @@ select:focus {
   align-items: flex-end;
 }
 
+.message-row.audio-message .message-stack {
+  width: min(680px, 76%);
+}
+
+.message-row.audio-message .message-bubble {
+  box-sizing: border-box;
+  width: 100%;
+}
+
 .message-row.failed .message-bubble {
   border-color: var(--danger-line);
   box-shadow: 0 0 0 1px rgba(190, 18, 60, 0.18), 0 8px 22px rgba(190, 18, 60, 0.14);
@@ -955,6 +1068,24 @@ select:focus {
 .message-inline-action:disabled {
   cursor: wait;
   opacity: 0.58;
+}
+
+.message-inline-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.primary-inline-action {
+  background: var(--accent-3);
+  border-color: var(--accent-3);
+  color: white;
+}
+
+.outbound .primary-inline-action {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(255, 255, 255, 0.96);
+  color: var(--accent-3);
 }
 
 .standalone-reaction-icon {
@@ -1124,6 +1255,7 @@ select:focus {
 .audio-attachment-grid {
   align-content: start;
   grid-auto-rows: max-content;
+  width: 100%;
 }
 
 .image-attachment,
@@ -1150,7 +1282,7 @@ select:focus {
   height: 40px;
   max-width: 100%;
   min-height: 0;
-  width: min(100%, 560px);
+  width: 100%;
 }
 
 .image-attachment {
@@ -2523,11 +2655,11 @@ select:focus {
     border: 0;
     display: grid;
     grid-template-rows: auto auto minmax(0, 1fr);
-    height: 100dvh;
+    height: var(--visual-viewport-height, 100dvh);
     inset: 0;
-    min-height: 100dvh;
+    min-height: var(--visual-viewport-height, 100dvh);
     overflow: hidden;
-    padding: max(env(safe-area-inset-top), 16px) 18px max(env(safe-area-inset-bottom), 18px);
+    padding: max(env(safe-area-inset-top), var(--mobile-screen-top-space)) 18px max(env(safe-area-inset-bottom), 18px);
     position: fixed;
     width: 100vw;
     z-index: 30;
@@ -2561,7 +2693,7 @@ select:focus {
     display: grid;
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr);
-    height: 100dvh;
+    height: calc(var(--visual-viewport-height, 100dvh) - var(--layout-keyboard-inset, 0px));
     overflow: hidden;
   }
 
@@ -2646,9 +2778,9 @@ select:focus {
 
   .thread-pane {
     grid-area: 1 / 1;
-    grid-template-rows: auto minmax(0, 1fr);
-    height: 100%;
-    max-height: 100%;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: calc(var(--visual-viewport-height, 100%) - var(--layout-keyboard-inset, 0px));
+    max-height: calc(var(--visual-viewport-height, 100%) - var(--layout-keyboard-inset, 0px));
     min-height: 0;
     opacity: 0;
     position: relative;
@@ -2669,7 +2801,7 @@ select:focus {
   }
 
   .thread-pane.recipients-visible {
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
   }
 
   .thread-header {
@@ -2678,7 +2810,7 @@ select:focus {
     grid-template-columns: 42px minmax(0, 1fr) auto;
     gap: 10px;
     min-height: 74px;
-    padding: max(env(safe-area-inset-top), 22px) 14px 10px;
+    padding: max(env(safe-area-inset-top), var(--mobile-screen-top-space)) 14px 10px;
   }
 
   .thread-pane.recipients-visible .thread-header {
@@ -2695,9 +2827,20 @@ select:focus {
     min-width: 0;
   }
 
-  #threadKind,
-  .participant-row {
+  #threadKind {
     display: none;
+  }
+
+  .participant-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .participant-line {
+    font-size: 12px;
+    overflow-x: auto;
+    text-overflow: clip;
   }
 
   .contact-name-form {
@@ -2757,12 +2900,16 @@ select:focus {
   }
 
   .messages {
-    padding: 18px 14px calc(var(--mobile-composer-height) + 20px);
-    scroll-padding-bottom: calc(var(--mobile-composer-height) + 20px);
+    padding: 18px 14px 20px;
+    scroll-padding-bottom: 20px;
   }
 
   .message-stack {
     max-width: 88%;
+  }
+
+  .message-row.audio-message .message-stack {
+    width: 88%;
   }
 
   .message-bubble {
@@ -2775,11 +2922,8 @@ select:focus {
   }
 
   .composer {
-    bottom: 0;
-    left: 0;
     padding: 10px 14px max(env(safe-area-inset-bottom), 14px);
-    position: fixed;
-    right: 0;
+    position: relative;
     z-index: 6;
   }
 

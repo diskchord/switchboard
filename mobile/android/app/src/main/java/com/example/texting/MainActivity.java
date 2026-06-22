@@ -3,6 +3,7 @@ package com.example.texting;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -19,6 +20,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -26,6 +28,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.webkit.HttpAuthHandler;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -54,11 +58,14 @@ public class MainActivity extends Activity {
     private LinearLayout connectionActions;
     private volatile boolean nativePullRefreshEnabled = false;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
+    private static final int FILE_CHOOSER_REQUEST = 41;
     private static final String PREFS_NAME = "switchboard";
     private static final String PREF_SERVER_URL = "server_url";
-    private static final String APP_ASSET_VERSION = "9b438619";
+    private static final String APP_ASSET_VERSION = "d2a4e6b0";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
+    private int lastKeyboardInsetCssPx = -1;
+    private ValueCallback<Uri[]> fileChooserCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -124,10 +131,34 @@ public class MainActivity extends Activity {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setAllowContentAccess(true);
+        settings.setAllowFileAccess(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setMediaPlaybackRequiresUserGesture(false);
         webView.clearCache(true);
         webView.addJavascriptInterface(new AndroidBridge(), "SwitchboardAndroid");
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(
+                WebView view,
+                ValueCallback<Uri[]> filePathCallback,
+                FileChooserParams fileChooserParams
+            ) {
+                if (fileChooserCallback != null) {
+                    fileChooserCallback.onReceiveValue(null);
+                }
+                fileChooserCallback = filePathCallback;
+                Intent intent = fileChooserParams.createIntent();
+                try {
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+                    return true;
+                } catch (ActivityNotFoundException error) {
+                    fileChooserCallback = null;
+                    filePathCallback.onReceiveValue(null);
+                    return false;
+                }
+            }
+        });
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -148,6 +179,7 @@ public class MainActivity extends Activity {
                 }
                 if (!mainFrameLoadFailed) {
                     hideConnectionState();
+                    sendKeyboardInsetToWeb(Math.max(0, lastKeyboardInsetCssPx));
                 }
             }
 
@@ -182,6 +214,7 @@ public class MainActivity extends Activity {
 
     private void configureSystemBars() {
         Window window = getWindow();
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         window.setStatusBarColor(SHELL_BACKGROUND);
         window.setNavigationBarColor(SHELL_BACKGROUND);
         int flags = window.getDecorView().getSystemUiVisibility();
@@ -304,12 +337,40 @@ public class MainActivity extends Activity {
                 right = insets.getSystemWindowInsetRight();
                 bottom = insets.getSystemWindowInsetBottom();
             }
+            int keyboardInset = 0;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                keyboardInset = Math.max(0, insets.getInsets(WindowInsets.Type.ime()).bottom);
+            }
             int contentTopPadding = dp(CONTENT_TOP_MARGIN_DP);
             view.setPadding(left, contentTopPadding, right, bottom);
             updateRefreshIndicatorOffset(top + contentTopPadding);
-            return insets.consumeSystemWindowInsets();
+            notifyKeyboardInset(keyboardInset);
+            return insets;
         });
         swipeRefreshLayout.requestApplyInsets();
+    }
+
+    private void notifyKeyboardInset(int keyboardInsetPx) {
+        int cssPx = Math.max(0, Math.round(keyboardInsetPx / getResources().getDisplayMetrics().density));
+        if (cssPx == lastKeyboardInsetCssPx) {
+            return;
+        }
+        lastKeyboardInsetCssPx = cssPx;
+        sendKeyboardInsetToWeb(cssPx);
+    }
+
+    private void sendKeyboardInsetToWeb(int cssPx) {
+        if (webView == null) {
+            return;
+        }
+        webView.post(() -> {
+            if (webView == null) {
+                return;
+            }
+            String script = "window.textingSetNativeKeyboardInset"
+                + "&&window.textingSetNativeKeyboardInset(" + cssPx + ");";
+            webView.evaluateJavascript(script, null);
+        });
     }
 
     private void updateRefreshIndicatorOffset(int topInset) {
@@ -383,6 +444,19 @@ public class MainActivity extends Activity {
         public void setPullRefreshEnabled(boolean enabled) {
             runOnUiThread(() -> setNativePullRefreshEnabled(enabled));
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            ValueCallback<Uri[]> callback = fileChooserCallback;
+            fileChooserCallback = null;
+            if (callback != null) {
+                callback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
     }
 
     @Override

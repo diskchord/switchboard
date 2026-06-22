@@ -182,6 +182,8 @@ Important settings:
 - `GOOGLE_TOKEN_URI`, `GOOGLE_PEOPLE_API_BASE`: Google OAuth and People API base URLs; normally leave the defaults.
 - `GOOGLE_CONTACTS_ACCESS_TOKEN`: optional short-lived Google token for testing.
 
+For smaller copyable starting points, see the documented samples in `docs/env/`: core server, Telnyx, Twilio, Rev.ai, and contact sync.
+
 The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values where a setting has an environment equivalent; settings without an env equivalent are still stored in SQLite. Settings covers behavior, language, hotkeys, notifications, sounds, uploads, messaging provider selection, calls, transcription, contacts, Telnyx, Twilio, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. Settings also includes a protected database download button; Switchboard creates a consistent SQLite backup for the logged-in user instead of exposing the data directory.
 
 ### Bring Your Own Numbers

@@ -136,6 +136,8 @@ TEXTING_PROVIDER_BY_NUMBER={"+15551230001":"telnyx","+15551230002":"twilio"}
 
 Restart the server after adding numbers. The Numbers panel in the UI lets you rename, recolor, activate/deactivate, and configure call behavior for each sender identity.
 
+For copyable `.env` starting points, see `docs/env/`. It includes separate examples for core server settings, Telnyx, Twilio, Rev.ai transcription, and contact sync.
+
 ## 6. Connect Telnyx
 
 Set credentials:
