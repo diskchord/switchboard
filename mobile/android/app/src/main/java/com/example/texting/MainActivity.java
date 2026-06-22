@@ -41,6 +41,8 @@ public class MainActivity extends Activity {
     private static final int TEXT_PRIMARY = Color.rgb(242, 246, 251);
     private static final int TEXT_MUTED = Color.rgb(169, 180, 194);
     private static final int ACCENT = Color.rgb(88, 166, 255);
+    private static final int REFRESH_START_MARGIN_DP = 8;
+    private static final int REFRESH_END_OFFSET_DP = 64;
     private WebView webView;
     private FrameLayout rootLayout;
     private SwipeRefreshLayout swipeRefreshLayout;
@@ -72,6 +74,7 @@ public class MainActivity extends Activity {
         swipeRefreshLayout.setBackgroundColor(SHELL_BACKGROUND);
         swipeRefreshLayout.setColorSchemeColors(0xFF127F73, 0xFF2563EB);
         swipeRefreshLayout.setEnabled(false);
+        updateRefreshIndicatorOffset(0);
 
         webView = new WebView(this);
         webView.setBackgroundColor(SHELL_BACKGROUND);
@@ -301,9 +304,19 @@ public class MainActivity extends Activity {
                 bottom = insets.getSystemWindowInsetBottom();
             }
             view.setPadding(left, top, right, bottom);
+            updateRefreshIndicatorOffset(top);
             return insets.consumeSystemWindowInsets();
         });
         swipeRefreshLayout.requestApplyInsets();
+    }
+
+    private void updateRefreshIndicatorOffset(int topInset) {
+        if (swipeRefreshLayout == null) {
+            return;
+        }
+        int start = Math.max(0, topInset + dp(REFRESH_START_MARGIN_DP));
+        int end = Math.max(start + dp(40), topInset + dp(REFRESH_END_OFFSET_DP));
+        swipeRefreshLayout.setProgressViewOffset(false, start, end);
     }
 
     private void setNativePullRefreshEnabled(boolean enabled) {
