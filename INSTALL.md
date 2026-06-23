@@ -166,7 +166,7 @@ https://switchboard.example/api/telnyx/voice/recording
 https://switchboard.example/api/telnyx/voice/transcription
 ```
 
-Set `TELNYX_PUBLIC_KEY` so Switchboard can verify Telnyx webhook signatures. Leave it blank only for trusted local testing.
+Set `TELNYX_PUBLIC_KEY` so Switchboard can verify Telnyx webhook signatures. Leave it blank only for trusted local testing. Set `TELNYX_FAX_CONNECTION_ID` to the Programmable Fax Application connection ID if you want outbound fax from the composer.
 
 Inbound fax PDFs are downloaded to `TEXTING_MEDIA_DIR`. Install `poppler-utils` on non-Docker hosts if you want fax page PNG previews:
 

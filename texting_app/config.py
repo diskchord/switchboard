@@ -156,6 +156,7 @@ IDENTITY_COLORS = [
 TELNYX_API_KEY = os.environ.get("TELNYX_API_KEY", "")
 TELNYX_PUBLIC_KEY = os.environ.get("TELNYX_PUBLIC_KEY", "")
 TELNYX_API_BASE = os.environ.get("TELNYX_API_BASE", "https://api.telnyx.com/v2")
+TELNYX_FAX_CONNECTION_ID = os.environ.get("TELNYX_FAX_CONNECTION_ID", "")
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")

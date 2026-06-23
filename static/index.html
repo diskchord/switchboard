@@ -16,7 +16,7 @@
         document.documentElement.dataset.theme = saved || (prefersDark ? "dark" : "light");
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=d2a4e6b0" />
+    <link rel="stylesheet" href="/static/styles.css?v=c4e8b27a" />
   </head>
   <body>
     <div class="app-shell">
@@ -124,7 +124,7 @@
             <div class="composer-text-wrap">
               <textarea id="messageText" placeholder="Message" rows="2" data-i18n-placeholder="composer.message"></textarea>
               <input id="mediaUrls" type="hidden" autocomplete="off" />
-              <label class="icon-button upload-button" for="mediaFiles" title="Upload media" aria-label="Upload media" data-i18n-title="composer.upload" data-i18n-aria-label="composer.upload">📎</label>
+              <label class="icon-button upload-button" id="uploadButton" for="mediaFiles" title="Upload media" aria-label="Upload media" data-i18n-title="composer.upload" data-i18n-aria-label="composer.upload">📎</label>
               <input id="mediaFiles" class="hidden-file-input" type="file" accept="image/*,video/*,audio/*,application/pdf" multiple />
               <div class="composer-meta">
                 <span id="messageCounter">0/160</span>
@@ -228,6 +228,33 @@
         </footer>
       </form>
     </div>
+    <div class="fax-modal hidden" id="faxModal" role="dialog" aria-modal="true" aria-label="Send fax" tabindex="-1" data-i18n-aria-label="fax.title">
+      <form class="fax-card" id="faxForm">
+        <header class="fax-header">
+          <h2 data-i18n="fax.title">Send fax</h2>
+          <button class="icon-button" id="faxClose" type="button" aria-label="Cancel" data-i18n-aria-label="common.cancel">×</button>
+        </header>
+        <div class="fax-body">
+          <label for="faxToNumber">
+            <span data-i18n="fax.to">To</span>
+            <input id="faxToNumber" type="tel" autocomplete="off" required />
+          </label>
+          <label for="faxFromNumber">
+            <span data-i18n="composer.from">From</span>
+            <select id="faxFromNumber" required></select>
+          </label>
+          <label class="fax-file-control" for="faxFile">
+            <span data-i18n="fax.document">Document</span>
+            <strong id="faxFilename" data-i18n="fax.choose_document">Choose PDF or image</strong>
+          </label>
+          <input id="faxFile" class="hidden-file-input" type="file" accept="application/pdf,image/jpeg,image/png,image/tiff" />
+        </div>
+        <footer class="fax-footer">
+          <button class="small-button" id="faxCancel" type="button" data-i18n="common.cancel">Cancel</button>
+          <button class="small-button done-button" id="faxSend" type="submit" data-i18n="fax.send">Send Fax</button>
+        </footer>
+      </form>
+    </div>
     <div class="settings-modal hidden" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1" data-i18n-aria-label="settings.title">
       <form class="settings-card" id="settingsForm">
         <header class="settings-header">
@@ -276,9 +303,8 @@
       <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous image" data-i18n-aria-label="lightbox.previous">‹</button>
       <img id="lightboxImage" alt="" />
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
-      <div class="lightbox-caption" id="lightboxCaption"></div>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=d2a4e6b0" type="module"></script>
+    <script src="/static/app.js?v=c4e8b27a" type="module"></script>
   </body>
 </html>

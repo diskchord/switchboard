@@ -325,6 +325,81 @@ def send_message(
     return {"message_id": message_id, "telnyx": response}
 
 
+def send_fax(
+    *,
+    from_number: str,
+    to_number: str,
+    media_url: str,
+    filename: str = "",
+    conversation_id: int | None = None,
+) -> dict[str, Any]:
+    api_key = app_settings.get_value("telnyx.api_key", config.TELNYX_API_KEY)
+    api_base = app_settings.get_value("telnyx.api_base", config.TELNYX_API_BASE).rstrip("/")
+    connection_id = app_settings.get_value("telnyx.fax_connection_id", config.TELNYX_FAX_CONNECTION_ID).strip()
+    if not api_key:
+        raise TelnyxError("TELNYX_API_KEY is not configured.")
+    if not connection_id:
+        raise TelnyxError("TELNYX_FAX_CONNECTION_ID is not configured.")
+    from_number = normalize_phone(from_number)
+    to_number = normalize_phone(to_number)
+    media_url = str(media_url or "").strip()
+    if not from_number or not to_number:
+        raise TelnyxError("A sender and fax recipient are required.")
+    if not media_url:
+        raise TelnyxError("A fax document URL is required.")
+
+    response = _json_request(
+        f"{api_base}/faxes",
+        {
+            "connection_id": connection_id,
+            "from": from_number,
+            "to": to_number,
+            "media_url": media_url,
+            "store_media": True,
+            "store_preview": True,
+        },
+        api_key,
+    )
+
+    conn = connect()
+    init_db(conn)
+    known_self = self_numbers(conn)
+    remote_numbers = [] if to_number in known_self else [to_number]
+    self_participants = [from_number] if from_number in known_self or from_number else []
+    conversation_id = conversation_id or ensure_conversation(conn, remote_numbers, self_participants)
+    data = response.get("data", response)
+    fax_id = str(data.get("id") or "")
+    telnyx_id = f"fax:{fax_id}" if fax_id else ""
+    status = str(data.get("status") or "queued")
+    display_name = filename or Path(urlparse(media_url).path).name or "fax"
+    message_id = upsert_message(
+        conn,
+        conversation_id=conversation_id,
+        direction="outbound",
+        from_number=from_number,
+        to_numbers=[to_number],
+        cc_numbers=[],
+        text=f"Fax queued: {display_name}",
+        occurred_at=normalize_iso_timestamp(data.get("created_at") or data.get("updated_at")),
+        message_type="Fax",
+        status=status,
+        source="telnyx-fax",
+        telnyx_id=telnyx_id or None,
+        raw_json=response,
+    )
+    add_attachment(
+        conn,
+        message_id,
+        remote_url=media_url,
+        content_type="application/pdf" if display_name.lower().endswith(".pdf") else "",
+        filename=display_name,
+        source="telnyx-fax",
+    )
+    add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
+    conn.commit()
+    return {"message_id": message_id, "conversation_id": conversation_id, "telnyx": response}
+
+
 def verify_signature(raw_body: bytes, signature: str | None, timestamp: str | None) -> bool:
     public_key_value = app_settings.get_value("telnyx.public_key", config.TELNYX_PUBLIC_KEY)
     if not public_key_value:
@@ -436,6 +511,22 @@ def _fax_message_text(payload: dict[str, Any], event_type: str) -> str:
     return "Fax received"
 
 
+def _fax_status(payload: dict[str, Any], event_type: str) -> str:
+    raw_status = str(payload.get("status") or "").strip().lower().replace(".", "_")
+    if _fax_failed(payload, event_type):
+        return "failed"
+    event_status = str(event_type or "").removeprefix("fax.").replace(".", "_")
+    if event_status == "delivered":
+        return "delivered"
+    if event_status == "queued":
+        return "queued"
+    if event_status == "sending_started":
+        return "sending"
+    if raw_status:
+        return raw_status
+    return event_status or "queued"
+
+
 def _looks_like_fax_payload(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -530,13 +621,29 @@ def _store_fax_event(conn, event: dict[str, Any], raw_event: dict[str, Any] | No
     stored_event = raw_event if raw_event is not None else event
     if not event_type.startswith("fax."):
         return None
-    if payload.get("direction") and str(payload.get("direction")).lower() != "inbound":
-        return None
-    if event_type != "fax.received" and not _fax_failed(payload, event_type):
-        return None
 
     fax_id = str(payload.get("fax_id") or payload.get("id") or data.get("id") or "")
     telnyx_id = f"fax:{fax_id}" if fax_id else str(data.get("id") or "")
+    if payload.get("direction") and str(payload.get("direction")).lower() != "inbound":
+        if not telnyx_id:
+            return None
+        row = conn.execute("SELECT id FROM messages WHERE telnyx_id = ? ORDER BY id LIMIT 1", (telnyx_id,)).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            """
+            UPDATE messages
+            SET status = ?, telnyx_event_id = ?, raw_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (_fax_status(payload, event_type), data.get("id"), as_json(stored_event), now_est(), row["id"]),
+        )
+        add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=int(row["id"]))
+        conn.commit()
+        return int(row["id"])
+    if event_type != "fax.received" and not _fax_failed(payload, event_type):
+        return None
+
     occurred_at = normalize_iso_timestamp(payload.get("completed_at") or payload.get("failed_at") or data.get("occurred_at"))
     from_number = _payload_phone(payload.get("from") or payload.get("caller_id"))
     to_numbers = _payload_phone_list(payload.get("to"))

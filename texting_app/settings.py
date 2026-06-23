@@ -324,6 +324,15 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
     SettingDef("telnyx.api_base", "Telnyx API base", "Telnyx", "url", config.TELNYX_API_BASE, env_names=("TELNYX_API_BASE",)),
     SettingDef("telnyx.api_key", "Telnyx API key", "Telnyx", "secret", config.TELNYX_API_KEY, secret=True, env_names=("TELNYX_API_KEY",)),
     SettingDef("telnyx.public_key", "Telnyx public key", "Telnyx", "secret", config.TELNYX_PUBLIC_KEY, secret=True, env_names=("TELNYX_PUBLIC_KEY",)),
+    SettingDef(
+        "telnyx.fax_connection_id",
+        "Fax connection ID",
+        "Telnyx",
+        "text",
+        config.TELNYX_FAX_CONNECTION_ID,
+        help="Programmable Fax Application connection ID used for outbound faxes.",
+        env_names=("TELNYX_FAX_CONNECTION_ID",),
+    ),
     SettingDef("twilio.api_base", "Twilio API base", "Twilio", "url", config.TWILIO_API_BASE, env_names=("TWILIO_API_BASE",)),
     SettingDef("twilio.account_sid", "Twilio account SID", "Twilio", "text", config.TWILIO_ACCOUNT_SID, env_names=("TWILIO_ACCOUNT_SID",)),
     SettingDef(

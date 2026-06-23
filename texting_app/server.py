@@ -44,6 +44,7 @@ from .phone import display_phone, normalize_phone
 from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values, write_env_values
 from .telnyx import TelnyxError
 from .telnyx import handle_webhook as handle_telnyx_webhook
+from .telnyx import send_fax as send_telnyx_fax
 from .timeutil import EASTERN, now_est
 from .twilio import TwilioError
 from .twilio import handle_webhook as handle_twilio_webhook
@@ -535,8 +536,8 @@ def _scheduled_messages_for_conversation(conn, conversation_id: int) -> list[dic
 
 FAILURE_STATUSES = {"delivery_failed", "failed", "undelivered", "rejected", "expired"}
 WARNING_STATUSES = {"delivery_unconfirmed", "unknown", "unconfirmed"}
-SUCCESS_STATUSES = {"delivered", "received", "imported"}
-PENDING_STATUSES = {"queued", "scheduled", "sending", "sent", "accepted", "finalized"}
+SUCCESS_STATUSES = {"delivered", "received", "imported", "completed"}
+PENDING_STATUSES = {"queued", "scheduled", "sending", "sent", "accepted", "finalized", "media_processed"}
 
 
 def _needs_attention(
@@ -592,6 +593,8 @@ def _status_label(status: str | None) -> str:
         "delivered": "Delivered",
         "received": "Received",
         "imported": "Imported",
+        "media_processed": "Media processed",
+        "completed": "Completed",
     }
     if not status:
         return ""
@@ -1898,6 +1901,31 @@ def send_api_message(payload: dict) -> dict:
     return result
 
 
+def send_api_fax(payload: dict) -> dict:
+    conversation_id = payload.get("conversation_id")
+    media_url = str(payload.get("media_url") or "").strip()
+    to_number = normalize_phone(payload.get("to_number"))
+    if not media_url:
+        raise ValueError("Choose a fax document.")
+    if not to_number:
+        raise ValueError("Enter a fax recipient.")
+    result = send_telnyx_fax(
+        from_number=payload.get("from_number"),
+        to_number=to_number,
+        media_url=media_url,
+        filename=str(payload.get("filename") or ""),
+        conversation_id=int(conversation_id) if conversation_id else None,
+    )
+    if result.get("message_id"):
+        message_id = int(result["message_id"])
+        _mark_uploaded_attachments_local(message_id, [media_url])
+        conversation = _mark_reply_message_read(message_id)
+        if conversation:
+            result["conversation_id"] = conversation["id"]
+            result["conversation"] = conversation
+    return result
+
+
 def _parse_schedule_time(raw: str) -> str:
     value = str(raw or "").strip()
     if not value:
@@ -2855,6 +2883,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(disable_two_factor(self._read_json()))
             elif path == "/api/messages":
                 self._send_json(send_api_message(self._read_json()))
+            elif path == "/api/fax/send":
+                self._send_json(send_api_fax(self._read_json()))
             elif path == "/api/messages/schedule":
                 self._send_json(schedule_api_message(self._read_json()))
             elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/cancel", path):

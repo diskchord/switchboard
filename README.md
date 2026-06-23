@@ -225,7 +225,7 @@ The Telnyx webhook endpoint is:
 /api/telnyx/webhook
 ```
 
-Use this endpoint for both Messaging Profile webhooks and Programmable Fax Application webhooks. Inbound `fax.received` events are stored as inbound picture messages: the Telnyx fax PDF is downloaded immediately and rendered into PNG page attachments when `pdftoppm` is available. Failed inbound fax attempts are stored too, including Telnyx's `failure_reason` when one is provided. If PDF rendering is unavailable, the local PDF is kept as the attachment fallback.
+Use this endpoint for both Messaging Profile webhooks and Programmable Fax Application webhooks. Inbound `fax.received` events are stored as inbound picture messages: the Telnyx fax PDF is downloaded immediately and rendered into PNG page attachments when `pdftoppm` is available. Failed inbound fax attempts are stored too, including Telnyx's `failure_reason` when one is provided. If PDF rendering is unavailable, the local PDF is kept as the attachment fallback. Outbound fax requires `TELNYX_FAX_CONNECTION_ID`; long-press the composer attachment button to open the fax sender.
 
 On Debian/Ubuntu servers, install the optional fax preview dependency with:
 

@@ -47,6 +47,9 @@ const state = {
   reactionLongPressTriggered: false,
   sendPressTimer: null,
   sendHoldTriggered: false,
+  attachPressTimer: null,
+  attachHoldTriggered: false,
+  faxFile: null,
   nativeKeyboardInset: 0,
   pullRefresh: null,
   isRefreshingFromPull: false,
@@ -125,6 +128,15 @@ const els = {
   scheduleTime: document.querySelector("#scheduleTime"),
   scheduleClose: document.querySelector("#scheduleClose"),
   scheduleCancel: document.querySelector("#scheduleCancel"),
+  faxModal: document.querySelector("#faxModal"),
+  faxForm: document.querySelector("#faxForm"),
+  faxClose: document.querySelector("#faxClose"),
+  faxCancel: document.querySelector("#faxCancel"),
+  faxSend: document.querySelector("#faxSend"),
+  faxToNumber: document.querySelector("#faxToNumber"),
+  faxFromNumber: document.querySelector("#faxFromNumber"),
+  faxFile: document.querySelector("#faxFile"),
+  faxFilename: document.querySelector("#faxFilename"),
   recipientBar: document.querySelector("#recipientBar"),
   recipientChips: document.querySelector("#recipientChips"),
   recipientInput: document.querySelector("#recipientInput"),
@@ -135,6 +147,7 @@ const els = {
   messageCounter: document.querySelector("#messageCounter"),
   mediaUrls: document.querySelector("#mediaUrls"),
   mediaFiles: document.querySelector("#mediaFiles"),
+  uploadButton: document.querySelector("#uploadButton"),
   uploadList: document.querySelector("#uploadList"),
   composerError: document.querySelector("#composerError"),
   sendButton: document.querySelector("#sendButton"),
@@ -151,7 +164,6 @@ const els = {
   syncContactsButton: document.querySelector("#syncContactsButton"),
   lightbox: document.querySelector("#lightbox"),
   lightboxImage: document.querySelector("#lightboxImage"),
-  lightboxCaption: document.querySelector("#lightboxCaption"),
   lightboxClose: document.querySelector("#lightboxClose"),
   lightboxPrev: document.querySelector("#lightboxPrev"),
   lightboxNext: document.querySelector("#lightboxNext"),
@@ -174,6 +186,7 @@ const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent
 const FOREGROUND_STALE_MS = 20_000;
 const MIN_AUTO_REFRESH_SECONDS = 5;
 const SEND_HOLD_MS = 550;
+const ATTACH_HOLD_MS = SEND_HOLD_MS;
 const SEND_NOW_SYMBOL = "➤";
 const SCHEDULE_SEND_SYMBOL = "◷";
 const STATS_PERIOD_OPTIONS = [
@@ -406,6 +419,7 @@ const I18N = {
     "message.send_failed": "Send failed",
     "message.delivery_unconfirmed": "Delivery unconfirmed",
     "message.voicemail": "Voicemail",
+    "message.fax": "Fax",
     "composer.from": "From",
     "composer.message": "Message",
     "composer.media_urls": "Media URLs",
@@ -424,6 +438,15 @@ const I18N = {
     "schedule.send_now_failed": "Queued send failed.",
     "schedule.choose_time": "Choose a send time.",
     "schedule.future_time": "Choose a future time.",
+    "fax.title": "Send fax",
+    "fax.to": "To",
+    "fax.document": "Document",
+    "fax.choose_document": "Choose PDF or image",
+    "fax.no_document": "Choose a fax document.",
+    "fax.no_recipient": "Enter a fax recipient.",
+    "fax.send": "Send Fax",
+    "fax.sent": "Fax queued.",
+    "fax.long_press": "Long press to send fax",
     "upload.default": "Upload",
     "upload.one": "Media uploaded.",
     "upload.many": "{count} files uploaded.",
@@ -462,7 +485,6 @@ const I18N = {
     "lightbox.close": "Close image preview",
     "lightbox.previous": "Previous image",
     "lightbox.next": "Next image",
-    "lightbox.count": "{caption} ({current} of {total})",
     "status.delivery_failed": "Failed",
     "status.delivery_unconfirmed": "Unconfirmed",
     "status.queued": "Queued",
@@ -640,6 +662,7 @@ const I18N = {
     "message.send_failed": "Envío fallido",
     "message.delivery_unconfirmed": "Entrega sin confirmar",
     "message.voicemail": "Buzón de voz",
+    "message.fax": "Fax",
     "composer.from": "De",
     "composer.message": "Mensaje",
     "composer.media_urls": "URLs de media",
@@ -658,6 +681,15 @@ const I18N = {
     "schedule.send_now_failed": "Falló el envío encolado.",
     "schedule.choose_time": "Elige una hora de envío.",
     "schedule.future_time": "Elige una hora futura.",
+    "fax.title": "Enviar fax",
+    "fax.to": "Para",
+    "fax.document": "Documento",
+    "fax.choose_document": "Elegir PDF o imagen",
+    "fax.no_document": "Elige un documento de fax.",
+    "fax.no_recipient": "Escribe un destinatario de fax.",
+    "fax.send": "Enviar fax",
+    "fax.sent": "Fax encolado.",
+    "fax.long_press": "Mantén pulsado para enviar fax",
     "upload.default": "Subida",
     "upload.one": "Media subida.",
     "upload.many": "{count} archivos subidos.",
@@ -696,7 +728,6 @@ const I18N = {
     "lightbox.close": "Cerrar vista de imagen",
     "lightbox.previous": "Imagen anterior",
     "lightbox.next": "Imagen siguiente",
-    "lightbox.count": "{caption} ({current} de {total})",
     "status.delivery_failed": "Falló",
     "status.delivery_unconfirmed": "Sin confirmar",
     "status.queued": "En cola",
@@ -874,6 +905,7 @@ const I18N = {
     "message.send_failed": "Envoi échoué",
     "message.delivery_unconfirmed": "Livraison non confirmée",
     "message.voicemail": "Messagerie vocale",
+    "message.fax": "Fax",
     "composer.from": "De",
     "composer.message": "Message",
     "composer.media_urls": "URL de médias",
@@ -892,6 +924,15 @@ const I18N = {
     "schedule.send_now_failed": "Échec de l'envoi en file.",
     "schedule.choose_time": "Choisissez une heure d'envoi.",
     "schedule.future_time": "Choisissez une heure future.",
+    "fax.title": "Envoyer un fax",
+    "fax.to": "À",
+    "fax.document": "Document",
+    "fax.choose_document": "Choisir un PDF ou une image",
+    "fax.no_document": "Choisissez un document de fax.",
+    "fax.no_recipient": "Saisissez un destinataire de fax.",
+    "fax.send": "Envoyer le fax",
+    "fax.sent": "Fax mis en file.",
+    "fax.long_press": "Appui long pour envoyer un fax",
     "upload.default": "Téléversement",
     "upload.one": "Média téléversé.",
     "upload.many": "{count} fichiers téléversés.",
@@ -930,7 +971,6 @@ const I18N = {
     "lightbox.close": "Fermer l'aperçu",
     "lightbox.previous": "Image précédente",
     "lightbox.next": "Image suivante",
-    "lightbox.count": "{caption} ({current} sur {total})",
     "status.delivery_failed": "Échec",
     "status.delivery_unconfirmed": "Non confirmé",
     "status.queued": "En attente",
@@ -989,6 +1029,11 @@ function applyTheme(theme, { persist = true } = {}) {
   document.documentElement.dataset.theme = nextTheme;
   if (els.themeColor) {
     els.themeColor.content = nextTheme === "dark" ? "#0c1117" : "#e6e8eb";
+  }
+  try {
+    window.SwitchboardAndroid?.setTheme?.(nextTheme);
+  } catch (_error) {
+    // Native theme sync is optional outside the Android wrapper.
   }
   if (els.themeToggle) {
     els.themeToggle.textContent = nextTheme === "dark" ? "☀" : "☾";
@@ -1134,8 +1179,24 @@ window.textingCloseThreadForNativeBack = () => {
   if (els.conversationSearch?.value && clearConversationSearch()) {
     return true;
   }
-  if (!els.statsModal.classList.contains("hidden")) {
+  if (isModalOpen(els.settingsModal)) {
+    closeSettings();
+    return true;
+  }
+  if (isModalOpen(els.statsModal)) {
     closeStats();
+    return true;
+  }
+  if (isContactNameModalOpen()) {
+    closeContactNameModal({ restoreFocus: true });
+    return true;
+  }
+  if (isModalOpen(els.scheduleModal)) {
+    closeScheduleModal();
+    return true;
+  }
+  if (isModalOpen(els.faxModal)) {
+    closeFaxModal();
     return true;
   }
   if (state.selectedConversationIds.size) {
@@ -1929,6 +1990,7 @@ async function openSettings() {
     renderSettings(payload);
     els.settingsModal.classList.remove("hidden");
     els.settingsModal.focus();
+    syncNativePullRefreshEnabled();
   } catch (error) {
     toast(error.message);
   }
@@ -1938,6 +2000,7 @@ function closeSettings() {
   els.settingsModal.classList.add("hidden");
   state.twoFactorSetup = null;
   state.twoFactorBackupCodes = [];
+  syncNativePullRefreshEnabled();
 }
 
 function downloadDatabase() {
@@ -2448,11 +2511,13 @@ async function openStats() {
   renderStatsPeriodOptions();
   els.statsModal.classList.remove("hidden");
   els.statsModal.focus();
+  syncNativePullRefreshEnabled();
   await loadStats();
 }
 
 function closeStats() {
   els.statsModal.classList.add("hidden");
+  syncNativePullRefreshEnabled();
 }
 
 async function saveSettings(event) {
@@ -2603,6 +2668,94 @@ async function uploadSelectedMedia(files) {
     els.sendButton.disabled = false;
     els.mediaFiles.value = "";
     updateComposerOffset();
+  }
+}
+
+function renderFaxFromOptions() {
+  if (!els.faxFromNumber) return;
+  els.faxFromNumber.innerHTML = (state.bootstrap?.identities || [])
+    .filter((identity) => identity.is_active)
+    .map(
+      (identity) =>
+        `<option value="${escapeHtml(identity.phone_number)}">${escapeHtml(identity.label)} · ${escapeHtml(
+          phoneDisplay(identity.phone_number),
+        )}</option>`,
+    )
+    .join("");
+}
+
+function setFaxFile(file) {
+  state.faxFile = file || null;
+  if (els.faxFilename) {
+    els.faxFilename.textContent = file?.name || t("fax.choose_document");
+  }
+}
+
+function setFaxModalOpen(open) {
+  els.faxModal?.classList.toggle("hidden", !open);
+  syncNativePullRefreshEnabled();
+  if (!open) return;
+  renderFaxFromOptions();
+  const recipients = currentRecipients();
+  els.faxToNumber.value = recipients[0] || "";
+  els.faxFromNumber.value = els.fromNumber.value || state.bootstrap?.default_identity || els.faxFromNumber.value;
+  setFaxFile(null);
+  if (els.faxFile) els.faxFile.value = "";
+  requestAnimationFrame(() => (els.faxToNumber.value ? els.faxFile?.focus() : els.faxToNumber.focus()));
+}
+
+function openFaxModal() {
+  if (!commitPendingRecipientInput()) return;
+  showComposerError("");
+  setFaxModalOpen(true);
+}
+
+function closeFaxModal() {
+  setFaxModalOpen(false);
+}
+
+async function sendCurrentFax(event) {
+  event.preventDefault();
+  if (!commitPendingRecipientInput()) return;
+  const toNumber = normalizeDraftPhone(els.faxToNumber.value);
+  if (!isUsableDraftPhone(toNumber)) {
+    toast(t("fax.no_recipient"));
+    els.faxToNumber.focus();
+    return;
+  }
+  if (!state.faxFile) {
+    toast(t("fax.no_document"));
+    els.faxFile?.focus();
+    return;
+  }
+  els.faxSend.disabled = true;
+  els.faxFile.disabled = true;
+  try {
+    const uploaded = await uploadMediaFile(state.faxFile);
+    const recipients = currentRecipients();
+    const conversationId =
+      recipients.length === 1 && normalizeDraftPhone(recipients[0]) === toNumber ? state.currentConversationId : null;
+    const payload = await api("/api/fax/send", {
+      method: "POST",
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        from_number: els.faxFromNumber.value,
+        to_number: toNumber,
+        media_url: uploaded.url,
+        filename: uploaded.original_filename || state.faxFile.name,
+      }),
+    });
+    closeFaxModal();
+    await loadConversations({ preserveScroll: true });
+    if (payload.conversation_id) {
+      await openConversation(payload.conversation_id);
+    }
+    toast(t("fax.sent"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    els.faxSend.disabled = false;
+    els.faxFile.disabled = false;
   }
 }
 
@@ -3008,6 +3161,7 @@ function closeContactNameModal({ restoreFocus = false } = {}) {
   if (!els.contactNameModal) return;
   els.contactNameModal.classList.add("hidden");
   state.contactNameParticipantPhone = "";
+  syncNativePullRefreshEnabled();
   if (restoreFocus) {
     els.threadTitle?.focus();
   }
@@ -3019,6 +3173,7 @@ function openContactNameModal(participant) {
   els.contactNameForm.classList.add("hidden");
   els.contactNameModalInput.value = participantSavedName(participant);
   els.contactNameModal.classList.remove("hidden");
+  syncNativePullRefreshEnabled();
   requestAnimationFrame(() => {
     els.contactNameModalInput.focus();
     els.contactNameModalInput.select();
@@ -3135,6 +3290,7 @@ function renderBootstrap({ forceIdentities = false } = {}) {
         )}</option>`,
     )
     .join("");
+  renderFaxFromOptions();
   selectFromNumber(previousFromNumber || preferredReplyIdentity());
 
   if (!forceIdentities && hasDirtyIdentityChanges()) {
@@ -3877,8 +4033,7 @@ function renderAttachment(attachment) {
   const contentType = attachment.content_type || "";
   const mediaKey = escapeHtml(normalizedMediaKey(url));
   if (isImageAttachment(attachment, url)) {
-    const caption = attachment.filename || t("attachment.image");
-    return `<a href="${escapeHtml(url)}" class="image-attachment" data-lightbox-src="${escapeHtml(url)}" data-lightbox-caption="${escapeHtml(caption)}" target="_blank"><img src="${escapeHtml(url)}" alt="" loading="lazy" /></a>`;
+    return `<a href="${escapeHtml(url)}" class="image-attachment" data-lightbox-src="${escapeHtml(url)}" target="_blank"><img src="${escapeHtml(url)}" alt="" loading="lazy" /></a>`;
   }
   if (contentType.startsWith("video/")) {
     return `<video src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="metadata"></video>`;
@@ -3907,34 +4062,36 @@ function reactionActorName(reaction) {
   return reaction.from_display || phoneDisplay(reaction.from_number) || t("conversation.unknown");
 }
 
-function reactionActorFirstName(name) {
-  const cleaned = String(name || "").trim();
-  if (!cleaned || cleaned === t("conversation.unknown")) return "";
-  return cleaned.split(/\s+/)[0] || "";
+function reactionActorKey(reaction, index = 0) {
+  return reaction.from_number || reaction.from_display || reaction.id || `reaction-${index}`;
 }
 
 function groupedReactions(reactions) {
+  const latestByActor = new Map();
+  reactions.forEach((reaction, index) => {
+    latestByActor.set(reactionActorKey(reaction, index), reaction);
+  });
   const groups = new Map();
-  reactions.forEach((reaction) => {
+  latestByActor.forEach((reaction) => {
     const icon = normalizeReactionIcon(reaction.icon) || cleanReactionText(reaction.icon);
     if (!icon) return;
     const key = icon;
-    if (!groups.has(key)) groups.set(key, { icon, count: 0, names: new Set(), firstNames: new Set() });
+    if (!groups.has(key)) groups.set(key, { icon, names: [] });
     const group = groups.get(key);
     const actorName = reactionActorName(reaction);
-    group.count += 1;
-    group.names.add(actorName);
-    const firstName = reactionActorFirstName(actorName);
-    if (firstName) group.firstNames.add(firstName);
+    if (!group.names.includes(actorName)) group.names.push(actorName);
   });
-  return [...groups.values()];
+  return [...groups.values()].map((group) => ({ ...group, count: group.names.length }));
 }
 
-function reactionBadgeText(group) {
-  const [name] = [...group.firstNames];
-  if (!name) return "";
-  if (group.count > 1) return t("message.reaction_badge_count", { name, count: group.count - 1 });
-  return t("message.reaction_badge", { name });
+function reactionNamesLabel(names) {
+  const cleaned = names.map((name) => String(name || "").trim()).filter(Boolean);
+  if (!cleaned.length) return t("conversation.unknown");
+  return cleaned.join(", ");
+}
+
+function reactionDetailLabel(group) {
+  return `${reactionNamesLabel(group.names)} reacted ${group.icon}`;
 }
 
 function renderMessageReactions(message) {
@@ -3943,12 +4100,14 @@ function renderMessageReactions(message) {
   return `<div class="message-reactions">${groupedReactions(reactions)
     .map((group) => {
       const label = group.icon;
-      const badgeText = reactionBadgeText(group);
-      const accessibleLabel = badgeText ? `${badgeText} ${label}` : label;
-      return `<span class="message-reaction" title="${escapeHtml(accessibleLabel)}" aria-label="${escapeHtml(accessibleLabel)}">
-        ${badgeText ? `<span class="message-reaction-text">${escapeHtml(badgeText)}</span>` : ""}
+      const detailLabel = reactionDetailLabel(group);
+      const count = group.count > 1 ? `<span class="message-reaction-count">${escapeHtml(group.count)}</span>` : "";
+      return `<button class="message-reaction" type="button" title="${escapeHtml(detailLabel)}" aria-label="${escapeHtml(
+        detailLabel,
+      )}" data-reaction-detail="${escapeHtml(detailLabel)}">
         <span class="message-reaction-icon">${escapeHtml(label)}</span>
-      </span>`;
+        ${count}
+      </button>`;
     })
     .join("")}</div>`;
 }
@@ -3962,8 +4121,13 @@ function isVoicemailMessage(message) {
   return String(message?.message_type || message?.last_message_type || "").toLowerCase() === "voicemail";
 }
 
+function isFaxMessage(message) {
+  return String(message?.message_type || message?.last_message_type || "").toLowerCase() === "fax";
+}
+
 function messagePreviewText(conversation) {
   const text = reactionPreviewText(conversation.last_text) || "";
+  if (isFaxMessage(conversation)) return text ? `${t("message.fax")}: ${text}` : t("message.fax");
   if (!isVoicemailMessage(conversation)) return text;
   return text ? `${t("message.voicemail")}: ${text}` : t("message.voicemail");
 }
@@ -4217,9 +4381,8 @@ function renderMessages(messages, scrollMode = "bottom") {
         ? `<div class="standalone-reaction-icon" title="${escapeHtml(standaloneReactionIcon)}" aria-label="${escapeHtml(standaloneReactionIcon)}">${escapeHtml(standaloneReactionIcon)}</div>`
         : "";
       const reactions = renderMessageReactions(message);
-      const voicemailLabel = isVoicemailMessage(message)
-        ? `<div class="message-type-label">${escapeHtml(t("message.voicemail"))}</div>`
-        : "";
+      const typeLabel = isVoicemailMessage(message) ? t("message.voicemail") : isFaxMessage(message) ? t("message.fax") : "";
+      const messageTypeLabel = typeLabel ? `<div class="message-type-label">${escapeHtml(typeLabel)}</div>` : "";
       const statusKind = message.status_kind || "neutral";
       const statusLabel = localizedStatusLabel(message.status, message.status_label || message.status || "");
       const statusDetail = message.status_detail || "";
@@ -4256,7 +4419,7 @@ function renderMessages(messages, scrollMode = "bottom") {
         <article class="message-row ${message.direction} ${statusKind} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
-              ${voicemailLabel}
+              ${messageTypeLabel}
               ${attachments ? `<div class="${attachmentGridClass}">${attachments}</div>` : ""}
               ${standaloneReaction}
               ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
@@ -4502,7 +4665,6 @@ function endMessageReactionPress(event) {
 function collectLightboxImages() {
   state.lightboxImages = [...els.messages.querySelectorAll("[data-lightbox-src]")].map((link) => ({
     src: link.dataset.lightboxSrc,
-    caption: link.dataset.lightboxCaption || t("attachment.image"),
   }));
 }
 
@@ -4510,14 +4672,6 @@ function renderLightbox() {
   const current = state.lightboxImages[state.lightboxIndex];
   if (!current) return;
   els.lightboxImage.src = current.src;
-  els.lightboxCaption.textContent =
-    state.lightboxImages.length > 1
-      ? t("lightbox.count", {
-          caption: current.caption,
-          current: state.lightboxIndex + 1,
-          total: state.lightboxImages.length,
-        })
-      : current.caption;
   els.lightboxPrev.hidden = state.lightboxImages.length <= 1;
   els.lightboxNext.hidden = state.lightboxImages.length <= 1;
 }
@@ -4655,6 +4809,14 @@ function handleGlobalKeydown(event) {
   if (scheduleOpen) {
     if (event.key === "Escape") {
       closeScheduleModal();
+      event.preventDefault();
+    }
+    return;
+  }
+  const faxOpen = els.faxModal && !els.faxModal.classList.contains("hidden");
+  if (faxOpen) {
+    if (event.key === "Escape") {
+      closeFaxModal();
       event.preventDefault();
     }
     return;
@@ -4888,9 +5050,24 @@ function canUsePullRefresh() {
     isDetailsOverlayLayout() &&
     !document.body.classList.contains("mobile-thread-open") &&
     !document.body.classList.contains("details-overlay-open") &&
+    !isAnyModalOpen() &&
     !state.selectedConversationIds.size &&
     !state.isRefreshingFromPull &&
     els.conversationList.scrollTop <= 0
+  );
+}
+
+function isModalOpen(modal) {
+  return Boolean(modal && !modal.classList.contains("hidden"));
+}
+
+function isAnyModalOpen() {
+  return (
+    isModalOpen(els.settingsModal) ||
+    isModalOpen(els.statsModal) ||
+    isModalOpen(els.contactNameModal) ||
+    isModalOpen(els.scheduleModal) ||
+    isModalOpen(els.faxModal)
   );
 }
 
@@ -5645,6 +5822,7 @@ function rememberScheduleTime(value) {
 
 function setScheduleModalOpen(open) {
   els.scheduleModal.classList.toggle("hidden", !open);
+  syncNativePullRefreshEnabled();
   if (open) {
     const defaultDate = defaultScheduleDate();
     els.scheduleTime.min = dateTimeLocalValue(new Date(Date.now() + 60 * 1000));
@@ -5796,6 +5974,42 @@ function endSendPress() {
   clearSendPressTimer();
   if (!state.sendHoldTriggered) {
     setSendSchedulingIndicator(false);
+  }
+}
+
+function clearAttachPressTimer() {
+  if (state.attachPressTimer) {
+    clearTimeout(state.attachPressTimer);
+    state.attachPressTimer = null;
+  }
+}
+
+function setAttachFaxIndicator(active) {
+  if (!els.uploadButton) return;
+  els.uploadButton.classList.toggle("is-faxing", active);
+  els.uploadButton.textContent = active ? "📠" : "📎";
+  const label = active ? t("fax.title") : t("composer.upload");
+  els.uploadButton.title = active ? t("fax.long_press") : label;
+  els.uploadButton.setAttribute("aria-label", label);
+}
+
+function startAttachPress(event) {
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  clearAttachPressTimer();
+  state.attachHoldTriggered = false;
+  setAttachFaxIndicator(true);
+  state.attachPressTimer = window.setTimeout(() => {
+    state.attachPressTimer = null;
+    state.attachHoldTriggered = true;
+    setAttachFaxIndicator(false);
+    openFaxModal();
+  }, ATTACH_HOLD_MS);
+}
+
+function endAttachPress() {
+  clearAttachPressTimer();
+  if (!state.attachHoldTriggered) {
+    setAttachFaxIndicator(false);
   }
 }
 
@@ -6165,6 +6379,12 @@ function bindEvents() {
   els.scheduleModal.addEventListener("click", (event) => {
     if (event.target === els.scheduleModal) closeScheduleModal();
   });
+  els.faxForm?.addEventListener("submit", sendCurrentFax);
+  els.faxClose?.addEventListener("click", closeFaxModal);
+  els.faxCancel?.addEventListener("click", closeFaxModal);
+  els.faxModal?.addEventListener("click", (event) => {
+    if (event.target === els.faxModal) closeFaxModal();
+  });
   els.dealtButton.addEventListener("click", toggleCurrentConversationRead);
   els.archiveButton.addEventListener("click", () => {
     const archived = !Boolean(state.currentConversation?.is_archived);
@@ -6188,7 +6408,19 @@ function bindEvents() {
     showComposerError("");
   });
   els.mediaUrls.addEventListener("focus", keepComposerInputVisible);
+  els.uploadButton?.addEventListener("pointerdown", startAttachPress);
+  els.uploadButton?.addEventListener("pointerup", endAttachPress);
+  els.uploadButton?.addEventListener("pointerleave", endAttachPress);
+  els.uploadButton?.addEventListener("pointercancel", endAttachPress);
+  els.uploadButton?.addEventListener("contextmenu", (event) => event.preventDefault());
+  els.uploadButton?.addEventListener("click", (event) => {
+    if (!state.attachHoldTriggered) return;
+    event.preventDefault();
+    event.stopPropagation();
+    state.attachHoldTriggered = false;
+  });
   els.mediaFiles.addEventListener("change", () => uploadSelectedMedia(els.mediaFiles.files));
+  els.faxFile?.addEventListener("change", () => setFaxFile(els.faxFile.files?.[0] || null));
   els.uploadList.addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-upload]");
     if (!button) return;
@@ -6208,6 +6440,12 @@ function bindEvents() {
   els.messages.addEventListener("pause", renderPendingPassiveMessages, true);
   els.messages.addEventListener("ended", renderPendingPassiveMessages, true);
   els.messages.addEventListener("click", (event) => {
+    const reactionButton = event.target.closest(".message-reaction");
+    if (reactionButton) {
+      event.preventDefault();
+      toast(reactionButton.dataset.reactionDetail || reactionButton.getAttribute("aria-label") || "");
+      return;
+    }
     if (event.target.closest("#loadOlderButton")) {
       loadOlderMessages().catch((error) => toast(error.message));
       return;

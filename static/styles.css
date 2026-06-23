@@ -1122,24 +1122,33 @@ select:focus {
   border-radius: 999px;
   box-shadow: 0 5px 16px rgba(15, 23, 42, 0.16);
   color: var(--ink);
+  cursor: pointer;
   display: inline-flex;
   font-size: 15px;
   font-weight: 800;
-  gap: 6px;
+  gap: 3px;
   min-height: 26px;
   min-width: 28px;
-  padding: 2px 7px;
+  padding: 2px 6px;
   justify-content: center;
   line-height: 1;
 }
 
-.message-reaction-text {
-  font-size: 13px;
+.message-reaction:hover,
+.message-reaction:focus-visible {
+  border-color: var(--hover-line);
+  outline: 0;
+  transform: translateY(-1px);
+}
+
+.message-reaction-count {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 900;
   line-height: 1;
-  max-width: min(190px, 52vw);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 8px;
 }
 
 .reaction-menu {
@@ -1912,7 +1921,8 @@ select:focus {
 .settings-modal,
 .stats-modal,
 .contact-name-modal,
-.schedule-modal {
+.schedule-modal,
+.fax-modal {
   position: fixed;
   inset: 0;
   z-index: 35;
@@ -1925,14 +1935,16 @@ select:focus {
 .settings-modal.hidden,
 .stats-modal.hidden,
 .contact-name-modal.hidden,
-.schedule-modal.hidden {
+.schedule-modal.hidden,
+.fax-modal.hidden {
   display: none;
 }
 
 .settings-card,
 .stats-card,
 .contact-name-card,
-.schedule-card {
+.schedule-card,
+.fax-card {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(1040px, calc(100vw - 44px));
@@ -1954,14 +1966,16 @@ select:focus {
   max-height: none;
 }
 
-.schedule-card {
+.schedule-card,
+.fax-card {
   grid-template-rows: auto auto auto;
   width: min(360px, calc(100vw - 40px));
   max-height: none;
 }
 
 .contact-name-header,
-.schedule-header {
+.schedule-header,
+.fax-header {
   align-items: center;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 38px;
@@ -1970,7 +1984,8 @@ select:focus {
 }
 
 .contact-name-header h2,
-.schedule-header h2 {
+.schedule-header h2,
+.fax-header h2 {
   margin: 0;
   min-width: 0;
   overflow: visible;
@@ -1981,7 +1996,8 @@ select:focus {
 }
 
 .contact-name-header .icon-button,
-.schedule-header .icon-button {
+.schedule-header .icon-button,
+.fax-header .icon-button {
   width: 38px;
   height: 38px;
   min-height: 38px;
@@ -1990,11 +2006,13 @@ select:focus {
 }
 
 .contact-name-body,
-.schedule-body {
+.schedule-body,
+.fax-body {
   padding: 0 16px 14px;
 }
 
-.schedule-body label {
+.schedule-body label,
+.fax-body label {
   display: grid;
   gap: 8px;
   color: var(--muted);
@@ -2003,7 +2021,9 @@ select:focus {
 }
 
 .contact-name-body input,
-.schedule-body input {
+.schedule-body input,
+.fax-body input,
+.fax-body select {
   width: 100%;
   box-sizing: border-box;
   min-height: 46px;
@@ -2011,7 +2031,8 @@ select:focus {
 }
 
 .contact-name-footer,
-.schedule-footer {
+.schedule-footer,
+.fax-footer {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
@@ -2019,8 +2040,31 @@ select:focus {
 }
 
 .contact-name-footer .small-button,
-.schedule-footer .small-button {
+.schedule-footer .small-button,
+.fax-footer .small-button {
   min-width: 0;
+}
+
+.fax-body {
+  display: grid;
+  gap: 12px;
+}
+
+.fax-file-control strong {
+  display: block;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.25;
+  overflow: hidden;
+  padding: 13px 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-header,
@@ -2046,6 +2090,11 @@ select:focus {
   margin: 5px 0 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+#settingsClose {
+  align-self: flex-start;
+  flex: 0 0 auto;
 }
 
 .stats-header-actions {
@@ -2613,20 +2662,6 @@ select:focus {
   right: 18px;
 }
 
-.lightbox-caption {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  max-width: min(760px, calc(100vw - 120px));
-  transform: translateX(-50%);
-  color: rgba(255, 255, 255, 0.86);
-  font-size: 13px;
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .empty-state {
   display: grid;
   place-items: center;
@@ -2985,25 +3020,29 @@ select:focus {
   }
 
   .contact-name-modal,
-  .schedule-modal {
+  .schedule-modal,
+  .fax-modal {
     align-items: center;
     justify-items: center;
     padding: max(env(safe-area-inset-top), 18px) 20px max(env(safe-area-inset-bottom), 18px);
   }
 
   .contact-name-card,
-  .schedule-card {
+  .schedule-card,
+  .fax-card {
     width: min(340px, 100%);
     max-height: none;
   }
 
   .contact-name-header,
-  .schedule-header {
+  .schedule-header,
+  .fax-header {
     padding: 16px 16px 10px;
   }
 
   .contact-name-header h2,
-  .schedule-header h2 {
+  .schedule-header h2,
+  .fax-header h2 {
     overflow: visible;
     text-overflow: clip;
     white-space: normal;
@@ -3027,6 +3066,30 @@ select:focus {
   .settings-header,
   .settings-footer {
     padding: 14px;
+  }
+
+  .settings-card > .settings-header {
+    align-items: start;
+    display: grid;
+    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) 34px;
+    padding: 10px 12px;
+  }
+
+  .settings-card > .settings-header > div {
+    min-width: 0;
+  }
+
+  .settings-card > .settings-header p {
+    display: none;
+  }
+
+  #settingsClose {
+    font-size: 20px;
+    height: 34px;
+    justify-self: end;
+    min-height: 34px;
+    width: 34px;
   }
 
   .settings-footer .small-button {

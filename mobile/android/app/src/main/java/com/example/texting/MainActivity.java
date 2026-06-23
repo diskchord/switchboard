@@ -41,6 +41,7 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 public class MainActivity extends Activity {
     private static final int SHELL_BACKGROUND = Color.rgb(12, 17, 23);
+    private static final int LIGHT_SHELL_BACKGROUND = Color.rgb(230, 232, 235);
     private static final int PANEL_BACKGROUND = Color.rgb(21, 28, 36);
     private static final int TEXT_PRIMARY = Color.rgb(242, 246, 251);
     private static final int TEXT_MUTED = Color.rgb(169, 180, 194);
@@ -61,7 +62,7 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 41;
     private static final String PREFS_NAME = "switchboard";
     private static final String PREF_SERVER_URL = "server_url";
-    private static final String APP_ASSET_VERSION = "d2a4e6b0";
+    private static final String APP_ASSET_VERSION = "c4e8b27a";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
     private int lastKeyboardInsetCssPx = -1;
@@ -135,6 +136,11 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setMediaPlaybackRequiresUserGesture(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            settings.setAlgorithmicDarkeningAllowed(false);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            settings.setForceDark(WebSettings.FORCE_DARK_OFF);
+        }
         webView.clearCache(true);
         webView.addJavascriptInterface(new AndroidBridge(), "SwitchboardAndroid");
         webView.setWebChromeClient(new WebChromeClient() {
@@ -215,16 +221,40 @@ public class MainActivity extends Activity {
     private void configureSystemBars() {
         Window window = getWindow();
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
-        window.setStatusBarColor(SHELL_BACKGROUND);
-        window.setNavigationBarColor(SHELL_BACKGROUND);
+        applySystemBarsForTheme(false);
+    }
+
+    private void applySystemBarsForTheme(boolean lightTheme) {
+        Window window = getWindow();
+        int background = lightTheme ? LIGHT_SHELL_BACKGROUND : SHELL_BACKGROUND;
+        window.setStatusBarColor(background);
+        window.setNavigationBarColor(background);
         int flags = window.getDecorView().getSystemUiVisibility();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (lightTheme) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            } else {
+                flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            flags &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            if (lightTheme) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            } else {
+                flags &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
         }
         window.getDecorView().setSystemUiVisibility(flags);
+        int shellBackground = lightTheme ? LIGHT_SHELL_BACKGROUND : SHELL_BACKGROUND;
+        if (rootLayout != null) {
+            rootLayout.setBackgroundColor(shellBackground);
+        }
+        if (swipeRefreshLayout != null) {
+            swipeRefreshLayout.setBackgroundColor(shellBackground);
+        }
+        if (webView != null) {
+            webView.setBackgroundColor(shellBackground);
+        }
     }
 
     private GradientDrawable roundedBackground(int color, float radiusDp) {
@@ -443,6 +473,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void setPullRefreshEnabled(boolean enabled) {
             runOnUiThread(() -> setNativePullRefreshEnabled(enabled));
+        }
+
+        @JavascriptInterface
+        public void setTheme(String theme) {
+            runOnUiThread(() -> applySystemBarsForTheme("light".equals(theme)));
         }
     }
 
@@ -683,7 +718,11 @@ public class MainActivity extends Activity {
 	                + "if(document.body && (document.body.classList.contains('mobile-thread-open')"
 	                + "|| document.body.classList.contains('conversation-selecting')"
 	                + "|| (document.querySelector('#conversationSearch') && document.querySelector('#conversationSearch').value)"
+	                + "|| (document.querySelector('#settingsModal') && !document.querySelector('#settingsModal').classList.contains('hidden'))"
 	                + "|| (document.querySelector('#statsModal') && !document.querySelector('#statsModal').classList.contains('hidden'))"
+	                + "|| (document.querySelector('#contactNameModal') && !document.querySelector('#contactNameModal').classList.contains('hidden'))"
+	                + "|| (document.querySelector('#scheduleModal') && !document.querySelector('#scheduleModal').classList.contains('hidden'))"
+	                + "|| (document.querySelector('#faxModal') && !document.querySelector('#faxModal').classList.contains('hidden'))"
                 + "|| document.body.classList.contains('details-overlay-open'))){"
                 + "if(window.textingCloseThreadForNativeBack){window.textingCloseThreadForNativeBack();}"
                 + "else if(history.length > 1){history.back();}"
