@@ -8,7 +8,7 @@ import android.content.ComponentName;
 import android.content.Context;
 
 public class NotificationPollService extends JobService {
-    static final String ACTION_OPEN_CONVERSATION = "com.example.texting.OPEN_CONVERSATION";
+    static final String ACTION_OPEN_CONVERSATION = "com.alexanderpeppe.switchboard.OPEN_CONVERSATION";
     static final String EXTRA_CONVERSATION_ID = "conversation_id";
 
     private static final int JOB_ID = 2046;

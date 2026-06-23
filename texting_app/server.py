@@ -68,6 +68,7 @@ CONVERTIBLE_VIDEO_TYPES = {"video/3gpp", "video/3gp"}
 SESSION_MAX_AGE_SECONDS = config.AUTH_SESSION_DAYS * 24 * 60 * 60
 LOGIN_FAILURE_LIMIT = 8
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
+DEFAULT_IDENTITY_SETTING_KEY = "messaging.default_identity"
 LOGIN_FAILURES: dict[str, list[float]] = {}
 LOGIN_FAILURE_LOCK = threading.Lock()
 BACKUP_CODE_METADATA_PREFIX = "auth.backup_code.used."
@@ -139,6 +140,23 @@ def _identity_with_autoreply(conn, identity_id: int) -> dict:
         (DEFAULT_AUTOREPLY_COOLDOWN_HOURS, identity_id),
     ).fetchone()
     return _identity_dict(row)
+
+
+def _default_identity_phone(identities: list[dict]) -> str:
+    active_numbers = [identity["phone_number"] for identity in identities if identity.get("is_active")]
+    if not active_numbers:
+        return ""
+    saved = normalize_phone(get_value(DEFAULT_IDENTITY_SETTING_KEY, ""))
+    if saved in set(active_numbers):
+        return saved
+    return active_numbers[0]
+
+
+def _apply_default_identity(identities: list[dict]) -> str:
+    default_phone = _default_identity_phone(identities)
+    for identity in identities:
+        identity["is_default"] = identity.get("phone_number") == default_phone
+    return default_phone
 
 
 def _configured_upload_dir() -> Path:
@@ -1167,6 +1185,7 @@ def bootstrap() -> dict:
             (DEFAULT_AUTOREPLY_COOLDOWN_HOURS,),
         ).fetchall()
     ]
+    default_identity = _apply_default_identity(identities)
     stats = _row_dict(
         conn.execute(
             f"""
@@ -1199,7 +1218,7 @@ def bootstrap() -> dict:
         "settings": configured_values(),
         "mark_read_on_open": get_bool("behavior.mark_read_on_open", False),
         "details_collapsed_default": get_bool("behavior.details_collapsed_default", True),
-        "default_identity": identities[0]["phone_number"] if identities else "",
+        "default_identity": default_identity,
     }
 
 
@@ -1709,10 +1728,25 @@ def update_identity(identity_id: int, payload: dict) -> dict:
         raise ValueError("Auto-reply cooldown must be at least 1 hour.")
     if autoreply_enabled and not autoreply_message:
         raise ValueError("Auto-reply message is required when auto-reply is enabled.")
+    make_default = payload.get("is_default") is True or str(payload.get("is_default") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     conn.execute(
         "UPDATE identities SET label = ?, color = ?, is_active = ?, updated_at = ? WHERE id = ?",
         (label, color, active, now_est(), identity_id),
     )
+    if make_default and active:
+        conn.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (DEFAULT_IDENTITY_SETTING_KEY, existing["phone_number"], now_est()),
+        )
     update_autoreply_rule(
         conn,
         phone_number=existing["phone_number"],
@@ -1740,7 +1774,12 @@ def update_identity(identity_id: int, payload: dict) -> dict:
         ),
     )
     conn.commit()
-    return {"identity": _identity_with_autoreply(conn, identity_id)}
+    identity = _identity_with_autoreply(conn, identity_id)
+    default_identity = _default_identity_phone(
+        [_row_dict(row) for row in conn.execute("SELECT phone_number, is_active FROM identities ORDER BY id").fetchall()]
+    )
+    identity["is_default"] = identity.get("phone_number") == default_identity
+    return {"identity": identity}
 
 
 def set_conversation_archived(conversation_id: int, archived: bool) -> dict:

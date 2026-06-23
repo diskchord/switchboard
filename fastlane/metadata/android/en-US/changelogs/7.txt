@@ -1,0 +1,1 @@
+Adds generic server selection for public Android builds, app-only server switching from login, tighter mobile browser spacing, explicit Default From selection, and clearer two-factor sign-in messaging.

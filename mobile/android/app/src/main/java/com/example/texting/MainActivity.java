@@ -5,7 +5,6 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -60,11 +59,10 @@ public class MainActivity extends Activity {
     private volatile boolean nativePullRefreshEnabled = false;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
     private static final int FILE_CHOOSER_REQUEST = 41;
-    private static final String PREFS_NAME = "switchboard";
-    private static final String PREF_SERVER_URL = "server_url";
-    private static final String APP_ASSET_VERSION = "c4e8b27a";
+    private static final String APP_ASSET_VERSION = "e7f9a14c";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
+    private boolean promptedForServerAfterFailure = false;
     private int lastKeyboardInsetCssPx = -1;
     private ValueCallback<Uri[]> fileChooserCallback;
 
@@ -211,7 +209,7 @@ public class MainActivity extends Activity {
                 );
             }
         });
-        webView.loadUrl(urlForIntent(getIntent()));
+        loadCurrentServerUrl();
     }
 
     private int dp(float value) {
@@ -339,7 +337,7 @@ public class MainActivity extends Activity {
         retryParams.setMargins(0, 0, dp(8), 0);
         connectionActions.addView(retryButton, retryParams);
 
-        Button serverButton = connectionButton("Server URL", false);
+        Button serverButton = connectionButton("Change server", false);
         serverButton.setOnClickListener(view -> showServerUrlDialog());
         LinearLayout.LayoutParams serverButtonParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         serverButtonParams.setMargins(dp(8), 0, 0, 0);
@@ -428,8 +426,8 @@ public class MainActivity extends Activity {
             return;
         }
         connectionTitle.setText("Connecting to Switchboard...");
-        connectionMessage.setText("Opening the server.");
-        connectionServer.setText("Server: " + serverUrl());
+        connectionMessage.setText(hasServerUrl() ? "Opening the server." : "Choose the server URL to continue.");
+        connectionServer.setText(serverDisplayText());
         connectionActions.setVisibility(View.GONE);
         connectionView.setVisibility(View.VISIBLE);
         if (webView != null) {
@@ -450,13 +448,19 @@ public class MainActivity extends Activity {
         if (connectionView == null) {
             return;
         }
-        connectionTitle.setText("Couldn't connect to Switchboard server.");
-        connectionMessage.setText("Check your connection or update the server URL.");
-        connectionServer.setText("Server: " + serverUrl());
+        connectionTitle.setText(hasServerUrl() ? "Couldn't connect to Switchboard server." : "Choose your Switchboard server.");
+        connectionMessage.setText(hasServerUrl()
+            ? "Check your connection or enter a different server URL."
+            : "Enter the URL of the Switchboard server you want to use.");
+        connectionServer.setText(serverDisplayText());
         connectionActions.setVisibility(View.VISIBLE);
         connectionView.setVisibility(View.VISIBLE);
         if (webView != null) {
             webView.setVisibility(View.INVISIBLE);
+        }
+        if (!serverUrlDialogOpen && !promptedForServerAfterFailure) {
+            promptedForServerAfterFailure = true;
+            connectionView.postDelayed(this::showServerUrlDialog, 250);
         }
     }
 
@@ -464,7 +468,13 @@ public class MainActivity extends Activity {
         if (webView == null) {
             return;
         }
+        if (!hasServerUrl()) {
+            mainFrameLoadFailed = true;
+            showConnectionFailure("");
+            return;
+        }
         mainFrameLoadFailed = false;
+        promptedForServerAfterFailure = false;
         showConnectingState();
         webView.loadUrl(urlForIntent(getIntent()));
     }
@@ -478,6 +488,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void setTheme(String theme) {
             runOnUiThread(() -> applySystemBarsForTheme("light".equals(theme)));
+        }
+
+        @JavascriptInterface
+        public void showServerUrlDialog() {
+            runOnUiThread(MainActivity.this::showServerUrlDialog);
         }
     }
 
@@ -519,16 +534,17 @@ public class MainActivity extends Activity {
         requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION_REQUEST);
     }
 
-    private SharedPreferences appPreferences() {
-        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+    private String serverUrl() {
+        return ServerUrlStore.get(this);
     }
 
-    private String serverUrl() {
-        String saved = appPreferences().getString(PREF_SERVER_URL, "");
-        if (saved != null && !saved.trim().isEmpty()) {
-            return saved.trim();
-        }
-        return getString(R.string.app_url).trim();
+    private boolean hasServerUrl() {
+        return !serverUrl().trim().isEmpty();
+    }
+
+    private String serverDisplayText() {
+        String current = serverUrl();
+        return current.isEmpty() ? "Server: not set" : "Server: " + current;
     }
 
     private String normalizedServerUrl(String value) {
@@ -626,8 +642,9 @@ public class MainActivity extends Activity {
                     url.setError("Enter a valid http:// or https:// URL.");
                     return;
                 }
-                appPreferences().edit().putString(PREF_SERVER_URL, normalized).apply();
+                ServerUrlStore.set(this, normalized);
                 serverUrlDialogOpen = false;
+                promptedForServerAfterFailure = false;
                 dialog.dismiss();
                 loadCurrentServerUrl();
             })
@@ -638,6 +655,10 @@ public class MainActivity extends Activity {
     private void openConversationFromIntent(Intent intent) {
         int conversationId = conversationIdFromIntent(intent);
         if (conversationId <= 0 || webView == null) {
+            return;
+        }
+        if (!hasServerUrl()) {
+            showConnectionFailure("");
             return;
         }
         String fallbackUrl = urlForIntent(intent);
@@ -713,6 +734,10 @@ public class MainActivity extends Activity {
             super.onBackPressed();
             return;
         }
+        if (isLoginPage()) {
+            showServerUrlDialog();
+            return;
+        }
         webView.evaluateJavascript(
             "(function(){"
 	                + "if(document.body && (document.body.classList.contains('mobile-thread-open')"
@@ -742,5 +767,13 @@ public class MainActivity extends Activity {
                 finish();
             }
         );
+    }
+
+    private boolean isLoginPage() {
+        if (webView == null || webView.getUrl() == null) {
+            return false;
+        }
+        Uri uri = Uri.parse(webView.getUrl());
+        return "/login".equals(uri.getPath());
     }
 }

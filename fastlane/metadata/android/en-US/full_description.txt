@@ -1,0 +1,5 @@
+Switchboard is a mobile companion for a self-hosted Switchboard server. It opens your Switchboard web console in a small Android wrapper with native file picking, notifications, theme-aware system bars, and a server picker for connecting to your own deployment.
+
+Switchboard helps manage SMS, MMS, group texts, scheduled sends, inbound fax, voicemail, call forwarding, contacts, and multiple sender numbers across supported phone providers.
+
+This app does not include a hosted Switchboard service. You need a Switchboard server URL that you operate or trust. Phone, SMS, MMS, fax, and voicemail features require provider accounts such as Telnyx or Twilio configured on that server.

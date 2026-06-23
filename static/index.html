@@ -14,9 +14,12 @@
         const saved = localStorage.getItem("textingTheme");
         const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
         document.documentElement.dataset.theme = saved || (prefersDark ? "dark" : "light");
+        if (new URLSearchParams(window.location.search).has("app_v")) {
+          document.documentElement.dataset.nativeApp = "android";
+        }
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=c4e8b27a" />
+    <link rel="stylesheet" href="/static/styles.css?v=e7f9a14c" />
   </head>
   <body>
     <div class="app-shell">
@@ -98,6 +101,10 @@
         </header>
 
         <section class="recipient-bar" id="recipientBar">
+          <label class="recipient-from-picker">
+            <span data-i18n="composer.from">From</span>
+            <select id="recipientFromNumber"></select>
+          </label>
           <div class="chips" id="recipientChips"></div>
           <div class="recipient-entry">
             <input
@@ -305,6 +312,6 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=c4e8b27a" type="module"></script>
+    <script src="/static/app.js?v=e7f9a14c" type="module"></script>
   </body>
 </html>

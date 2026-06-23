@@ -142,7 +142,7 @@ final class MobileNotificationClient {
     }
 
     private static String notificationsUrl(Context context, String since) {
-        Uri base = Uri.parse(context.getString(R.string.app_url));
+        Uri base = Uri.parse(ServerUrlStore.get(context));
         Uri.Builder builder = base.buildUpon()
             .encodedPath("/api/mobile/notifications")
             .clearQuery()

@@ -324,7 +324,7 @@ Android enforces a 15 minute minimum for periodic background checks and can batc
 
 ## 12. Build The Android Wrapper
 
-The Android wrapper lives in `mobile/android`. Its local server URL belongs in ignored local properties:
+The Android wrapper lives in `mobile/android`. Generic builds can leave the server URL blank and let the user enter it on first launch. Private sideload builds can put a default server URL in ignored local properties:
 
 ```bash
 cp mobile/android/local.properties.example mobile/android/local.properties
@@ -334,7 +334,7 @@ Edit:
 
 ```properties
 sdk.dir=/path/to/android-sdk
-SWITCHBOARD_APP_URL=https://switchboard.example
+SWITCHBOARD_APP_URL=
 ```
 
 Build:
@@ -345,7 +345,7 @@ ANDROID_HOME=/path/to/android-sdk gradle assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The app requires an HTTPS URL for release-style use. Local/private HTTP URLs are allowed only for testing. If the configured server cannot be reached, the app shows a connection screen and lets the user retry or enter a different server URL.
+If `SWITCHBOARD_APP_URL` is set, use HTTPS for release-style builds. Local/private HTTP URLs are allowed only for testing. If no server is configured, or if the configured server cannot be reached, the app shows a connection screen and asks for a different server URL.
 
 Do not publish APKs that embed a private server URL unless that is intentional.
 

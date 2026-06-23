@@ -4,6 +4,8 @@ Switchboard is a local-first communications console for SMS, MMS, group texting,
 
 The server stores conversations, messages, scheduled messages, contacts, sender identities, app settings, voice rules, voicemail recording metadata, and media metadata in SQLite. It can import historical HTML exports, receive Telnyx SMS/MMS/fax and Twilio Messaging webhooks, send outbound Telnyx or Twilio messages, handle TeXML/TwiML-compatible voice callbacks, sync contacts from Fastmail or Google Contacts, and optionally notify an ntfy topic or the Android wrapper when inbound texts arrive.
 
+The Android wrapper can be built generically and asks for your Switchboard server URL on first launch. F-Droid preparation notes and upstream metadata live in [docs/fdroid.md](docs/fdroid.md).
+
 ![Switchboard desktop interface showing a conversation inbox and message thread](docs/Screenshot_Desktop_General.png)
 
 Authored by [Alexander Peppe](https://www.alexanderpeppe.com/).
@@ -409,20 +411,18 @@ Do not add Basic Auth in front of Switchboard unless you also exempt the phone-p
 
 ## Android Wrapper
 
-The sideload wrapper is in `mobile/android`. The packaged APK includes the server URL you build it with, so do not commit or publish a build made with your private URL unless that is intentional. Set the private server URL in ignored local properties:
+The Android wrapper is in `mobile/android`. For generic builds, leave `SWITCHBOARD_APP_URL` blank and the app will ask for a Switchboard server URL on first launch. For private sideload builds, you may set a default server URL in ignored local properties:
 
 ```properties
 # mobile/android/local.properties
 SWITCHBOARD_APP_URL=https://switchboard.example.com
 ```
 
-You can also start from the checked-in template:
+Start from the checked-in template:
 
 ```bash
 cp mobile/android/local.properties.example mobile/android/local.properties
 ```
-
-The Android build fails if `SWITCHBOARD_APP_URL` is missing, which keeps a packaged app from silently embedding a stale personal URL.
 
 Then build:
 

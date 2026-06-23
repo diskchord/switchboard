@@ -26,7 +26,7 @@ final class AuthStore {
     }
 
     static String authorizationForAppUrl(Context context) {
-        Uri uri = Uri.parse(context.getString(R.string.app_url));
+        Uri uri = Uri.parse(ServerUrlStore.get(context));
         String host = uri.getHost();
         if (host == null || host.isEmpty()) {
             return "";

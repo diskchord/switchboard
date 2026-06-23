@@ -112,8 +112,22 @@
         opacity: 0.7;
       }
 
+      .app-actions {
+        border-top: 1px solid var(--line);
+        display: grid;
+        gap: 8px;
+        margin-top: 18px;
+        padding-top: 16px;
+      }
+
+      .secondary-button {
+        width: 100%;
+        background: transparent;
+        border-color: var(--line);
+        color: var(--ink);
+      }
+
       .error {
-        min-height: 20px;
         color: var(--danger);
         font-size: 13px;
         font-weight: 750;
@@ -124,6 +138,17 @@
         color: var(--muted);
         font-size: 13px;
         line-height: 1.4;
+      }
+
+      .notice {
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 750;
+      }
+
+      .error:empty,
+      .notice:empty {
+        display: none;
       }
 
       [hidden] {
@@ -163,12 +188,17 @@
         </label>
         <p class="hint" id="twoFactorHint" hidden>Use your authenticator app, or one of your saved backup codes.</p>
         <div class="error" id="error" role="alert" aria-live="polite"></div>
+        <div class="notice" id="notice" role="status" aria-live="polite"></div>
         <button id="submit" type="submit">Sign in</button>
       </form>
+      <div class="app-actions" id="appActions" hidden>
+        <button class="secondary-button" id="switchServerButton" type="button">Switch server</button>
+      </div>
     </main>
     <script>
       const form = document.querySelector("#loginForm");
       const error = document.querySelector("#error");
+      const notice = document.querySelector("#notice");
       const button = document.querySelector("#submit");
       const title = document.querySelector("h1");
       const intro = document.querySelector("#intro");
@@ -177,9 +207,20 @@
       const twoFactorField = document.querySelector("#twoFactorField");
       const twoFactorHint = document.querySelector("#twoFactorHint");
       const secondFactor = document.querySelector("#secondFactor");
+      const appActions = document.querySelector("#appActions");
+      const switchServerButton = document.querySelector("#switchServerButton");
       const params = new URLSearchParams(window.location.search);
       const next = params.get("next") || "/";
       const setupMode = params.get("setup") === "1";
+      const nativeBridge = window.SwitchboardAndroid;
+      const isNativeApp = Boolean(nativeBridge && typeof nativeBridge.showServerUrlDialog === "function");
+      if (isNativeApp) {
+        document.documentElement.dataset.nativeApp = "android";
+        appActions.hidden = false;
+      }
+      switchServerButton.addEventListener("click", () => {
+        nativeBridge?.showServerUrlDialog?.();
+      });
       form.next.value = next.startsWith("/") ? next : "/";
       const showTwoFactor = () => {
         twoFactorField.hidden = false;
@@ -201,10 +242,14 @@
       }
       if (params.get("2fa")) {
         showTwoFactor();
+        if (!params.get("error")) {
+          notice.textContent = "Enter your authenticator code or a backup code.";
+        }
       }
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         error.textContent = "";
+        notice.textContent = "";
         button.disabled = true;
         try {
           const response = await fetch(setupMode ? "/api/auth/setup" : "/api/auth/login", {
@@ -221,7 +266,7 @@
           const payload = await response.json().catch(() => ({}));
           if (payload.two_factor_required) {
             showTwoFactor();
-            error.textContent = "Enter your authenticator code or a backup code.";
+            notice.textContent = "Enter your authenticator code or a backup code.";
             button.disabled = false;
             secondFactor.focus();
             return;

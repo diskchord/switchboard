@@ -39,8 +39,20 @@
   --message-shadow: 0 4px 14px rgba(17, 24, 39, 0.08);
   --composer-shadow: 0 -8px 22px rgba(17, 24, 39, 0.08);
   --shadow: 0 10px 28px rgba(17, 24, 39, 0.12);
-  --mobile-screen-top-space: 36px;
+  --mobile-screen-top-space: 18px;
+  --mobile-rail-top-space: 8px;
+  --mobile-composer-bottom-space: 8px;
+  --mobile-modal-edge-space: 8px;
+  --mobile-dialog-edge-space: 12px;
   --layout-keyboard-inset: 0px;
+}
+
+:root[data-native-app="android"] {
+  --mobile-screen-top-space: 36px;
+  --mobile-rail-top-space: 22px;
+  --mobile-composer-bottom-space: 14px;
+  --mobile-modal-edge-space: 12px;
+  --mobile-dialog-edge-space: 18px;
 }
 
 :root[data-theme="dark"] {
@@ -826,6 +838,10 @@ select:focus {
   font-size: 12px;
 }
 
+.recipient-from-picker {
+  display: none;
+}
+
 .recipient-bar {
   display: flex;
   align-items: center;
@@ -1525,7 +1541,7 @@ select:focus {
 
 .identity-card {
   display: grid;
-  grid-template-columns: 32px 1fr 42px;
+  grid-template-columns: 32px minmax(0, 1fr) auto 42px;
   gap: 8px;
   align-items: center;
 }
@@ -1570,6 +1586,22 @@ select:focus {
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.identity-default-toggle {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.identity-default-toggle input {
+  height: 16px;
+  width: 16px;
 }
 
 .identity-autoreply,
@@ -2747,7 +2779,7 @@ select:focus {
     border-right: 0;
     border-bottom: 0;
     height: 100dvh;
-    padding-top: max(env(safe-area-inset-top), 22px);
+    padding-top: max(env(safe-area-inset-top), var(--mobile-rail-top-space));
     opacity: 1;
     transform: translate3d(0, 0, 0);
     transition: transform 240ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms ease, visibility 0s linear 240ms;
@@ -2931,7 +2963,33 @@ select:focus {
   }
 
   .recipient-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
     padding: 10px 14px;
+  }
+
+  .recipient-from-picker {
+    align-items: center;
+    color: var(--muted);
+    display: grid;
+    font-size: 12px;
+    font-weight: 800;
+    gap: 8px;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .recipient-from-picker select {
+    min-height: 38px;
+  }
+
+  .chips {
+    min-width: 0;
+  }
+
+  .recipient-entry {
+    min-width: 0;
+    width: 100%;
   }
 
   .messages {
@@ -2957,7 +3015,7 @@ select:focus {
   }
 
   .composer {
-    padding: 10px 14px max(env(safe-area-inset-bottom), 14px);
+    padding: 10px 14px max(env(safe-area-inset-bottom), var(--mobile-composer-bottom-space));
     position: relative;
     z-index: 6;
   }
@@ -3009,7 +3067,8 @@ select:focus {
   .settings-modal,
   .stats-modal {
     align-items: stretch;
-    padding: max(env(safe-area-inset-top), 12px) 12px max(env(safe-area-inset-bottom), 12px);
+    padding: max(env(safe-area-inset-top), var(--mobile-modal-edge-space)) 12px
+      max(env(safe-area-inset-bottom), var(--mobile-modal-edge-space));
   }
 
   .settings-card,
@@ -3024,7 +3083,8 @@ select:focus {
   .fax-modal {
     align-items: center;
     justify-items: center;
-    padding: max(env(safe-area-inset-top), 18px) 20px max(env(safe-area-inset-bottom), 18px);
+    padding: max(env(safe-area-inset-top), var(--mobile-dialog-edge-space)) 20px
+      max(env(safe-area-inset-bottom), var(--mobile-dialog-edge-space));
   }
 
   .contact-name-card,

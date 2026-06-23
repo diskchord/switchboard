@@ -138,6 +138,7 @@ const els = {
   faxFile: document.querySelector("#faxFile"),
   faxFilename: document.querySelector("#faxFilename"),
   recipientBar: document.querySelector("#recipientBar"),
+  recipientFromNumber: document.querySelector("#recipientFromNumber"),
   recipientChips: document.querySelector("#recipientChips"),
   recipientInput: document.querySelector("#recipientInput"),
   recipientSuggestions: document.querySelector("#recipientSuggestions"),
@@ -465,6 +466,7 @@ const I18N = {
     "identities.autoreply_cooldown": "Cooldown hours",
     "identities.autoreply_on": "On",
     "identities.autoreply_off": "Off",
+    "identities.default_from": "Default From",
     "identities.discard_confirm": "Discard unsaved number changes?",
     "voice.heading": "Calls",
     "voice.forwarding": "Call forwarding",
@@ -708,6 +710,7 @@ const I18N = {
     "identities.autoreply_cooldown": "Horas de espera",
     "identities.autoreply_on": "Activa",
     "identities.autoreply_off": "Inactiva",
+    "identities.default_from": "De predeterminado",
     "identities.discard_confirm": "¿Descartar los cambios no guardados del número?",
     "voice.heading": "Llamadas",
     "voice.forwarding": "Reenvío de llamadas",
@@ -951,6 +954,7 @@ const I18N = {
     "identities.autoreply_cooldown": "Heures d'attente",
     "identities.autoreply_on": "Active",
     "identities.autoreply_off": "Inactive",
+    "identities.default_from": "Expéditeur par défaut",
     "identities.discard_confirm": "Ignorer les modifications non enregistrées du numéro ?",
     "voice.heading": "Appels",
     "voice.forwarding": "Transfert d'appel",
@@ -3233,11 +3237,26 @@ function activeIdentityPhones() {
   return new Set((state.bootstrap?.identities || []).filter((identity) => identity.is_active).map((identity) => identity.phone_number));
 }
 
+function fromNumberOptionsHtml() {
+  return (state.bootstrap?.identities || [])
+    .filter((identity) => identity.is_active)
+    .map(
+      (identity) =>
+        `<option value="${escapeHtml(identity.phone_number)}">${escapeHtml(identity.label)} · ${escapeHtml(
+          phoneDisplay(identity.phone_number),
+        )}</option>`,
+    )
+    .join("");
+}
+
 function selectFromNumber(phone) {
   if (!phone) return;
   const activePhones = activeIdentityPhones();
   if (activePhones.has(phone)) {
     els.fromNumber.value = phone;
+    if (els.recipientFromNumber) {
+      els.recipientFromNumber.value = phone;
+    }
   }
 }
 
@@ -3281,15 +3300,11 @@ function renderBootstrap({ forceIdentities = false } = {}) {
         .join("")
     : "";
 
-  els.fromNumber.innerHTML = (state.bootstrap.identities || [])
-    .filter((identity) => identity.is_active)
-    .map(
-      (identity) =>
-        `<option value="${escapeHtml(identity.phone_number)}">${escapeHtml(identity.label)} · ${escapeHtml(
-          phoneDisplay(identity.phone_number),
-        )}</option>`,
-    )
-    .join("");
+  const fromOptions = fromNumberOptionsHtml();
+  els.fromNumber.innerHTML = fromOptions;
+  if (els.recipientFromNumber) {
+    els.recipientFromNumber.innerHTML = fromOptions;
+  }
   renderFaxFromOptions();
   selectFromNumber(previousFromNumber || preferredReplyIdentity());
 
@@ -3357,6 +3372,7 @@ function identitySnapshotFromIdentity(identity = {}) {
     voice_voicemail_enabled: identity.voice_voicemail_enabled === false ? false : true,
     voice_voicemail_greeting: String(identity.voice_voicemail_greeting || ""),
     voice_voicemail_greeting_media_url: String(identity.voice_voicemail_greeting_media_url || ""),
+    is_default: Boolean(identity.is_default),
   };
 }
 
@@ -3373,6 +3389,7 @@ function identitySnapshotFromCard(card) {
     voice_voicemail_enabled: Boolean(card.querySelector(".identity-voice-voicemail-enabled")?.checked),
     voice_voicemail_greeting: card.querySelector(".identity-voice-greeting")?.value || "",
     voice_voicemail_greeting_media_url: card.querySelector(".identity-voice-greeting-media-url")?.value || "",
+    is_default: Boolean(card.querySelector(".identity-default-from")?.checked),
   };
 }
 
@@ -3430,6 +3447,7 @@ function renderIdentities() {
         const voiceVoicemailStatus = voiceVoicemailEnabled ? t("identities.autoreply_on") : t("identities.autoreply_off");
         const voiceTimeout = Number(identity.voice_forward_timeout_seconds) || 20;
         const voiceGreetingMediaUrl = identity.voice_voicemail_greeting_media_url || "";
+        const defaultChecked = identity.is_default ? "checked" : "";
         return `
         <article class="identity-card ${identity.autoreply_enabled ? "autoreply-on" : ""}" data-id="${identity.id}">
           <label class="swatch color-swatch" style="background:${escapeHtml(identity.color)}" title="${escapeHtml(t("identities.color"))}">
@@ -3439,6 +3457,10 @@ function renderIdentities() {
             <input class="identity-label" value="${escapeHtml(identity.label)}" aria-label="${escapeHtml(t("identities.label"))}" />
             <div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div>
           </div>
+          <label class="identity-default-toggle">
+            <input class="identity-default-from" name="identity-default-from" type="radio" ${defaultChecked} />
+            <span>${escapeHtml(t("identities.default_from"))}</span>
+          </label>
           <button class="icon-button save-identity" title="${escapeHtml(t("common.save"))}" aria-label="${escapeHtml(t("common.save"))}">✓</button>
           <details class="identity-autoreply" ${autoreplyOpen}>
             <summary class="identity-autoreply-summary">
@@ -6026,6 +6048,7 @@ async function saveIdentity(card) {
   const voiceVoicemailEnabled = card.querySelector(".identity-voice-voicemail-enabled").checked;
   const voiceVoicemailGreeting = card.querySelector(".identity-voice-greeting").value;
   const voiceVoicemailGreetingMediaUrl = card.querySelector(".identity-voice-greeting-media-url").value;
+  const isDefault = Boolean(card.querySelector(".identity-default-from")?.checked);
   try {
     const payload = await api(`/api/identities/${id}`, {
       method: "PUT",
@@ -6042,10 +6065,17 @@ async function saveIdentity(card) {
         voice_voicemail_enabled: voiceVoicemailEnabled,
         voice_voicemail_greeting: voiceVoicemailGreeting,
         voice_voicemail_greeting_media_url: voiceVoicemailGreetingMediaUrl,
+        is_default: isDefault,
       }),
     });
     const index = state.bootstrap.identities.findIndex((item) => item.id === payload.identity.id);
     if (index >= 0) state.bootstrap.identities[index] = payload.identity;
+    if (payload.identity.is_default) {
+      state.bootstrap.default_identity = payload.identity.phone_number;
+      state.bootstrap.identities.forEach((identity) => {
+        identity.is_default = identity.id === payload.identity.id;
+      });
+    }
     applyIdentityToLoadedState(payload.identity);
     renderBootstrap({ forceIdentities: true });
     renderThreadHeader();
@@ -6408,6 +6438,8 @@ function bindEvents() {
     showComposerError("");
   });
   els.mediaUrls.addEventListener("focus", keepComposerInputVisible);
+  els.fromNumber.addEventListener("change", () => selectFromNumber(els.fromNumber.value));
+  els.recipientFromNumber?.addEventListener("change", () => selectFromNumber(els.recipientFromNumber.value));
   els.uploadButton?.addEventListener("pointerdown", startAttachPress);
   els.uploadButton?.addEventListener("pointerup", endAttachPress);
   els.uploadButton?.addEventListener("pointerleave", endAttachPress);
@@ -6569,7 +6601,13 @@ function bindEvents() {
   });
   els.detailRail.addEventListener("change", (event) => {
     const identityField = event.target.closest(".identity-card input, .identity-card textarea");
-    if (identityField) updateIdentityDirtyState(identityField);
+    if (identityField) {
+      if (identityField.matches(".identity-default-from")) {
+        updateIdentityDirtyStates();
+      } else {
+        updateIdentityDirtyState(identityField);
+      }
+    }
     const voiceGreetingFile = event.target.closest(".identity-voice-greeting-file");
     if (voiceGreetingFile) uploadVoiceGreetingFile(voiceGreetingFile);
   });
