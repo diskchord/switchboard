@@ -8,6 +8,10 @@ The Android wrapper can be built generically and asks for your Switchboard serve
 
 ![Switchboard desktop interface showing a conversation inbox and message thread](docs/Screenshot_Desktop_General.png)
 
+![Switchboard group conversation view showing grouped recipients and message history](docs/Screenshot_Groups.png)
+
+![Switchboard mobile conversation view with the Android-style compact layout](docs/Screenshot_Mob.png)
+
 Authored by [Alexander Peppe](https://www.alexanderpeppe.com/).
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
