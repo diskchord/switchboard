@@ -62,7 +62,10 @@ const state = {
   messageBottomStickStartedAt: 0,
   messageScrollAnchor: null,
   lastVisualViewportHeight: 0,
+  maxVisualViewportHeight: 0,
   lastLayoutKeyboardInset: 0,
+  composerTouchStartY: 0,
+  composerSpaceScrollGuard: null,
   audioContext: null,
   audioUnlocked: false,
   latestInboundSoundKey: "",
@@ -1243,6 +1246,102 @@ function updateComposerOffset() {
     els.appShell?.style.setProperty("--thread-messages-top", `${messagesTop}px`);
     els.appShell?.style.setProperty("--thread-messages-bottom", `${messagesBottom}px`);
   }
+  clampMessagesScrollTop();
+}
+
+function cssPixelValue(value, fallback = 0) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function composerTextAreaMaxHeight(minHeight = 0) {
+  const viewportHeight = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
+  const hardCap = isMobileLayout() ? 180 : 220;
+  const viewportCap = viewportHeight > 0 ? Math.round(viewportHeight * 0.32) : hardCap;
+  return Math.max(minHeight, Math.min(hardCap, viewportCap));
+}
+
+function resizeComposerTextArea({ preserveViewport = false } = {}) {
+  if (!els.messageText) return;
+  const viewportState = preserveViewport
+    ? captureMessageViewportState({ preferStickyBottom: composerHasFocus() })
+    : null;
+  const textarea = els.messageText;
+  const previousHeight = textarea.getBoundingClientRect().height;
+  textarea.style.height = "auto";
+  const style = window.getComputedStyle(textarea);
+  const minHeight = cssPixelValue(style.minHeight);
+  const viewportMaxHeight = composerTextAreaMaxHeight(minHeight);
+  const cssMaxHeight = cssPixelValue(style.maxHeight, viewportMaxHeight);
+  const maxHeight = Math.max(minHeight, Math.min(cssMaxHeight, viewportMaxHeight));
+  const nextHeight = Math.ceil(clamp(textarea.scrollHeight, minHeight, maxHeight));
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > nextHeight + 1 ? "auto" : "hidden";
+  if (viewportState && Math.abs(nextHeight - previousHeight) > 1) {
+    scheduleMessageViewportRestore(viewportState);
+    return;
+  }
+  requestAnimationFrame(updateComposerOffset);
+}
+
+function maxMessagesScrollTop() {
+  if (!els.messages) return 0;
+  return Math.max(0, els.messages.scrollHeight - els.messages.clientHeight);
+}
+
+function setMessagesScrollTop(value) {
+  if (!els.messages) return;
+  els.messages.scrollTop = clamp(Number(value) || 0, 0, maxMessagesScrollTop());
+}
+
+function clampMessagesScrollTop() {
+  if (!els.messages) return false;
+  const current = els.messages.scrollTop;
+  const next = clamp(current, 0, maxMessagesScrollTop());
+  if (Math.abs(next - current) < 1) return false;
+  els.messages.scrollTop = next;
+  return true;
+}
+
+function clampDocumentScroll() {
+  const root = document.scrollingElement || document.documentElement;
+  if (window.scrollX || window.scrollY) {
+    window.scrollTo(0, 0);
+  }
+  if (root) {
+    root.scrollLeft = 0;
+    root.scrollTop = 0;
+  }
+}
+
+function composerTextScrollRange() {
+  if (!els.messageText) return 0;
+  return Math.max(0, els.messageText.scrollHeight - els.messageText.clientHeight);
+}
+
+function beginComposerTextTouch(event) {
+  if (!event.touches?.length) return;
+  state.composerTouchStartY = event.touches[0].clientY;
+}
+
+function containComposerTextTouch(event) {
+  if (!event.touches?.length || !els.messageText) return;
+  event.stopPropagation();
+  const currentY = event.touches[0].clientY;
+  const deltaY = currentY - state.composerTouchStartY;
+  state.composerTouchStartY = currentY;
+  const scrollRange = composerTextScrollRange();
+  if (scrollRange <= 1) {
+    event.preventDefault();
+    clampDocumentScroll();
+    return;
+  }
+  const atTop = els.messageText.scrollTop <= 0;
+  const atBottom = els.messageText.scrollTop >= scrollRange - 1;
+  if ((deltaY > 0 && atTop) || (deltaY < 0 && atBottom)) {
+    event.preventDefault();
+    clampDocumentScroll();
+  }
 }
 
 function syncVisualViewportMetrics() {
@@ -1253,8 +1352,12 @@ function syncVisualViewportMetrics() {
     ? Math.max(0, Math.ceil(window.innerHeight - viewport.height - viewport.offsetTop))
     : 0;
   const nativeKeyboardInset = state.nativeKeyboardInset || 0;
+  const observedMaxHeight = Math.max(state.maxVisualViewportHeight || 0, height);
+  const reducedByViewport = observedMaxHeight - height;
+  const viewportAlreadyMadeKeyboardRoom =
+    nativeKeyboardInset > 0 && reducedByViewport > Math.max(36, Math.min(96, nativeKeyboardInset * 0.25));
   const keyboardInset = Math.max(viewportKeyboardInset, nativeKeyboardInset);
-  const layoutKeyboardInset = viewportKeyboardInset > 0 ? 0 : nativeKeyboardInset;
+  const layoutKeyboardInset = viewportKeyboardInset > 0 || viewportAlreadyMadeKeyboardRoom ? 0 : nativeKeyboardInset;
   const layoutChanged =
     Boolean(state.lastVisualViewportHeight) &&
     (Math.abs(height - state.lastVisualViewportHeight) > 1 || layoutKeyboardInset !== state.lastLayoutKeyboardInset);
@@ -1266,6 +1369,12 @@ function syncVisualViewportMetrics() {
   document.documentElement.style.setProperty("--keyboard-inset", `${keyboardInset}px`);
   document.documentElement.style.setProperty("--layout-keyboard-inset", `${layoutKeyboardInset}px`);
   document.body.classList.toggle("keyboard-open", keyboardInset > 0);
+  clampDocumentScroll();
+  resizeComposerTextArea();
+  clampMessagesScrollTop();
+  if (nativeKeyboardInset <= 0 || height > state.maxVisualViewportHeight) {
+    state.maxVisualViewportHeight = height;
+  }
   state.lastVisualViewportHeight = height;
   state.lastLayoutKeyboardInset = layoutKeyboardInset;
   if (viewportState) {
@@ -1321,7 +1430,7 @@ function restoreMessageViewportState(viewportState) {
   updateComposerOffset();
   if (!viewportState) return;
   if (viewportState.stickToBottom) {
-    els.messages.scrollTop = els.messages.scrollHeight;
+    setMessagesScrollTop(maxMessagesScrollTop());
     state.messageScrollAnchor = null;
     return;
   }
@@ -2614,6 +2723,7 @@ function updateMessageCounter() {
   const segmentLabel = segments <= 1 ? "1 SMS" : `${segments} SMS`;
   els.messageCounter.textContent = units === 0 ? `0/${currentLimit}` : `${units}/${currentLimit} · ${segmentLabel}`;
   els.messageCounter.title = `${encoding} text encoding`;
+  resizeComposerTextArea({ preserveViewport: true });
 }
 
 function renderUploadedMedia() {
@@ -4263,14 +4373,14 @@ function captureFallbackMessageRowAnchor() {
 
 function restoreMessageScrollAnchor(anchor, fallbackScrollTop) {
   if (!anchor?.key) {
-    els.messages.scrollTop = Math.max(0, fallbackScrollTop);
+    setMessagesScrollTop(fallbackScrollTop);
     return true;
   }
   const row = resolveMessageScrollAnchor(anchor.key) || resolveMessageScrollAnchor(captureFallbackMessageRowAnchor()?.key);
   if (!row) return false;
   const viewport = els.messages.getBoundingClientRect();
   const nextOffsetTop = row.getBoundingClientRect().top - viewport.top;
-  els.messages.scrollTop += nextOffsetTop - anchor.offsetTop;
+  setMessagesScrollTop(els.messages.scrollTop + nextOffsetTop - anchor.offsetTop);
   return true;
 }
 
@@ -4722,7 +4832,7 @@ function scrollMessagesToBottom(bottomStickToken = null) {
   updateComposerOffset();
   const scroll = () => {
     if (bottomStickToken !== null && !messageBottomStickIsActive(bottomStickToken)) return;
-    els.messages.scrollTop = els.messages.scrollHeight;
+    setMessagesScrollTop(maxMessagesScrollTop());
   };
   requestAnimationFrame(() => {
     scroll();
@@ -4732,7 +4842,7 @@ function scrollMessagesToBottom(bottomStickToken = null) {
 }
 
 function isNearMessageBottom() {
-  return els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight < 120;
+  return maxMessagesScrollTop() - els.messages.scrollTop < 120;
 }
 
 function markMessageUserScrollIntent() {
@@ -4745,7 +4855,54 @@ function markMessageKeyboardScrollIntent(event) {
   markMessageUserScrollIntent();
 }
 
+function isComposerSpaceKey(event) {
+  return (
+    event.key === " " &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.isComposing &&
+    event.target === els.messageText
+  );
+}
+
+function beginComposerSpaceScrollGuard(event) {
+  if (!isComposerSpaceKey(event) || !els.messages) return;
+  state.composerSpaceScrollGuard = {
+    scrollTop: els.messages.scrollTop,
+    maxScrollTop: maxMessagesScrollTop(),
+    expiresAt: performance.now() + 350,
+  };
+}
+
+function restoreComposerSpaceScrollGuard({ keepActive = true } = {}) {
+  const guard = state.composerSpaceScrollGuard;
+  if (!guard || !els.messages) return false;
+  if (performance.now() > guard.expiresAt) {
+    state.composerSpaceScrollGuard = null;
+    return false;
+  }
+  const maxScrollTop = maxMessagesScrollTop();
+  const target = Math.abs(guard.maxScrollTop - guard.scrollTop) < 2 ? maxScrollTop : clamp(guard.scrollTop, 0, maxScrollTop);
+  const changed = Math.abs(els.messages.scrollTop - target) > 1;
+  if (changed) {
+    setMessagesScrollTop(target);
+  }
+  if (!keepActive) {
+    state.composerSpaceScrollGuard = null;
+  }
+  return changed;
+}
+
+function endComposerSpaceScrollGuard(event) {
+  if (!isComposerSpaceKey(event)) return;
+  restoreComposerSpaceScrollGuard();
+  requestAnimationFrame(() => restoreComposerSpaceScrollGuard({ keepActive: false }));
+}
+
 function handleMessagesScroll() {
+  if (clampMessagesScrollTop()) return;
+  if (restoreComposerSpaceScrollGuard()) return;
   if (isNearMessageBottom()) {
     state.messageUserScrolledAwayFromBottom = false;
     state.messageUserScrollIntent = false;
@@ -6421,18 +6578,22 @@ function bindEvents() {
     setCurrentConversationArchived(archived);
   });
   els.messageText.addEventListener("keydown", (event) => {
+    beginComposerSpaceScrollGuard(event);
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       if (els.sendButton.disabled) return;
       sendCurrentMessage();
     }
   });
+  els.messageText.addEventListener("keyup", endComposerSpaceScrollGuard);
   els.messageText.addEventListener("input", () => {
     updateMessageCounter();
     keepComposerInputVisible();
     showComposerError("");
   });
   els.messageText.addEventListener("focus", keepComposerInputVisible);
+  els.messageText.addEventListener("touchstart", beginComposerTextTouch, { passive: true });
+  els.messageText.addEventListener("touchmove", containComposerTextTouch, { passive: false });
   els.mediaUrls.addEventListener("input", () => {
     keepComposerInputVisible();
     showComposerError("");
@@ -6558,6 +6719,7 @@ function bindEvents() {
   window.addEventListener("pageshow", (event) => {
     refreshForegroundData({ force: Boolean(event.persisted) }).catch((error) => toast(error.message));
   });
+  window.addEventListener("scroll", clampDocumentScroll, { passive: true });
   window.addEventListener("beforeunload", (event) => {
     if (!hasDirtyIdentityChanges()) return;
     event.preventDefault();

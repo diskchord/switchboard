@@ -59,7 +59,7 @@ public class MainActivity extends Activity {
     private volatile boolean nativePullRefreshEnabled = false;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
     private static final int FILE_CHOOSER_REQUEST = 41;
-    private static final String APP_ASSET_VERSION = "e7f9a14c";
+    private static final String APP_ASSET_VERSION = "f4c9a7d2";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
     private boolean promptedForServerAfterFailure = false;

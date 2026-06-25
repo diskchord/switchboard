@@ -1364,9 +1364,13 @@ select:focus {
 }
 
 .composer-text-wrap textarea {
+  max-height: min(32vh, 220px);
   min-height: 82px;
+  overscroll-behavior: contain;
+  overflow-y: hidden;
   padding-right: 62px;
   padding-bottom: 20px;
+  resize: none;
 }
 
 .composer-meta {
@@ -3033,6 +3037,7 @@ select:focus {
   }
 
   .composer-text-wrap textarea {
+    max-height: min(32dvh, 180px);
     padding-right: 58px;
     padding-bottom: 20px;
   }
