@@ -261,6 +261,11 @@ body.resizing-columns .column-resizer::before {
   gap: 8px;
 }
 
+.panel-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .eyebrow {
   margin: 0 0 4px;
   color: var(--accent-2);
@@ -659,11 +664,83 @@ select:focus {
   margin-top: 3px;
 }
 
+.conversation-search-preview {
+  color: var(--ink);
+  display: -webkit-box;
+  line-height: 1.25;
+  max-height: 2.5em;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.conversation-search-preview mark,
+.message-text mark {
+  background: var(--warning-soft);
+  border-radius: 3px;
+  color: var(--warning-ink);
+  padding: 0 2px;
+}
+
 .conversation-status {
   color: var(--muted);
   font-size: 12px;
   padding: 14px 8px 20px;
   text-align: center;
+}
+
+.conversation-search-state {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 13px;
+  font-weight: 750;
+  justify-content: center;
+  min-height: 180px;
+  padding: 24px 12px;
+  text-align: center;
+}
+
+.conversation-empty-state {
+  color: var(--muted-2);
+}
+
+.typing-dots {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 18px;
+}
+
+.typing-dots span {
+  animation: typing-dot-bounce 780ms ease-in-out infinite;
+  background: var(--accent);
+  border-radius: 999px;
+  display: block;
+  height: 7px;
+  opacity: 0.45;
+  width: 7px;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes typing-dot-bounce {
+  0%,
+  70%,
+  100% {
+    opacity: 0.4;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(-5px);
+  }
 }
 
 .thread-pane {
@@ -1017,6 +1094,26 @@ select:focus {
 
 .message-row.warning .message-bubble {
   border-color: var(--warning-line);
+}
+
+.message-row.search-target .message-bubble {
+  border-color: var(--warning-line);
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.32), var(--message-shadow);
+}
+
+.message-row.search-target-flash .message-bubble {
+  animation: search-target-flash 900ms ease-out 2;
+}
+
+@keyframes search-target-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.32), var(--message-shadow);
+  }
+
+  45% {
+    box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.34), var(--message-shadow);
+  }
 }
 
 .message-bubble {

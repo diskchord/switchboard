@@ -4,6 +4,9 @@ const state = {
   conversationCategory: "inbox",
   hasMoreConversations: true,
   isLoadingConversations: false,
+  pendingConversationSearch: false,
+  loadingConversationSearchQuery: "",
+  loadedConversationSearchQuery: "",
   conversationRequestSeq: 0,
   openConversationSeq: 0,
   currentConversationId: null,
@@ -22,10 +25,14 @@ const state = {
   lastThreadRefreshAt: 0,
   threadNavigationInFlight: false,
   searchTimer: null,
+  searchTargetMessageId: "",
+  searchTargetTerms: [],
+  phoneContactsSyncing: false,
   lightboxImages: [],
   lightboxIndex: 0,
   recipientDraft: [],
   recipientDraftLabels: {},
+  composerDraftsByRecipient: new Map(),
   recipientSuggestions: [],
   recipientSuggestionIndex: -1,
   recipientSuggestionSeq: 0,
@@ -65,7 +72,7 @@ const state = {
   maxVisualViewportHeight: 0,
   lastLayoutKeyboardInset: 0,
   composerTouchStartY: 0,
-  composerSpaceScrollGuard: null,
+  composerInputScrollGuard: null,
   audioContext: null,
   audioUnlocked: false,
   latestInboundSoundKey: "",
@@ -165,6 +172,7 @@ const els = {
   identityList: document.querySelector("#identityList"),
   contactSearch: document.querySelector("#contactSearch"),
   contactResults: document.querySelector("#contactResults"),
+  syncPhoneContactsButton: document.querySelector("#syncPhoneContactsButton"),
   syncContactsButton: document.querySelector("#syncContactsButton"),
   lightbox: document.querySelector("#lightbox"),
   lightboxImage: document.querySelector("#lightboxImage"),
@@ -379,6 +387,8 @@ const I18N = {
     "conversation.could_not_deliver": "Could not deliver",
     "conversation.loading_more": "Loading more...",
     "conversation.first_imported": "First imported thread reached",
+    "conversation.searching": "Searching",
+    "conversation.no_results": "No results",
     "conversation.archived": "Archived to Hidden.",
     "conversation.unarchived": "Moved to Inbox.",
     "conversation.marked_read": "Marked read.",
@@ -483,9 +493,12 @@ const I18N = {
     "voice.upload_greeting": "Upload recording",
     "voice.greeting_uploaded": "Greeting recording uploaded.",
     "contacts.sync": "Sync",
+    "contacts.phone_sync": "Phone",
     "contacts.find": "Find contact",
     "contacts.add": "Add",
     "contacts.synced": "Synced {count} contacts.",
+    "contacts.phone_unavailable": "Phone contacts are available in the Android app.",
+    "contacts.phone_permission_denied": "Allow contact access to import phone contacts.",
     "lightbox.preview": "Image preview",
     "lightbox.close": "Close image preview",
     "lightbox.previous": "Previous image",
@@ -623,6 +636,8 @@ const I18N = {
     "conversation.could_not_deliver": "No se pudo entregar",
     "conversation.loading_more": "Cargando más...",
     "conversation.first_imported": "Primer hilo importado alcanzado",
+    "conversation.searching": "Buscando",
+    "conversation.no_results": "Sin resultados",
     "conversation.archived": "Archivado en Ocultos.",
     "conversation.unarchived": "Movido a Entrada.",
     "conversation.marked_read": "Marcado como leído.",
@@ -727,9 +742,12 @@ const I18N = {
     "voice.upload_greeting": "Subir grabación",
     "voice.greeting_uploaded": "Grabación del saludo subida.",
     "contacts.sync": "Sincronizar",
+    "contacts.phone_sync": "Teléfono",
     "contacts.find": "Buscar contacto",
     "contacts.add": "Agregar",
     "contacts.synced": "{count} contactos sincronizados.",
+    "contacts.phone_unavailable": "Los contactos del teléfono están disponibles en la app de Android.",
+    "contacts.phone_permission_denied": "Permite el acceso a contactos para importar los contactos del teléfono.",
     "lightbox.preview": "Vista de imagen",
     "lightbox.close": "Cerrar vista de imagen",
     "lightbox.previous": "Imagen anterior",
@@ -867,6 +885,8 @@ const I18N = {
     "conversation.could_not_deliver": "Impossible de livrer",
     "conversation.loading_more": "Chargement...",
     "conversation.first_imported": "Premier fil importé atteint",
+    "conversation.searching": "Recherche",
+    "conversation.no_results": "Aucun résultat",
     "conversation.archived": "Archivé dans Masqués.",
     "conversation.unarchived": "Déplacé vers la boîte.",
     "conversation.marked_read": "Marqué comme lu.",
@@ -971,9 +991,12 @@ const I18N = {
     "voice.upload_greeting": "Téléverser l'enregistrement",
     "voice.greeting_uploaded": "Enregistrement de l'annonce téléversé.",
     "contacts.sync": "Synchroniser",
+    "contacts.phone_sync": "Téléphone",
     "contacts.find": "Trouver un contact",
     "contacts.add": "Ajouter",
     "contacts.synced": "{count} contacts synchronisés.",
+    "contacts.phone_unavailable": "Les contacts du téléphone sont disponibles dans l'app Android.",
+    "contacts.phone_permission_denied": "Autorisez l'accès aux contacts pour importer les contacts du téléphone.",
     "lightbox.preview": "Aperçu de l'image",
     "lightbox.close": "Fermer l'aperçu",
     "lightbox.previous": "Image précédente",
@@ -1227,6 +1250,14 @@ window.textingRefreshIfStaleFromNative = () => {
   return true;
 };
 
+window.textingReceivePhoneContactsFromNative = (payload) => {
+  handlePhoneContactsFromNative(payload).catch((error) => {
+    setPhoneContactsSyncing(false);
+    toast(error.message);
+  });
+  return true;
+};
+
 function updateComposerOffset() {
   if (!els.threadPane || !els.composer) return;
   const composerHeight = Math.ceil(els.composer.getBoundingClientRect().height || 0);
@@ -1278,6 +1309,13 @@ function resizeComposerTextArea({ preserveViewport = false } = {}) {
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > nextHeight + 1 ? "auto" : "hidden";
   if (viewportState && Math.abs(nextHeight - previousHeight) > 1) {
+    if (viewportState.stickToBottom) {
+      updateComposerOffset();
+      setMessagesScrollTop(maxMessagesScrollTop());
+      state.messageScrollAnchor = null;
+      requestAnimationFrame(() => setMessagesScrollTop(maxMessagesScrollTop()));
+      return;
+    }
     scheduleMessageViewportRestore(viewportState);
     return;
   }
@@ -1505,6 +1543,28 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderHighlightedText(value, terms = []) {
+  const text = String(value || "");
+  const uniqueTerms = [...new Set(terms.map((term) => String(term || "").trim()).filter(Boolean))].sort(
+    (a, b) => b.length - a.length,
+  );
+  if (!text || !uniqueTerms.length) return escapeHtml(text);
+  const pattern = new RegExp(`(${uniqueTerms.map(escapeRegExp).join("|")})`, "gi");
+  let cursor = 0;
+  let html = "";
+  for (const match of text.matchAll(pattern)) {
+    html += escapeHtml(text.slice(cursor, match.index));
+    html += `<mark>${escapeHtml(match[0])}</mark>`;
+    cursor = match.index + match[0].length;
+  }
+  html += escapeHtml(text.slice(cursor));
+  return html;
 }
 
 function bootstrapSettingValue(key, fallback = "") {
@@ -3450,6 +3510,11 @@ function updateConversationSearchClear() {
 function scheduleConversationSearchLoad() {
   clearTimeout(state.searchTimer);
   updateConversationSearchClear();
+  state.pendingConversationSearch = Boolean(els.conversationSearch.value.trim());
+  if (state.pendingConversationSearch) {
+    state.conversations = [];
+  }
+  renderConversations();
   state.searchTimer = setTimeout(() => {
     loadConversations({ append: false }).catch((error) => toast(error.message));
   }, 180);
@@ -3464,6 +3529,9 @@ function clearConversationSearch({ focus = false } = {}) {
   clearTimeout(state.searchTimer);
   els.conversationSearch.value = "";
   updateConversationSearchClear();
+  state.pendingConversationSearch = false;
+  state.loadingConversationSearchQuery = "";
+  state.loadedConversationSearchQuery = "";
   loadConversations({ append: false }).catch((error) => toast(error.message));
   if (focus) els.conversationSearch.focus();
   return true;
@@ -3647,7 +3715,49 @@ function renderIdentities() {
     .join("");
 }
 
+function conversationListState() {
+  return els.conversationList.firstElementChild?.dataset?.conversationState || "";
+}
+
+function renderConversationSearchLoadingState() {
+  if (conversationListState() === "search-loading") {
+    const loadingState = els.conversationList.firstElementChild;
+    loadingState.setAttribute("aria-label", t("conversation.searching"));
+    return;
+  }
+  els.conversationList.innerHTML = `
+    <div class="conversation-search-state" data-conversation-state="search-loading" role="status" aria-live="polite" aria-label="${escapeHtml(t("conversation.searching"))}">
+      <span class="typing-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+    </div>`;
+}
+
+function renderConversationSearchNoResultsState() {
+  if (conversationListState() === "search-empty") {
+    els.conversationList.firstElementChild.textContent = t("conversation.no_results");
+    return;
+  }
+  els.conversationList.innerHTML = `<div class="conversation-search-state conversation-empty-state" data-conversation-state="search-empty">${escapeHtml(t("conversation.no_results"))}</div>`;
+}
+
 function renderConversations() {
+  const searchQuery = (els.conversationSearch?.value || "").trim();
+  const searchIsLoading =
+    Boolean(searchQuery) &&
+    (state.pendingConversationSearch || (state.isLoadingConversations && state.loadingConversationSearchQuery === searchQuery));
+  if (searchIsLoading && !state.conversations.length) {
+    renderConversationSearchLoadingState();
+    return;
+  }
+  if (
+    searchQuery &&
+    !state.isLoadingConversations &&
+    !state.pendingConversationSearch &&
+    state.loadedConversationSearchQuery === searchQuery &&
+    !state.conversations.length
+  ) {
+    renderConversationSearchNoResultsState();
+    return;
+  }
   const items = state.conversations
     .map((conversation) => {
       const active = conversation.id === state.currentConversationId ? "active" : "";
@@ -3659,6 +3769,7 @@ function renderConversations() {
       const failedClass = conversation.last_status_kind === "failed" ? "failed-message" : "";
       const title = conversation.title || t("conversation.unknown");
       const previewPrefix = conversation.last_direction === "outbound" ? t("conversation.you") : "";
+      const searchMatch = conversation.search_match?.type === "message" ? conversation.search_match : null;
       const lastStatusLabel = localizedStatusLabel(conversation.last_status, conversation.last_status_label);
       const failedPreview =
         conversation.last_status_kind === "failed"
@@ -3667,6 +3778,10 @@ function renderConversations() {
             })
           : "";
       const preview = failedPreview || messagePreviewText(conversation) || (lastStatusLabel ? lastStatusLabel : "");
+      const previewHtml = searchMatch
+        ? renderHighlightedText(searchMatch.snippet || "", searchMatch.terms || [])
+        : escapeHtml(previewPrefix + preview);
+      const previewClass = searchMatch ? "conversation-preview conversation-search-preview" : "conversation-preview";
       return `
         <button class="conversation-item ${active} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}">
           <span class="avatar conversation-selector" role="checkbox" aria-checked="${selected ? "true" : "false"}" title="${escapeHtml(t("selection.actions"))}">
@@ -3677,7 +3792,7 @@ function renderConversations() {
               <strong>${escapeHtml(title)}</strong>
               <time>${escapeHtml(formatTime(conversation.last_occurred_at, true))}</time>
             </div>
-            <div class="conversation-preview">${escapeHtml(previewPrefix + preview)}</div>
+            <div class="${previewClass}">${previewHtml}</div>
           </div>
         </button>`;
     })
@@ -4539,6 +4654,10 @@ function renderMessages(messages, scrollMode = "bottom") {
           : "";
       const canReact = messageCanBeReactedTo(message);
       const messageId = message.id !== undefined && message.id !== null ? String(message.id) : "";
+      const isSearchTarget = Boolean(messageId && messageId === state.searchTargetMessageId);
+      const messageTextHtml = isSearchTarget
+        ? renderHighlightedText(message.text || "", state.searchTargetTerms)
+        : escapeHtml(message.text);
       const failureDetail =
         statusKind === "failed" || statusKind === "warning"
           ? `<div class="message-error ${statusKind}">
@@ -4548,13 +4667,13 @@ function renderMessages(messages, scrollMode = "bottom") {
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
+        <article class="message-row ${message.direction} ${statusKind} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
               ${messageTypeLabel}
               ${attachments ? `<div class="${attachmentGridClass}">${attachments}</div>` : ""}
               ${standaloneReaction}
-              ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ""}
+              ${message.text ? `<div class="message-text">${messageTextHtml}</div>` : ""}
               ${queuedDetail}
               ${failureDetail}
               <div class="message-meta">
@@ -4626,6 +4745,37 @@ function messageById(id) {
   const targetId = String(id || "");
   if (!targetId) return null;
   return state.messages.find((message) => String(message.id) === targetId) || null;
+}
+
+function messageRowById(id) {
+  const targetId = String(id || "");
+  if (!targetId) return null;
+  return [...els.messages.querySelectorAll(".message-row[data-message-id]")].find((row) => row.dataset.messageId === targetId) || null;
+}
+
+function scrollMessageRowIntoView(id) {
+  const row = messageRowById(id);
+  if (!row) return false;
+  const viewport = els.messages.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const nextTop = els.messages.scrollTop + rowRect.top - viewport.top - Math.max(24, (viewport.height - rowRect.height) * 0.35);
+  setMessagesScrollTop(nextTop);
+  row.classList.add("search-target-flash");
+  window.setTimeout(() => row.classList.remove("search-target-flash"), 1800);
+  return true;
+}
+
+async function revealMessageInThread(messageId) {
+  const targetId = String(messageId || "");
+  if (!targetId) return false;
+  let attempts = 0;
+  while (!messageById(targetId) && state.hasMoreMessages && attempts < 30) {
+    attempts += 1;
+    const loaded = await loadOlderMessages({ render: false, schedulePoll: false });
+    if (!loaded) break;
+  }
+  renderMessages(state.messages, "preserve");
+  return scrollMessageRowIntoView(targetId);
 }
 
 function messageCanBeReactedTo(message) {
@@ -4846,6 +4996,7 @@ function isNearMessageBottom() {
 }
 
 function markMessageUserScrollIntent() {
+  state.composerInputScrollGuard = null;
   state.messageUserScrollIntent = true;
 }
 
@@ -4855,31 +5006,35 @@ function markMessageKeyboardScrollIntent(event) {
   markMessageUserScrollIntent();
 }
 
-function isComposerSpaceKey(event) {
-  return (
-    event.key === " " &&
-    !event.altKey &&
-    !event.ctrlKey &&
-    !event.metaKey &&
-    !event.isComposing &&
-    event.target === els.messageText
-  );
+function isComposerEditTarget(event) {
+  return event.target === els.messageText;
 }
 
-function beginComposerSpaceScrollGuard(event) {
-  if (!isComposerSpaceKey(event) || !els.messages) return;
-  state.composerSpaceScrollGuard = {
+function isComposerEditKey(event) {
+  if (!isComposerEditTarget(event) || event.altKey || event.ctrlKey || event.metaKey) return false;
+  return event.key.length === 1 || ["Backspace", "Delete", "Enter"].includes(event.key);
+}
+
+function beginComposerInputScrollGuard(event) {
+  if (!isComposerEditTarget(event) || !els.messages) return;
+  state.composerInputScrollGuard = {
     scrollTop: els.messages.scrollTop,
     maxScrollTop: maxMessagesScrollTop(),
     expiresAt: performance.now() + 350,
   };
 }
 
-function restoreComposerSpaceScrollGuard({ keepActive = true } = {}) {
-  const guard = state.composerSpaceScrollGuard;
+function beginComposerKeyScrollGuard(event) {
+  if (isComposerEditKey(event)) {
+    beginComposerInputScrollGuard(event);
+  }
+}
+
+function restoreComposerInputScrollGuard({ keepActive = true } = {}) {
+  const guard = state.composerInputScrollGuard;
   if (!guard || !els.messages) return false;
   if (performance.now() > guard.expiresAt) {
-    state.composerSpaceScrollGuard = null;
+    state.composerInputScrollGuard = null;
     return false;
   }
   const maxScrollTop = maxMessagesScrollTop();
@@ -4889,20 +5044,28 @@ function restoreComposerSpaceScrollGuard({ keepActive = true } = {}) {
     setMessagesScrollTop(target);
   }
   if (!keepActive) {
-    state.composerSpaceScrollGuard = null;
+    state.composerInputScrollGuard = null;
   }
   return changed;
 }
 
-function endComposerSpaceScrollGuard(event) {
-  if (!isComposerSpaceKey(event)) return;
-  restoreComposerSpaceScrollGuard();
-  requestAnimationFrame(() => restoreComposerSpaceScrollGuard({ keepActive: false }));
+function endComposerInputScrollGuard(event) {
+  if (!isComposerEditTarget(event)) return;
+  restoreComposerInputScrollGuard();
+  requestAnimationFrame(() => restoreComposerInputScrollGuard({ keepActive: false }));
+}
+
+function handleComposerTextInput() {
+  updateMessageCounter();
+  keepComposerInputVisible();
+  restoreComposerInputScrollGuard();
+  requestAnimationFrame(() => restoreComposerInputScrollGuard());
+  showComposerError("");
 }
 
 function handleMessagesScroll() {
   if (clampMessagesScrollTop()) return;
-  if (restoreComposerSpaceScrollGuard()) return;
+  if (restoreComposerInputScrollGuard()) return;
   if (isNearMessageBottom()) {
     state.messageUserScrolledAwayFromBottom = false;
     state.messageUserScrollIntent = false;
@@ -5255,6 +5418,75 @@ function nativePullRefreshBridge() {
   return bridge && typeof bridge.setPullRefreshEnabled === "function" ? bridge : null;
 }
 
+function nativePhoneContactsBridge() {
+  const bridge = window.SwitchboardAndroid;
+  return bridge && typeof bridge.syncPhoneContacts === "function" ? bridge : null;
+}
+
+function updateNativePhoneContactsAvailability() {
+  if (!els.syncPhoneContactsButton) return;
+  els.syncPhoneContactsButton.hidden = !nativePhoneContactsBridge();
+}
+
+function setPhoneContactsSyncing(syncing) {
+  state.phoneContactsSyncing = syncing;
+  if (els.syncPhoneContactsButton) {
+    els.syncPhoneContactsButton.disabled = syncing;
+  }
+}
+
+function parseNativePhoneContactsPayload(payload) {
+  if (typeof payload === "string") {
+    return JSON.parse(payload);
+  }
+  return payload || {};
+}
+
+async function handlePhoneContactsFromNative(payload) {
+  const data = parseNativePhoneContactsPayload(payload);
+  try {
+    if (data.status === "permission_denied") {
+      toast(t("contacts.phone_permission_denied"));
+      return;
+    }
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    const contacts = Array.isArray(data.contacts) ? data.contacts : [];
+    const response = await api("/api/contacts/phone", {
+      method: "POST",
+      body: JSON.stringify({ contacts }),
+    });
+    toast(t("contacts.synced", { count: response.synced?.contacts || 0 }));
+    state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
+    renderBootstrap();
+    await loadConversations({ append: false, preserveScroll: true, limit: Math.max(80, state.conversations.length || 0) });
+    if (state.currentConversationId) {
+      await refreshCurrentConversationStatus({ knownChanged: true, force: true, passive: true });
+    }
+    searchContacts();
+  } finally {
+    setPhoneContactsSyncing(false);
+  }
+}
+
+function syncPhoneContactsFromDevice() {
+  if (!confirmDiscardIdentityChanges()) return;
+  const bridge = nativePhoneContactsBridge();
+  if (!bridge) {
+    toast(t("contacts.phone_unavailable"));
+    return;
+  }
+  setPhoneContactsSyncing(true);
+  try {
+    bridge.syncPhoneContacts();
+  } catch (error) {
+    setPhoneContactsSyncing(false);
+    toast(error.message || String(error));
+  }
+}
+
 function syncNativePullRefreshEnabled() {
   const bridge = nativePullRefreshBridge();
   if (!bridge) return;
@@ -5450,14 +5682,27 @@ async function loadConversations({ append = false, preserveScroll = false, limit
   state.isLoadingConversations = true;
   const previousScrollTop = els.conversationList.scrollTop;
   if (append) renderConversations();
-  const query = encodeURIComponent(els.conversationSearch.value || "");
+  const rawSearchQuery = (els.conversationSearch.value || "").trim();
+  if (!append) {
+    state.loadingConversationSearchQuery = rawSearchQuery;
+    if (rawSearchQuery) {
+      state.pendingConversationSearch = true;
+      renderConversations();
+    } else {
+      state.pendingConversationSearch = false;
+      state.loadedConversationSearchQuery = "";
+    }
+  }
+  const query = encodeURIComponent(rawSearchQuery);
   const hidden = state.conversationCategory === "hidden" ? "1" : "0";
   const unread = state.conversationCategory === "unread" ? "1" : "0";
   const cursor = append ? conversationCursor() : "";
   const pageLimit = clamp(Math.round(Number(limit) || 80), 80, 200);
+  const searchQueryIsCurrent = () => append || rawSearchQuery === (els.conversationSearch.value || "").trim();
   try {
     const payload = await api(`/api/conversations?limit=${pageLimit}&hidden=${hidden}&unread=${unread}&search=${query}${cursor}`);
     if (requestSeq !== state.conversationRequestSeq) return;
+    if (!searchQueryIsCurrent()) return;
     if (append) {
       const existing = new Set(state.conversations.map((conversation) => conversation.id));
       state.conversations = [
@@ -5466,6 +5711,7 @@ async function loadConversations({ append = false, preserveScroll = false, limit
       ];
     } else {
       state.conversations = payload.conversations;
+      state.loadedConversationSearchQuery = rawSearchQuery;
       state.lastListRefreshAt = Date.now();
       trackInboundSoundKey(latestInboundSoundKeyFromConversations(state.conversations), { play: soundForNew });
     }
@@ -5473,6 +5719,13 @@ async function loadConversations({ append = false, preserveScroll = false, limit
   } finally {
     if (requestSeq === state.conversationRequestSeq) {
       state.isLoadingConversations = false;
+      if (!searchQueryIsCurrent()) {
+        return;
+      }
+      if (!append) {
+        state.pendingConversationSearch = false;
+        state.loadingConversationSearchQuery = "";
+      }
       renderConversations();
       if (!append) {
         els.conversationList.scrollTop = preserveScroll ? previousScrollTop : 0;
@@ -5484,9 +5737,12 @@ async function loadConversations({ append = false, preserveScroll = false, limit
 
 async function openConversation(id, options = {}) {
   const updateHistory = options.updateHistory !== false;
+  const targetMessageId = options.targetMessageId ? String(options.targetMessageId) : "";
+  const targetTerms = Array.isArray(options.searchTerms) ? options.searchTerms : [];
   clearStatusPoll();
   const conversationId = Number(id);
   if (!conversationId) return;
+  saveComposerDraftForCurrentRecipients();
   const requestSeq = ++state.openConversationSeq;
   const previousConversationId = state.currentConversationId;
   const shouldOpenBeforeLoad = isDesktopLayout() || document.body.classList.contains("mobile-thread-open");
@@ -5516,13 +5772,20 @@ async function openConversation(id, options = {}) {
   state.messages = payload.messages;
   state.hasMoreMessages = payload.has_more;
   state.olderCount = payload.older_count;
+  state.searchTargetMessageId = targetMessageId;
+  state.searchTargetTerms = targetMessageId ? targetTerms : [];
   trackInboundSoundKey(latestInboundSoundKeyFromMessages(state.messages));
   state.lastThreadRefreshAt = Date.now();
   selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
+  restoreComposerDraftForRecipients();
   renderConversations();
   scrollActiveConversationIntoView();
   renderThreadHeader();
   renderMessages(state.messages, "bottom");
+  if (targetMessageId) {
+    const found = await revealMessageInThread(targetMessageId);
+    if (!found) toast("That matching message is no longer available.");
+  }
   if (updateHistory) {
     pushMobileThreadState({ conversationId });
   }
@@ -5645,9 +5908,9 @@ async function toggleCurrentConversationRead() {
   await setCurrentConversationRead(shouldMarkRead);
 }
 
-async function loadOlderMessages() {
-  clearStatusPoll();
-  if (!state.currentConversationId || !state.messages.length || !state.hasMoreMessages) return;
+async function loadOlderMessages({ render = true, scrollMode = "preserve", schedulePoll = true } = {}) {
+  if (schedulePoll) clearStatusPoll();
+  if (!state.currentConversationId || !state.messages.length || !state.hasMoreMessages) return 0;
   const oldest = state.messages[0];
   const before = encodeURIComponent(oldest.occurred_at);
   const payload = await api(
@@ -5656,13 +5919,17 @@ async function loadOlderMessages() {
   state.messages = [...payload.messages, ...state.messages];
   state.hasMoreMessages = payload.has_more;
   state.olderCount = payload.older_count;
-  renderMessages(state.messages, "preserve");
-  scheduleStatusPoll();
+  if (render) {
+    renderMessages(state.messages, scrollMode);
+  }
+  if (schedulePoll) scheduleStatusPoll();
+  return payload.messages.length;
 }
 
 function startNewConversation(options = {}) {
   const updateHistory = options.updateHistory !== false;
   clearStatusPoll();
+  saveComposerDraftForCurrentRecipients();
   state.openConversationSeq += 1;
   setMobileThreadOpen(true);
   if (updateHistory) {
@@ -5718,17 +5985,29 @@ function addRecipient(raw, displayName = "") {
     return;
   }
   const label = usefulContactName(phone, displayName);
-  if (!state.recipientDraft.includes(phone)) {
-    state.recipientDraft.push(phone);
-  }
-  if (label) {
-    state.recipientDraftLabels[phone] = label;
-  }
+  preserveDraftAcrossRecipientChange(() => {
+    if (!state.recipientDraft.includes(phone)) {
+      state.recipientDraft.push(phone);
+    }
+    if (label) {
+      state.recipientDraftLabels[phone] = label;
+    }
+  });
   els.recipientInput.value = "";
   clearRecipientSuggestions();
   renderRecipientDraft();
   renderThreadHeader();
   matchExistingGroupDraft();
+}
+
+function removeRecipient(phone) {
+  preserveDraftAcrossRecipientChange(() => {
+    state.recipientDraft = state.recipientDraft.filter((item) => item !== phone);
+    delete state.recipientDraftLabels[phone];
+  });
+  state.draftMatchSeq += 1;
+  renderRecipientDraft();
+  renderThreadHeader();
 }
 
 function commitPendingRecipientInput() {
@@ -5783,6 +6062,7 @@ function validateComposerDraft(draft) {
 }
 
 function clearComposerDraft() {
+  deleteSavedComposerDraft();
   els.messageText.value = "";
   els.mediaUrls.value = "";
   state.uploadedMedia = [];
@@ -5795,6 +6075,7 @@ function composerSnapshot() {
     text: els.messageText.value,
     mediaUrls: els.mediaUrls.value,
     uploadedMedia: state.uploadedMedia.map((item) => ({ ...item })),
+    fromNumber: els.fromNumber.value,
   };
 }
 
@@ -5807,8 +6088,72 @@ function restoreComposerSnapshot(snapshot, { onlyIfEmpty = true } = {}) {
   els.messageText.value = snapshot.text || "";
   els.mediaUrls.value = snapshot.mediaUrls || "";
   state.uploadedMedia = (snapshot.uploadedMedia || []).map((item) => ({ ...item }));
+  if (snapshot.fromNumber && [...els.fromNumber.options].some((option) => option.value === snapshot.fromNumber)) {
+    selectFromNumber(snapshot.fromNumber);
+  }
   renderUploadedMedia();
   updateMessageCounter();
+}
+
+function normalizedDraftRecipients(recipients = currentRecipients()) {
+  return [...new Set((recipients || []).map((phone) => normalizeDraftPhone(phone)).filter(isUsableDraftPhone))].sort();
+}
+
+function composerDraftKey(recipients = currentRecipients()) {
+  return normalizedDraftRecipients(recipients).join("|");
+}
+
+function composerSnapshotHasContent(snapshot) {
+  return Boolean(snapshot?.text || snapshot?.mediaUrls || snapshot?.uploadedMedia?.length);
+}
+
+function saveComposerSnapshotForKey(key, snapshot) {
+  if (!key) return;
+  if (composerSnapshotHasContent(snapshot)) {
+    state.composerDraftsByRecipient.set(key, snapshot);
+  } else {
+    state.composerDraftsByRecipient.delete(key);
+  }
+}
+
+function saveComposerDraftForCurrentRecipients() {
+  const key = composerDraftKey();
+  if (!key) return;
+  saveComposerSnapshotForKey(key, composerSnapshot());
+}
+
+function deleteSavedComposerDraft(recipients = currentRecipients()) {
+  const key = composerDraftKey(recipients);
+  if (key) state.composerDraftsByRecipient.delete(key);
+}
+
+function restoreComposerDraftForRecipients(recipients = currentRecipients()) {
+  const key = composerDraftKey(recipients);
+  const snapshot = key ? state.composerDraftsByRecipient.get(key) : null;
+  if (snapshot) {
+    restoreComposerSnapshot(snapshot, { onlyIfEmpty: false });
+    return;
+  }
+  els.messageText.value = "";
+  els.mediaUrls.value = "";
+  state.uploadedMedia = [];
+  renderUploadedMedia();
+  updateMessageCounter();
+}
+
+function preserveDraftAcrossRecipientChange(changeRecipients) {
+  const previousKey = composerDraftKey();
+  const snapshot = composerSnapshot();
+  changeRecipients();
+  const nextKey = composerDraftKey();
+  if (previousKey && previousKey !== nextKey) {
+    saveComposerSnapshotForKey(previousKey, snapshot);
+  }
+  if (nextKey && previousKey !== nextKey && state.composerDraftsByRecipient.has(nextKey)) {
+    restoreComposerDraftForRecipients();
+  } else if (nextKey && previousKey !== nextKey) {
+    saveComposerSnapshotForKey(nextKey, snapshot);
+  }
 }
 
 function filenameFromUrl(value) {
@@ -6390,8 +6735,13 @@ function bindEvents() {
       return;
     }
     if (state.threadNavigationInFlight) return;
+    const conversation = state.conversations.find((item) => Number(item.id) === Number(button.dataset.id));
+    const searchMatch = conversation?.search_match?.type === "message" ? conversation.search_match : null;
     state.threadNavigationInFlight = true;
-    openConversation(button.dataset.id)
+    openConversation(button.dataset.id, {
+      targetMessageId: searchMatch?.message_id,
+      searchTerms: searchMatch?.terms || [],
+    })
       .catch((error) => toast(error.message))
       .finally(() => {
         state.threadNavigationInFlight = false;
@@ -6541,11 +6891,7 @@ function bindEvents() {
   els.recipientChips.addEventListener("click", (event) => {
     const button = event.target.closest("[data-remove-recipient]");
     if (!button) return;
-    state.recipientDraft = state.recipientDraft.filter((phone) => phone !== button.dataset.removeRecipient);
-    delete state.recipientDraftLabels[button.dataset.removeRecipient];
-    state.draftMatchSeq += 1;
-    renderRecipientDraft();
-    renderThreadHeader();
+    removeRecipient(button.dataset.removeRecipient);
   });
   els.sendButton.addEventListener("pointerdown", startSendPress);
   els.sendButton.addEventListener("pointerup", endSendPress);
@@ -6578,19 +6924,16 @@ function bindEvents() {
     setCurrentConversationArchived(archived);
   });
   els.messageText.addEventListener("keydown", (event) => {
-    beginComposerSpaceScrollGuard(event);
+    beginComposerKeyScrollGuard(event);
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       if (els.sendButton.disabled) return;
       sendCurrentMessage();
     }
   });
-  els.messageText.addEventListener("keyup", endComposerSpaceScrollGuard);
-  els.messageText.addEventListener("input", () => {
-    updateMessageCounter();
-    keepComposerInputVisible();
-    showComposerError("");
-  });
+  els.messageText.addEventListener("beforeinput", beginComposerInputScrollGuard);
+  els.messageText.addEventListener("keyup", endComposerInputScrollGuard);
+  els.messageText.addEventListener("input", handleComposerTextInput);
   els.messageText.addEventListener("focus", keepComposerInputVisible);
   els.messageText.addEventListener("touchstart", beginComposerTextTouch, { passive: true });
   els.messageText.addEventListener("touchmove", containComposerTextTouch, { passive: false });
@@ -6789,6 +7132,7 @@ function bindEvents() {
       els.syncContactsButton.disabled = false;
     }
   });
+  els.syncPhoneContactsButton?.addEventListener("click", syncPhoneContactsFromDevice);
   let contactTimer;
   els.contactSearch.addEventListener("input", () => {
     clearTimeout(contactTimer);
@@ -6802,6 +7146,7 @@ async function init() {
   const initialConversationId = initialConversationIdFromLocation();
   replaceNavigationState("list");
   bindEvents();
+  updateNativePhoneContactsAvailability();
   syncVisualViewportMetrics();
   updateComposerOffset();
   updateMessageCounter();

@@ -32,7 +32,7 @@ from .autoreply import (
     identity_autoreply_fields,
     update_autoreply_rule,
 )
-from .contacts import ContactsError, active_provider, configured_providers
+from .contacts import ContactsError, active_provider, configured_providers, import_phone_contacts
 from .contacts import save_contact_name as save_synced_contact_name
 from .contacts import start_autosync, sync_contacts
 from .db import connect, conversation_key, ensure_conversation, from_json, init_db, self_numbers
@@ -692,11 +692,18 @@ def _contact_name(conn, phone: str) -> str:
     row = conn.execute(
         """
         SELECT c.display_name
-        FROM contact_phones cp
-        JOIN contacts c ON c.id = cp.contact_id
-        WHERE cp.phone_number = ?
-        ORDER BY c.source IN ('fastmail', 'google') DESC, c.updated_at DESC
-        LIMIT 1
+	        FROM contact_phones cp
+	        JOIN contacts c ON c.id = cp.contact_id
+	        WHERE cp.phone_number = ?
+	        ORDER BY
+	          CASE c.source
+	            WHEN 'fastmail' THEN 3
+	            WHEN 'google' THEN 3
+	            WHEN 'phone' THEN 2
+	            ELSE 1
+	          END DESC,
+	          c.updated_at DESC
+	        LIMIT 1
         """,
         (phone,),
     ).fetchone()
@@ -713,10 +720,17 @@ def _participants(conn, conversation_id: int) -> list[dict]:
           (
             SELECT best.display_name
             FROM contact_phones best_phone
-            JOIN contacts best ON best.id = best_phone.contact_id
-            WHERE best_phone.phone_number = cp.phone_number
-            ORDER BY best.source IN ('fastmail', 'google') DESC, best.updated_at DESC
-            LIMIT 1
+	            JOIN contacts best ON best.id = best_phone.contact_id
+	            WHERE best_phone.phone_number = cp.phone_number
+	            ORDER BY
+	              CASE best.source
+	                WHEN 'fastmail' THEN 3
+	                WHEN 'google' THEN 3
+	                WHEN 'phone' THEN 2
+	                ELSE 1
+	              END DESC,
+	              best.updated_at DESC
+	            LIMIT 1
           ) AS contact_display,
           i.label AS identity_label,
           i.color
@@ -751,10 +765,119 @@ def _conversation_title(conn, conversation_id: int, fallback: str | None = None)
     return fallback or "Unknown"
 
 
+def _search_terms(value: str) -> list[str]:
+    return [part for part in re.split(r"\s+", value.strip().lower()) if part]
+
+
+def _conversation_direct_search_expr(terms: list[str]) -> tuple[str, list[str]]:
+    clauses: list[str] = []
+    params: list[str] = []
+    for term in terms:
+        like = f"%{term}%"
+        clauses.append(
+            """
+            (
+              lower(COALESCE(c.title, '')) LIKE ?
+              OR EXISTS (
+                SELECT 1
+                FROM conversation_participants direct_cp
+                LEFT JOIN contacts direct_co ON direct_co.id = direct_cp.contact_id
+                WHERE direct_cp.conversation_id = c.id
+                  AND direct_cp.role = 'participant'
+                  AND (
+                    lower(COALESCE(direct_co.display_name, '')) LIKE ?
+                    OR lower(direct_cp.phone_number) LIKE ?
+                  )
+              )
+            )
+            """
+        )
+        params.extend([like, like, like])
+    return " AND ".join(clauses) if clauses else "0", params
+
+
+def _conversation_text_search_expr(table: str, alias: str, terms: list[str]) -> tuple[str, list[str]]:
+    clauses: list[str] = []
+    params: list[str] = []
+    for term in terms:
+        clauses.append(f"lower(COALESCE({alias}.text, '')) LIKE ?")
+        params.append(f"%{term}%")
+    where_sql = " AND ".join(clauses) if clauses else "0"
+    return (
+        f"""
+        EXISTS (
+          SELECT 1
+          FROM {table} {alias}
+          WHERE {alias}.conversation_id = c.id
+            AND {where_sql}
+        )
+        """,
+        params,
+    )
+
+
+def _conversation_search_clause(terms: list[str]) -> tuple[str, list[str]]:
+    direct_sql, direct_params = _conversation_direct_search_expr(terms)
+    message_sql, message_params = _conversation_text_search_expr("messages", "search_m", terms)
+    scheduled_sql, scheduled_params = _conversation_text_search_expr("scheduled_messages", "search_sm", terms)
+    return (
+        f"({direct_sql}) OR ({message_sql}) OR ({scheduled_sql})",
+        [*direct_params, *message_params, *scheduled_params],
+    )
+
+
+def _search_snippet(text: str, terms: list[str], max_length: int = 160, context: int = 52) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not compact:
+        return ""
+    lower = compact.lower()
+    positions = [lower.find(term) for term in terms if term]
+    positions = [position for position in positions if position >= 0]
+    first = min(positions) if positions else 0
+    start = max(0, first - context)
+    end = min(len(compact), start + max_length)
+    if end - start < max_length:
+        start = max(0, end - max_length)
+    snippet = compact[start:end].strip()
+    if start > 0:
+        snippet = f"...{snippet}"
+    if end < len(compact):
+        snippet = f"{snippet}..."
+    return snippet
+
+
+def _conversation_message_search_match(conn, conversation_id: int, terms: list[str]) -> dict | None:
+    if not terms:
+        return None
+    where_sql = " AND ".join(["lower(COALESCE(text, '')) LIKE ?"] * len(terms))
+    params = [f"%{term}%" for term in terms]
+    row = conn.execute(
+        f"""
+        SELECT id, text, occurred_at
+        FROM messages
+        WHERE conversation_id = ?
+          AND {where_sql}
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT 1
+        """,
+        (conversation_id, *params),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "type": "message",
+        "message_id": row["id"],
+        "occurred_at": row["occurred_at"],
+        "snippet": _search_snippet(row["text"], terms),
+        "terms": terms,
+    }
+
+
 def list_conversations(query: dict[str, list[str]]) -> dict:
     conn = connect()
     init_db(conn)
     search = (query.get("search") or [""])[0].strip()
+    search_terms = _search_terms(search)
     hidden = (query.get("hidden") or ["0"])[0].lower() in {"1", "true", "yes"}
     unread = (query.get("unread") or ["0"])[0].lower() in {"1", "true", "yes"}
     limit = min(int((query.get("limit") or ["80"])[0]), 200)
@@ -764,27 +887,18 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
     clauses: list[str] = []
     clauses.append("COALESCE(c.is_archived, 0) = ?")
     params: list = [1 if hidden else 0]
+    search_select_params: list[str] = []
+    search_rank_select = "0 AS search_name_rank"
     if unread:
         clauses.append(UNREAD_CONVERSATION_CLAUSE)
-    if search:
-        like = f"%{search.lower()}%"
-        clauses.append(
-            """
-            (
-              c.id IN (
-          SELECT cp.conversation_id
-          FROM conversation_participants cp
-          LEFT JOIN contacts co ON co.id = cp.contact_id
-          WHERE lower(cp.phone_number) LIKE ? OR lower(COALESCE(co.display_name, '')) LIKE ?
-              ) OR c.id IN (
-                SELECT conversation_id FROM messages WHERE lower(text) LIKE ?
-              ) OR c.id IN (
-                SELECT conversation_id FROM scheduled_messages WHERE lower(text) LIKE ?
-              )
-            )
-            """
-        )
-        params.extend([like, like, like, like])
+    if search_terms:
+        direct_search_sql, direct_search_params = _conversation_direct_search_expr(search_terms)
+        search_rank_select = f"CASE WHEN {direct_search_sql} THEN 1 ELSE 0 END AS search_name_rank"
+        search_select_params.extend(direct_search_params)
+        search_clause, search_params = _conversation_search_clause(search_terms)
+        if search_clause:
+            clauses.append(f"({search_clause})")
+            params.extend(search_params)
     if before and before_id:
         clauses.append(
             f"""
@@ -814,6 +928,7 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
           sm.status AS scheduled_status,
           sm.failure AS scheduled_failure,
           {CONVERSATION_SORT_EXPR} AS list_sort_at,
+          {search_rank_select},
           (SELECT COUNT(*) FROM messages mm WHERE mm.conversation_id = c.id) AS message_count
         FROM conversations c
         LEFT JOIN messages m ON m.id = (
@@ -840,16 +955,18 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
           LIMIT 1
         )
         {where}
-        ORDER BY list_sort_at DESC, c.id DESC
+        ORDER BY search_name_rank DESC, list_sort_at DESC, c.id DESC
         LIMIT ?
         """,
-        (*params, limit + 1),
+        (*search_select_params, *params, limit + 1),
     ).fetchall()
     has_more = len(rows) > limit
     rows = rows[:limit]
     conversations = []
     for row in rows:
         item = _row_dict(row)
+        direct_search_match = bool(row["search_name_rank"]) if search_terms else False
+        item.pop("search_name_rank", None)
         use_scheduled = bool(row["scheduled_id"]) and (
             not row["last_occurred_at"] or row["scheduled_for"] >= row["last_occurred_at"]
         )
@@ -878,6 +995,8 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
             item["last_status_detail"] = row["scheduled_failure"] if row["scheduled_status"] == "failed" else f"Scheduled for {row['scheduled_for']}"
         else:
             item["last_status_detail"] = _message_status_detail(row["last_status"], row["last_raw_json"])
+        if search_terms and not direct_search_match:
+            item["search_match"] = _conversation_message_search_match(conn, row["id"], search_terms)
         conversations.append(item)
     return {"conversations": conversations, "has_more": has_more}
 
@@ -1626,39 +1745,58 @@ def message_stats(query: dict[str, list[str]] | None = None) -> dict:
 def search_contacts(query: dict[str, list[str]]) -> dict:
     conn = connect()
     init_db(conn)
-    term = (query.get("q") or [""])[0].strip().lower()
-    if not term:
+    terms = _search_terms((query.get("q") or [""])[0])
+    if not terms:
         rows = conn.execute(
             """
-            SELECT c.id, c.display_name, cp.phone_number, cp.label
+            SELECT c.id, c.display_name, c.source, cp.phone_number, cp.label
             FROM contacts c
             JOIN contact_phones cp ON cp.contact_id = c.id
-            ORDER BY c.updated_at DESC
+            ORDER BY
+              CASE c.source
+                WHEN 'fastmail' THEN 3
+                WHEN 'google' THEN 3
+                WHEN 'phone' THEN 2
+                ELSE 1
+              END DESC,
+              c.updated_at DESC
             LIMIT 50
             """
         ).fetchall()
     else:
-        like = f"%{term}%"
+        where_sql = " AND ".join(["(lower(c.display_name) LIKE ? OR cp.phone_number LIKE ?)"] * len(terms))
+        params = []
+        for term in terms:
+            like = f"%{term}%"
+            params.extend([like, like])
         rows = conn.execute(
-            """
-            SELECT c.id, c.display_name, cp.phone_number, cp.label
+            f"""
+            SELECT c.id, c.display_name, c.source, cp.phone_number, cp.label
             FROM contacts c
             JOIN contact_phones cp ON cp.contact_id = c.id
-            WHERE lower(c.display_name) LIKE ? OR cp.phone_number LIKE ?
-            ORDER BY c.display_name
+            WHERE {where_sql}
+            ORDER BY
+              CASE c.source
+                WHEN 'fastmail' THEN 3
+                WHEN 'google' THEN 3
+                WHEN 'phone' THEN 2
+                ELSE 1
+              END DESC,
+              c.display_name
             LIMIT 50
             """,
-            (like, like),
+            params,
         ).fetchall()
     return {
         "contacts": [
             {
                 "id": row["id"],
                 "display_name": row["display_name"],
-                "phone_number": row["phone_number"],
-                "phone_display": display_phone(row["phone_number"]),
-                "label": row["label"],
-            }
+	                "phone_number": row["phone_number"],
+	                "phone_display": display_phone(row["phone_number"]),
+	                "label": row["label"],
+	                "source": row["source"],
+	            }
             for row in rows
         ]
     }
@@ -2944,6 +3082,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(bulk_update_conversations(self._read_json()))
             elif path == "/api/contacts/sync":
                 self._send_json({"synced": sync_contacts()})
+            elif path == "/api/contacts/phone":
+                self._send_json({"synced": import_phone_contacts(self._read_json())})
             elif path == "/api/contacts/name":
                 self._send_json(save_contact_name(self._read_json()))
             elif path == "/api/settings":

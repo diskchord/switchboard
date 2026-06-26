@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
@@ -13,6 +14,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.ContactsContract;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -38,6 +40,14 @@ import android.webkit.WebViewClient;
 
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
 public class MainActivity extends Activity {
     private static final int SHELL_BACKGROUND = Color.rgb(12, 17, 23);
     private static final int LIGHT_SHELL_BACKGROUND = Color.rgb(230, 232, 235);
@@ -59,7 +69,8 @@ public class MainActivity extends Activity {
     private volatile boolean nativePullRefreshEnabled = false;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
     private static final int FILE_CHOOSER_REQUEST = 41;
-    private static final String APP_ASSET_VERSION = "f4c9a7d2";
+    private static final int PHONE_CONTACTS_PERMISSION_REQUEST = 42;
+    private static final String APP_ASSET_VERSION = "5b7a3f21";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
     private boolean promptedForServerAfterFailure = false;
@@ -494,6 +505,11 @@ public class MainActivity extends Activity {
         public void showServerUrlDialog() {
             runOnUiThread(MainActivity.this::showServerUrlDialog);
         }
+
+        @JavascriptInterface
+        public void syncPhoneContacts() {
+            runOnUiThread(MainActivity.this::startPhoneContactsSync);
+        }
     }
 
     @Override
@@ -507,6 +523,178 @@ public class MainActivity extends Activity {
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != PHONE_CONTACTS_PERMISSION_REQUEST) {
+            return;
+        }
+        boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (granted) {
+            startPhoneContactsSync();
+        } else {
+            sendPhoneContactsStatus("permission_denied", "Contact permission was denied.");
+        }
+    }
+
+    private void startPhoneContactsSync() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            && checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, PHONE_CONTACTS_PERMISSION_REQUEST);
+            return;
+        }
+        new Thread(() -> {
+            try {
+                JSONArray contacts = readPhoneContacts();
+                JSONObject payload = new JSONObject();
+                payload.put("contacts", contacts);
+                payload.put("count", contacts.length());
+                sendPhoneContactsPayload(payload);
+            } catch (Exception error) {
+                sendPhoneContactsStatus("error", error.getMessage() == null ? "Unable to read phone contacts." : error.getMessage());
+            }
+        }, "switchboard-phone-contacts").start();
+    }
+
+    private JSONArray readPhoneContacts() throws Exception {
+        Map<String, PhoneContactPayload> contacts = new LinkedHashMap<>();
+        String[] projection = new String[]{
+            ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+            ContactsContract.CommonDataKinds.Phone.LOOKUP_KEY,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY,
+            ContactsContract.CommonDataKinds.Phone.NUMBER,
+            ContactsContract.CommonDataKinds.Phone.TYPE,
+            ContactsContract.CommonDataKinds.Phone.LABEL
+        };
+        String sortOrder = ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY + " COLLATE LOCALIZED ASC";
+        try (Cursor cursor = getContentResolver().query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            projection,
+            null,
+            null,
+            sortOrder
+        )) {
+            if (cursor == null) {
+                return new JSONArray();
+            }
+            int contactIdIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.CONTACT_ID);
+            int lookupKeyIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.LOOKUP_KEY);
+            int displayNameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY);
+            int numberIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER);
+            int typeIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.TYPE);
+            int labelIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.LABEL);
+            while (cursor.moveToNext()) {
+                String contactId = cursorString(cursor, contactIdIndex);
+                String lookupKey = cursorString(cursor, lookupKeyIndex);
+                String displayName = cursorString(cursor, displayNameIndex);
+                String number = cursorString(cursor, numberIndex);
+                if (number.trim().isEmpty()) {
+                    continue;
+                }
+                String key = lookupKey.trim().isEmpty() ? contactId : lookupKey;
+                if (key.trim().isEmpty()) {
+                    key = displayName + "|" + number;
+                }
+                PhoneContactPayload contact = contacts.get(key);
+                if (contact == null) {
+                    contact = new PhoneContactPayload(contactId, lookupKey, displayName);
+                    contacts.put(key, contact);
+                }
+                int phoneType = typeIndex >= 0 && !cursor.isNull(typeIndex) ? cursor.getInt(typeIndex) : ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE;
+                String customLabel = cursorString(cursor, labelIndex);
+                CharSequence typeLabel = ContactsContract.CommonDataKinds.Phone.getTypeLabel(getResources(), phoneType, customLabel);
+                contact.addPhone(number, typeLabel == null ? "mobile" : typeLabel.toString());
+            }
+        }
+        JSONArray payload = new JSONArray();
+        for (PhoneContactPayload contact : contacts.values()) {
+            if (contact.hasPhones()) {
+                payload.put(contact.toJson());
+            }
+        }
+        return payload;
+    }
+
+    private String cursorString(Cursor cursor, int index) {
+        if (index < 0 || cursor.isNull(index)) {
+            return "";
+        }
+        String value = cursor.getString(index);
+        return value == null ? "" : value;
+    }
+
+    private void sendPhoneContactsStatus(String status, String message) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("status", status);
+            if (message != null && !message.trim().isEmpty()) {
+                if ("error".equals(status)) {
+                    payload.put("error", message);
+                } else {
+                    payload.put("message", message);
+                }
+            }
+            sendPhoneContactsPayload(payload);
+        } catch (Exception ignored) {
+            // Nothing else can report the failure if JSON construction itself fails.
+        }
+    }
+
+    private void sendPhoneContactsPayload(JSONObject payload) {
+        if (webView == null) {
+            return;
+        }
+        String script = "(function(payload){"
+            + "if(window.textingReceivePhoneContactsFromNative){"
+            + "window.textingReceivePhoneContactsFromNative(payload);"
+            + "}"
+            + "})(" + payload.toString() + ");";
+        runOnUiThread(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(script, null);
+            }
+        });
+    }
+
+    private static class PhoneContactPayload {
+        private final String contactId;
+        private final String lookupKey;
+        private final String displayName;
+        private final JSONArray phones = new JSONArray();
+        private final Set<String> seenNumbers = new LinkedHashSet<>();
+
+        PhoneContactPayload(String contactId, String lookupKey, String displayName) {
+            this.contactId = contactId == null ? "" : contactId;
+            this.lookupKey = lookupKey == null ? "" : lookupKey;
+            this.displayName = displayName == null ? "" : displayName;
+        }
+
+        void addPhone(String number, String label) throws Exception {
+            String cleaned = number == null ? "" : number.trim();
+            if (cleaned.isEmpty() || seenNumbers.contains(cleaned)) {
+                return;
+            }
+            seenNumbers.add(cleaned);
+            JSONObject phone = new JSONObject();
+            phone.put("number", cleaned);
+            phone.put("label", label == null || label.trim().isEmpty() ? "mobile" : label.trim());
+            phones.put(phone);
+        }
+
+        boolean hasPhones() {
+            return phones.length() > 0;
+        }
+
+        JSONObject toJson() throws Exception {
+            JSONObject contact = new JSONObject();
+            contact.put("contact_id", contactId);
+            contact.put("lookup_key", lookupKey);
+            contact.put("display_name", displayName);
+            contact.put("phones", phones);
+            return contact;
+        }
     }
 
     @Override
