@@ -40,6 +40,8 @@ const state = {
   contactNameParticipantPhone: "",
   columnWidths: { left: 340, right: 330 },
   uploadedMedia: [],
+  mediaUploadProgress: [],
+  nextMediaUploadProgressId: 1,
   isUploadingMedia: false,
   selectedConversationIds: new Set(),
   conversationPressTimer: null,
@@ -62,6 +64,7 @@ const state = {
   isRefreshingFromPull: false,
   layoutResizeObserver: null,
   pendingPassiveMessageRender: false,
+  pendingPassiveMessageScrollMode: "preserve",
   messageBottomStickToken: 0,
   messageLayoutToken: 0,
   messageUserScrolledAwayFromBottom: false,
@@ -462,6 +465,8 @@ const I18N = {
     "fax.sent": "Fax queued.",
     "fax.long_press": "Long press to send fax",
     "upload.default": "Upload",
+    "upload.uploading": "Uploading",
+    "upload.progress": "{percent}%",
     "upload.one": "Media uploaded.",
     "upload.many": "{count} files uploaded.",
     "attachment.image": "Image",
@@ -711,6 +716,8 @@ const I18N = {
     "fax.sent": "Fax encolado.",
     "fax.long_press": "Mantén pulsado para enviar fax",
     "upload.default": "Subida",
+    "upload.uploading": "Subiendo",
+    "upload.progress": "{percent}%",
     "upload.one": "Media subida.",
     "upload.many": "{count} archivos subidos.",
     "attachment.image": "Imagen",
@@ -2787,12 +2794,27 @@ function updateMessageCounter() {
 }
 
 function renderUploadedMedia() {
-  if (!state.uploadedMedia.length) {
+  const activeUploads = state.mediaUploadProgress || [];
+  if (!state.uploadedMedia.length && !activeUploads.length) {
     els.uploadList.classList.add("hidden");
     els.uploadList.innerHTML = "";
+    requestAnimationFrame(updateComposerOffset);
     return;
   }
-  els.uploadList.innerHTML = state.uploadedMedia
+  const activeUploadHtml = activeUploads
+    .map((item) => {
+      const progress = Number.isFinite(item.progress) ? clamp(Math.round(item.progress), 0, 100) : null;
+      const progressValue = progress === null ? "" : ` value="${progress}"`;
+      const progressLabel = progress === null ? t("upload.uploading") : t("upload.progress", { percent: progress });
+      return `
+        <span class="upload-chip upload-progress-chip" title="${escapeHtml(item.name)}">
+          <span>${escapeHtml(item.name || t("upload.default"))}</span>
+          <progress class="upload-progress" max="100"${progressValue}></progress>
+          <small>${escapeHtml(progressLabel)}</small>
+        </span>`;
+    })
+    .join("");
+  const uploadedHtml = state.uploadedMedia
     .map(
       (item, index) => `
         <span class="upload-chip" title="${escapeHtml(item.url)}">
@@ -2801,39 +2823,88 @@ function renderUploadedMedia() {
         </span>`,
     )
     .join("");
+  els.uploadList.innerHTML = activeUploadHtml + uploadedHtml;
   els.uploadList.classList.remove("hidden");
   requestAnimationFrame(updateComposerOffset);
 }
 
-async function uploadMediaFile(file) {
+function uploadResponsePayload(xhr) {
+  if (xhr.response && typeof xhr.response === "object") return xhr.response;
+  try {
+    return JSON.parse(xhr.responseText || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function uploadMediaFile(file, { onProgress } = {}) {
   const form = new FormData();
   form.append("file", file);
-  const response = await fetch("/api/uploads", {
-    method: "POST",
-    body: form,
+  onProgress?.(0);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/uploads");
+    xhr.responseType = "json";
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress?.((event.loaded / event.total) * 100);
+      } else {
+        onProgress?.(null);
+      }
+    });
+    xhr.addEventListener("load", () => {
+      const payload = uploadResponsePayload(xhr);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve(payload);
+        return;
+      }
+      if (xhr.status === 401) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+      }
+      if (xhr.status === 503 && String(payload.error || "").includes("sign-in is not configured")) {
+        window.location.href = "/login?setup=1";
+      }
+      reject(new Error(payload.error || `Upload failed: ${xhr.status}`));
+    });
+    xhr.addEventListener("error", () => reject(new Error("Upload failed.")));
+    xhr.addEventListener("abort", () => reject(new Error("Upload canceled.")));
+    xhr.send(form);
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || `Upload failed: ${response.status}`);
-  }
-  return payload;
 }
 
 async function uploadSelectedMedia(files) {
   const selected = [...files];
   if (!selected.length) return;
+  const uploadItems = selected.map((file) => ({
+    id: state.nextMediaUploadProgressId++,
+    file,
+    name: file.name || t("upload.default"),
+    progress: 0,
+  }));
+  state.mediaUploadProgress.push(...uploadItems);
   state.isUploadingMedia = true;
   els.mediaFiles.disabled = true;
   els.sendButton.disabled = true;
   showComposerError("");
+  renderUploadedMedia();
   try {
-    for (const file of selected) {
-      const uploaded = await uploadMediaFile(file);
+    for (const item of uploadItems) {
+      const uploaded = await uploadMediaFile(item.file, {
+        onProgress: (progress) => {
+          item.progress = progress;
+          renderUploadedMedia();
+        },
+      });
       state.uploadedMedia.push(uploaded);
+      state.mediaUploadProgress = state.mediaUploadProgress.filter((upload) => upload.id !== item.id);
       renderUploadedMedia();
     }
     toast(selected.length === 1 ? t("upload.one") : t("upload.many", { count: selected.length }));
   } catch (error) {
+    const itemIds = new Set(uploadItems.map((item) => item.id));
+    state.mediaUploadProgress = state.mediaUploadProgress.filter((item) => !itemIds.has(item.id));
+    renderUploadedMedia();
     showComposerError(error.message);
     toast(error.message);
   } finally {
@@ -4593,6 +4664,7 @@ function messageBottomStickIsActive(token) {
 
 function renderMessages(messages, scrollMode = "bottom") {
   state.pendingPassiveMessageRender = false;
+  state.pendingPassiveMessageScrollMode = "preserve";
   const mediaPlayback = captureMessageMediaPlayback();
   const bottomStickToken = scrollMode === "bottom" ? beginMessageBottomStick() : null;
   if (scrollMode !== "bottom") cancelMessageBottomStick();
@@ -5238,10 +5310,13 @@ function refreshQuery() {
 
 function renderPendingPassiveMessages() {
   if (!state.pendingPassiveMessageRender || messageMediaIsPlaying()) return;
-  renderMessages(state.messages, "preserve");
+  renderMessages(state.messages, state.pendingPassiveMessageScrollMode || "preserve");
 }
 
-function queuePendingPassiveMessageRender() {
+function queuePendingPassiveMessageRender(scrollMode = "preserve") {
+  if (!state.pendingPassiveMessageRender || scrollMode === "bottom") {
+    state.pendingPassiveMessageScrollMode = scrollMode;
+  }
   state.pendingPassiveMessageRender = true;
   window.setTimeout(renderPendingPassiveMessages, 500);
 }
@@ -5278,6 +5353,21 @@ function latestInboundSoundKeyFromMessages(messages = []) {
     const key = inboundSoundKey(message.occurred_at, message.id);
     return key > latest ? key : latest;
   }, "");
+}
+
+function messageIdentityKey(message) {
+  const id = message?.id;
+  if (id !== undefined && id !== null && id !== "") return String(id);
+  const parts = [message?.source, message?.occurred_at, message?.direction, message?.text].map((part) => String(part || ""));
+  return parts.some(Boolean) ? parts.join("|") : "";
+}
+
+function messagePayloadHasNewItems(previousMessages = [], nextMessages = []) {
+  const previousKeys = new Set(previousMessages.map(messageIdentityKey).filter(Boolean));
+  return nextMessages.some((message) => {
+    const key = messageIdentityKey(message);
+    return Boolean(key && !previousKeys.has(key));
+  });
 }
 
 function trackInboundSoundKey(key, { play = false } = {}) {
@@ -5334,9 +5424,10 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
   if (!state.currentConversationId || state.statusPollInFlight) return;
   state.statusPollInFlight = true;
   const conversationId = state.currentConversationId;
-    const shouldStickToBottom = !passive && isNearMessageBottom();
+  const shouldStickToBottom = !passive && isNearMessageBottom();
   const mediaWasPlaying = messageMediaIsPlaying();
   const limit = Math.max(80, state.messages.length || 0);
+  let messageScrollMode = shouldStickToBottom ? "bottom" : "preserve";
   try {
     if (!knownChanged && !force) {
       const refreshPayload = await api(`/api/refresh${refreshQuery()}`);
@@ -5363,6 +5454,8 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     mergeConversationIntoLoadedState(payload.conversation);
     state.lastThreadRefreshAt = Date.now();
     if (messagesChanged) {
+      const hasNewMessages = messagePayloadHasNewItems(state.messages, payload.messages);
+      messageScrollMode = hasNewMessages || shouldStickToBottom ? "bottom" : "preserve";
       trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: !(passive && mediaWasPlaying) });
       state.messages = payload.messages;
       state.hasMoreMessages = payload.has_more;
@@ -5373,9 +5466,9 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     }
     if (messagesChanged) {
       if (passive && mediaWasPlaying) {
-        queuePendingPassiveMessageRender();
+        queuePendingPassiveMessageRender(messageScrollMode);
       } else {
-        renderMessages(state.messages, shouldStickToBottom ? "bottom" : "preserve");
+        renderMessages(state.messages, messageScrollMode);
       }
     }
     if (payload.conversation) {
