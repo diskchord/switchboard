@@ -386,6 +386,7 @@ const I18N = {
     "conversation.unhide": "Unhide",
     "conversation.unknown": "Unknown",
     "conversation.you": "You: ",
+    "conversation.draft": "Draft: ",
     "conversation.failed": "Failed: {detail}",
     "conversation.could_not_deliver": "Could not deliver",
     "conversation.loading_more": "Loading more...",
@@ -637,6 +638,7 @@ const I18N = {
     "conversation.unhide": "Mostrar",
     "conversation.unknown": "Desconocido",
     "conversation.you": "Tú: ",
+    "conversation.draft": "Borrador: ",
     "conversation.failed": "Falló: {detail}",
     "conversation.could_not_deliver": "No se pudo entregar",
     "conversation.loading_more": "Cargando más...",
@@ -888,6 +890,7 @@ const I18N = {
     "conversation.unhide": "Afficher",
     "conversation.unknown": "Inconnu",
     "conversation.you": "Vous : ",
+    "conversation.draft": "Brouillon : ",
     "conversation.failed": "Échec : {detail}",
     "conversation.could_not_deliver": "Impossible de livrer",
     "conversation.loading_more": "Chargement...",
@@ -1182,8 +1185,10 @@ function pushMobileThreadState(detail = {}) {
 
 function closeMobileThread({ fromHistory = false } = {}) {
   clearStatusPoll();
+  saveComposerDraftForCurrentRecipients();
   closeDetailsOverlay();
   setMobileThreadOpen(false);
+  renderConversationsPreservingScroll();
   if (!fromHistory && !isDesktopLayout() && history.state?.textingApp === true && history.state.view === "thread") {
     history.back();
   }
@@ -2899,6 +2904,7 @@ async function uploadSelectedMedia(files) {
       state.uploadedMedia.push(uploaded);
       state.mediaUploadProgress = state.mediaUploadProgress.filter((upload) => upload.id !== item.id);
       renderUploadedMedia();
+      saveAndRenderComposerDraftForCurrentRecipients();
     }
     toast(selected.length === 1 ? t("upload.one") : t("upload.many", { count: selected.length }));
   } catch (error) {
@@ -3837,10 +3843,12 @@ function renderConversations() {
       const selectingClass = state.selectedConversationIds.size ? "selecting" : "";
       const hasNewMessage = Boolean(conversation.needs_attention) && state.conversationCategory !== "hidden";
       const newMessageClass = hasNewMessage ? "new-message" : "";
-      const failedClass = conversation.last_status_kind === "failed" ? "failed-message" : "";
       const title = conversation.title || t("conversation.unknown");
-      const previewPrefix = conversation.last_direction === "outbound" ? t("conversation.you") : "";
       const searchMatch = conversation.search_match?.type === "message" ? conversation.search_match : null;
+      const draftPreview = composerDraftPreviewText(conversationDraftSnapshot(conversation));
+      const showsDraftPreview = Boolean(draftPreview) && !searchMatch;
+      const failedClass = conversation.last_status_kind === "failed" && !showsDraftPreview ? "failed-message" : "";
+      const previewPrefix = !showsDraftPreview && conversation.last_direction === "outbound" ? t("conversation.you") : "";
       const lastStatusLabel = localizedStatusLabel(conversation.last_status, conversation.last_status_label);
       const failedPreview =
         conversation.last_status_kind === "failed"
@@ -3848,10 +3856,13 @@ function renderConversations() {
               detail: conversation.last_status_detail || lastStatusLabel || t("conversation.could_not_deliver"),
             })
           : "";
-      const preview = failedPreview || messagePreviewText(conversation) || (lastStatusLabel ? lastStatusLabel : "");
+      const preview =
+        draftPreview || failedPreview || messagePreviewText(conversation) || (lastStatusLabel ? lastStatusLabel : "");
       const previewHtml = searchMatch
         ? renderHighlightedText(searchMatch.snippet || "", searchMatch.terms || [])
-        : escapeHtml(previewPrefix + preview);
+        : showsDraftPreview
+          ? `<span class="conversation-draft-prefix">${escapeHtml(t("conversation.draft"))}</span>${escapeHtml(preview)}`
+          : escapeHtml(previewPrefix + preview);
       const previewClass = searchMatch ? "conversation-preview conversation-search-preview" : "conversation-preview";
       return `
         <button class="conversation-item ${active} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}">
@@ -4448,6 +4459,20 @@ function messagePreviewText(conversation) {
   if (isFaxMessage(conversation)) return text ? `${t("message.fax")}: ${text}` : t("message.fax");
   if (!isVoicemailMessage(conversation)) return text;
   return text ? `${t("message.voicemail")}: ${text}` : t("message.voicemail");
+}
+
+function conversationDraftSnapshot(conversation) {
+  const recipients = (conversation?.participants || [])
+    .filter((participant) => participant.role === "participant")
+    .map((participant) => participant.phone_number);
+  const key = composerDraftKey(recipients);
+  return key ? state.composerDraftsByRecipient.get(key) : null;
+}
+
+function composerDraftPreviewText(snapshot) {
+  if (!composerSnapshotHasContent(snapshot)) return "";
+  const text = reactionPreviewText(String(snapshot?.text || "").trim()) || "";
+  return text || t("attachment.file");
 }
 
 function normalizedMediaKey(url) {
@@ -5129,6 +5154,7 @@ function endComposerInputScrollGuard(event) {
 
 function handleComposerTextInput() {
   updateMessageCounter();
+  saveAndRenderComposerDraftForCurrentRecipients();
   keepComposerInputVisible();
   restoreComposerInputScrollGuard();
   requestAnimationFrame(() => restoreComposerInputScrollGuard());
@@ -6161,6 +6187,7 @@ function clearComposerDraft() {
   state.uploadedMedia = [];
   renderUploadedMedia();
   updateMessageCounter();
+  renderConversationsPreservingScroll();
 }
 
 function composerSnapshot() {
@@ -6186,6 +6213,7 @@ function restoreComposerSnapshot(snapshot, { onlyIfEmpty = true } = {}) {
   }
   renderUploadedMedia();
   updateMessageCounter();
+  saveAndRenderComposerDraftForCurrentRecipients();
 }
 
 function normalizedDraftRecipients(recipients = currentRecipients()) {
@@ -6197,7 +6225,9 @@ function composerDraftKey(recipients = currentRecipients()) {
 }
 
 function composerSnapshotHasContent(snapshot) {
-  return Boolean(snapshot?.text || snapshot?.mediaUrls || snapshot?.uploadedMedia?.length);
+  return Boolean(
+    String(snapshot?.text || "").trim() || String(snapshot?.mediaUrls || "").trim() || snapshot?.uploadedMedia?.length,
+  );
 }
 
 function saveComposerSnapshotForKey(key, snapshot) {
@@ -6211,8 +6241,17 @@ function saveComposerSnapshotForKey(key, snapshot) {
 
 function saveComposerDraftForCurrentRecipients() {
   const key = composerDraftKey();
-  if (!key) return;
-  saveComposerSnapshotForKey(key, composerSnapshot());
+  if (!key) return false;
+  const previous = state.composerDraftsByRecipient.get(key);
+  const snapshot = composerSnapshot();
+  saveComposerSnapshotForKey(key, snapshot);
+  return composerSnapshotHasContent(previous) || composerSnapshotHasContent(snapshot);
+}
+
+function saveAndRenderComposerDraftForCurrentRecipients() {
+  if (saveComposerDraftForCurrentRecipients()) {
+    renderConversationsPreservingScroll();
+  }
 }
 
 function deleteSavedComposerDraft(recipients = currentRecipients()) {
@@ -6247,6 +6286,7 @@ function preserveDraftAcrossRecipientChange(changeRecipients) {
   } else if (nextKey && previousKey !== nextKey) {
     saveComposerSnapshotForKey(nextKey, snapshot);
   }
+  renderConversationsPreservingScroll();
 }
 
 function filenameFromUrl(value) {
@@ -7033,6 +7073,7 @@ function bindEvents() {
   els.mediaUrls.addEventListener("input", () => {
     keepComposerInputVisible();
     showComposerError("");
+    saveAndRenderComposerDraftForCurrentRecipients();
   });
   els.mediaUrls.addEventListener("focus", keepComposerInputVisible);
   els.fromNumber.addEventListener("change", () => selectFromNumber(els.fromNumber.value));
@@ -7055,6 +7096,7 @@ function bindEvents() {
     if (!button) return;
     state.uploadedMedia.splice(Number(button.dataset.removeUpload), 1);
     renderUploadedMedia();
+    saveAndRenderComposerDraftForCurrentRecipients();
   });
   els.messages.addEventListener("wheel", markMessageUserScrollIntent, { passive: true });
   els.messages.addEventListener("touchstart", markMessageUserScrollIntent, { passive: true });
