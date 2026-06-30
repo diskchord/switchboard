@@ -664,9 +664,18 @@ select:focus {
   margin-top: 3px;
 }
 
+.conversation-draft-preview {
+  font-style: italic;
+  font-weight: 400;
+}
+
+.conversation-item.new-message .conversation-draft-preview {
+  font-weight: 400;
+}
+
 .conversation-draft-prefix {
-  color: var(--accent);
-  font-weight: 800;
+  color: inherit;
+  font-weight: inherit;
 }
 
 .conversation-search-preview {

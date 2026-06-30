@@ -3837,7 +3837,8 @@ function renderConversations() {
   }
   const items = state.conversations
     .map((conversation) => {
-      const active = conversation.id === state.currentConversationId ? "active" : "";
+      const isActiveConversation = Number(conversation.id) === Number(state.currentConversationId);
+      const active = isActiveConversation ? "active" : "";
       const selected = state.selectedConversationIds.has(Number(conversation.id));
       const selectedClass = selected ? "selected" : "";
       const selectingClass = state.selectedConversationIds.size ? "selecting" : "";
@@ -3846,7 +3847,7 @@ function renderConversations() {
       const title = conversation.title || t("conversation.unknown");
       const searchMatch = conversation.search_match?.type === "message" ? conversation.search_match : null;
       const draftPreview = composerDraftPreviewText(conversationDraftSnapshot(conversation));
-      const showsDraftPreview = Boolean(draftPreview) && !searchMatch;
+      const showsDraftPreview = Boolean(draftPreview) && !searchMatch && !(isDesktopLayout() && isActiveConversation);
       const failedClass = conversation.last_status_kind === "failed" && !showsDraftPreview ? "failed-message" : "";
       const previewPrefix = !showsDraftPreview && conversation.last_direction === "outbound" ? t("conversation.you") : "";
       const lastStatusLabel = localizedStatusLabel(conversation.last_status, conversation.last_status_label);
@@ -3863,7 +3864,9 @@ function renderConversations() {
         : showsDraftPreview
           ? `<span class="conversation-draft-prefix">${escapeHtml(t("conversation.draft"))}</span>${escapeHtml(preview)}`
           : escapeHtml(previewPrefix + preview);
-      const previewClass = searchMatch ? "conversation-preview conversation-search-preview" : "conversation-preview";
+      const previewClass = searchMatch
+        ? "conversation-preview conversation-search-preview"
+        : `conversation-preview${showsDraftPreview ? " conversation-draft-preview" : ""}`;
       return `
         <button class="conversation-item ${active} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}">
           <span class="avatar conversation-selector" role="checkbox" aria-checked="${selected ? "true" : "false"}" title="${escapeHtml(t("selection.actions"))}">
