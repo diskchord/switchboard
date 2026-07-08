@@ -11,15 +11,26 @@
     <link rel="manifest" href="/static/manifest.webmanifest?v=a2385ee2" />
     <script>
       (() => {
-        const saved = localStorage.getItem("textingTheme");
+        const families = ["switchboard", "console", "midnight", "papyrus"];
+        const modes = ["light", "dark"];
+        const legacy = localStorage.getItem("textingTheme");
+        const savedFamily = localStorage.getItem("textingThemeFamily");
+        const savedMode = localStorage.getItem("textingThemeMode");
         const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-        document.documentElement.dataset.theme = saved || (prefersDark ? "dark" : "light");
+        const legacyFamily = families.includes(legacy) ? legacy : "switchboard";
+        const legacyMode =
+          modes.includes(legacy) ? legacy : legacy === "console" || legacy === "midnight" ? "dark" : legacy === "papyrus" ? "light" : "";
+        const family = families.includes(savedFamily) ? savedFamily : legacyFamily;
+        const mode = modes.includes(savedMode) ? savedMode : legacyMode || (prefersDark ? "dark" : "light");
+        document.documentElement.dataset.themeFamily = family;
+        document.documentElement.dataset.themeMode = mode;
+        document.documentElement.dataset.theme = family === "switchboard" ? mode : `${family}-${mode}`;
         if (new URLSearchParams(window.location.search).has("app_v")) {
           document.documentElement.dataset.nativeApp = "android";
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=09a3b923" />
+    <link rel="stylesheet" href="/static/styles.css?v=b4e7a928" />
   </head>
   <body>
     <div class="app-shell">
@@ -93,7 +104,9 @@
               <select id="fromNumber"></select>
             </label>
             <div class="thread-action-row" role="group" aria-label="Conversation actions" data-i18n-aria-label="conversation.actions">
-              <button class="small-button done-button" id="dealtButton" disabled data-i18n="conversation.read">Read</button>
+              <button class="icon-button read-state-button" id="dealtButton" type="button" disabled title="Read" aria-label="Read" aria-pressed="false">
+                <span class="read-state-light" aria-hidden="true"></span>
+              </button>
               <button class="small-button panel-button" id="toggleDetailsButton" aria-pressed="false" data-i18n="panel.label">Panel</button>
               <button class="small-button archive-button danger-button" id="archiveButton" disabled title="Hide" aria-label="Hide">&times;</button>
             </div>
@@ -270,7 +283,7 @@
         <header class="settings-header">
           <div>
             <h2 data-i18n="settings.title">Settings</h2>
-            <p data-i18n="settings.description">Changes are saved and written to .env when available.</p>
+            <p data-i18n="settings.description">Changes are saved in Switchboard's local database. .env values are used as install defaults.</p>
           </div>
           <button class="icon-button" id="settingsClose" type="button" aria-label="Close settings" data-i18n-aria-label="settings.close">×</button>
         </header>
@@ -315,6 +328,6 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=09a3b923" type="module"></script>
+    <script src="/static/app.js?v=b4e7a928" type="module"></script>
   </body>
 </html>

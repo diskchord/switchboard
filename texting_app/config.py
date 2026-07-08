@@ -174,6 +174,7 @@ MESSAGING_PROVIDER = os.environ.get("TEXTING_MESSAGING_PROVIDER", "telnyx").stri
 MESSAGING_PROVIDER_BY_NUMBER = _mapping_env("TEXTING_PROVIDER_BY_NUMBER")
 
 UI_LANGUAGE = os.environ.get("TEXTING_UI_LANGUAGE", "auto").strip().lower() or "auto"
+UI_THEME_FAMILY = os.environ.get("TEXTING_UI_THEME", "switchboard").strip().lower() or "switchboard"
 
 NTFY_ENDPOINT = os.environ.get("NTFY_ENDPOINT", "")
 NTFY_ENABLED = _bool_env("NTFY_ENABLED", bool(NTFY_ENDPOINT)) and bool(NTFY_ENDPOINT)

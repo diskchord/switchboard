@@ -41,7 +41,7 @@ from .google_contacts import GoogleContactsError
 from .messaging import MessagingError, configured_messaging_providers
 from .messaging import send_message as send_provider_message
 from .phone import display_phone, normalize_phone
-from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values, write_env_values
+from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values
 from .telnyx import TelnyxError
 from .telnyx import handle_webhook as handle_telnyx_webhook
 from .telnyx import send_fax as send_telnyx_fax
@@ -72,8 +72,16 @@ DEFAULT_IDENTITY_SETTING_KEY = "messaging.default_identity"
 LOGIN_FAILURES: dict[str, list[float]] = {}
 LOGIN_FAILURE_LOCK = threading.Lock()
 BACKUP_CODE_METADATA_PREFIX = "auth.backup_code.used."
+AUTH_USERNAME_METADATA_KEY = "auth.username"
+AUTH_PASSWORD_HASH_METADATA_KEY = "auth.password_hash"
+AUTH_SECRET_KEY_METADATA_KEY = "auth.secret_key"
 AUTH_TOTP_METADATA_KEY = "auth.totp_secret"
 AUTH_BACKUP_CODES_METADATA_KEY = "auth.backup_code_hashes"
+AUTH_ACCOUNT_METADATA_KEYS = (
+    AUTH_USERNAME_METADATA_KEY,
+    AUTH_PASSWORD_HASH_METADATA_KEY,
+    AUTH_SECRET_KEY_METADATA_KEY,
+)
 TWO_FACTOR_SETUP_TOKEN_SECONDS = 10 * 60
 
 PUBLIC_GET_PATHS = {
@@ -2394,8 +2402,39 @@ def _metadata_values(keys: tuple[str, ...]) -> dict[str, str]:
         conn.close()
 
 
+def _write_metadata_values(values: dict[str, str]) -> None:
+    if not values:
+        return
+    timestamp = now_est()
+    conn = connect()
+    init_db(conn)
+    try:
+        for key, value in values.items():
+            conn.execute(
+                """
+                INSERT INTO app_metadata(key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, timestamp),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _split_backup_hashes(raw: str) -> list[str]:
     return [part.strip() for part in str(raw or "").replace("\n", ",").split(",") if part.strip()]
+
+
+def load_app_auth_config() -> None:
+    values = _metadata_values(AUTH_ACCOUNT_METADATA_KEYS)
+    username = values.get(AUTH_USERNAME_METADATA_KEY, "").strip()
+    password_hash = values.get(AUTH_PASSWORD_HASH_METADATA_KEY, "").strip()
+    if not username or not password_hash:
+        return
+    secret_key = values.get(AUTH_SECRET_KEY_METADATA_KEY, "").strip() or config.AUTH_SECRET_KEY
+    _apply_auth_config(username, password_hash, secret_key)
 
 
 def two_factor_material() -> dict:
@@ -2459,11 +2498,11 @@ def _require_auth_password(payload: dict) -> None:
         raise ValueError("Current password is incorrect.")
 
 
-def _ensure_auth_secret_key(env_updates: dict[str, str]) -> None:
+def _ensure_auth_secret_key(metadata_updates: dict[str, str]) -> None:
     if config.AUTH_SECRET_KEY:
         return
     secret_key = secrets.token_urlsafe(48)
-    env_updates["TEXTING_AUTH_SECRET_KEY"] = secret_key
+    metadata_updates[AUTH_SECRET_KEY_METADATA_KEY] = secret_key
     config.AUTH_SECRET_KEY = secret_key
 
 
@@ -2491,14 +2530,13 @@ def setup_auth_account(payload: dict) -> dict:
     if password != confirm:
         raise ValueError("Passwords do not match.")
     password_hash = auth.hash_password(password)
-    env_updates = {
-        "TEXTING_AUTH_USERNAME": username,
-        "TEXTING_AUTH_PASSWORD_HASH": password_hash,
-        "TEXTING_AUTH_DISABLED": "0",
+    metadata_updates = {
+        AUTH_USERNAME_METADATA_KEY: username,
+        AUTH_PASSWORD_HASH_METADATA_KEY: password_hash,
     }
-    _ensure_auth_secret_key(env_updates)
-    write_env_values(env_updates)
-    _apply_auth_config(username, password_hash, env_updates.get("TEXTING_AUTH_SECRET_KEY"))
+    _ensure_auth_secret_key(metadata_updates)
+    _write_metadata_values(metadata_updates)
+    _apply_auth_config(username, password_hash, metadata_updates.get(AUTH_SECRET_KEY_METADATA_KEY))
     config.AUTH_DISABLED = False
     return auth_status_payload()
 
@@ -2510,17 +2548,19 @@ def update_auth_account(payload: dict) -> dict:
     confirm = str(payload.get("confirm_password") or "")
     if not username:
         raise ValueError("Enter a username.")
-    env_updates = {"TEXTING_AUTH_USERNAME": username}
     password_hash = config.AUTH_PASSWORD_HASH
     if new_password:
         _validate_account_password(new_password)
         if new_password != confirm:
             raise ValueError("New passwords do not match.")
         password_hash = auth.hash_password(new_password)
-        env_updates["TEXTING_AUTH_PASSWORD_HASH"] = password_hash
-    _ensure_auth_secret_key(env_updates)
-    write_env_values(env_updates)
-    _apply_auth_config(username, password_hash, env_updates.get("TEXTING_AUTH_SECRET_KEY"))
+    metadata_updates = {
+        AUTH_USERNAME_METADATA_KEY: username,
+        AUTH_PASSWORD_HASH_METADATA_KEY: password_hash,
+    }
+    _ensure_auth_secret_key(metadata_updates)
+    _write_metadata_values(metadata_updates)
+    _apply_auth_config(username, password_hash, metadata_updates.get(AUTH_SECRET_KEY_METADATA_KEY))
     return auth_status_payload()
 
 
@@ -2539,14 +2579,6 @@ def qr_svg_data_uri(value: str) -> str:
 
 def _store_two_factor_material(secret: str, backup_hashes: list[str]) -> dict:
     timestamp = now_est()
-    write_env_values(
-        {
-            "TEXTING_AUTH_TOTP_SECRET": auth.normalize_totp_secret(secret),
-            "TEXTING_AUTH_BACKUP_CODE_HASHES": ",".join(backup_hashes),
-        }
-    )
-    config.AUTH_TOTP_SECRET = auth.normalize_totp_secret(secret)
-    config.AUTH_BACKUP_CODE_HASHES = backup_hashes
     conn = connect()
     init_db(conn)
     try:
@@ -2575,8 +2607,6 @@ def _store_two_factor_material(secret: str, backup_hashes: list[str]) -> dict:
 
 def _store_backup_hashes(backup_hashes: list[str]) -> dict:
     timestamp = now_est()
-    write_env_values({"TEXTING_AUTH_BACKUP_CODE_HASHES": ",".join(backup_hashes)})
-    config.AUTH_BACKUP_CODE_HASHES = backup_hashes
     conn = connect()
     init_db(conn)
     try:
@@ -2599,9 +2629,6 @@ def _clear_app_two_factor_material() -> dict:
     material = two_factor_material()
     if material["env_enabled"] and not material["app_managed"]:
         raise ValueError("2FA is configured in .env. Remove the 2FA env values to disable it.")
-    write_env_values({"TEXTING_AUTH_TOTP_SECRET": "", "TEXTING_AUTH_BACKUP_CODE_HASHES": ""})
-    config.AUTH_TOTP_SECRET = ""
-    config.AUTH_BACKUP_CODE_HASHES = []
     conn = connect()
     init_db(conn)
     try:
@@ -2834,7 +2861,7 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_redirect("/login?setup=1")
             else:
                 self._send_json(
-                    {"error": "Switchboard sign-in is not configured. Set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH in .env."},
+                    {"error": "Switchboard sign-in is not configured. Complete setup or set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH."},
                     HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             return False
@@ -2896,7 +2923,7 @@ class TextingHandler(BaseHTTPRequestHandler):
     def _handle_login(self) -> None:
         if not auth.auth_configured() and not auth.auth_disabled():
             self._send_json(
-                {"error": "Switchboard sign-in is not configured. Set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH in .env."},
+                {"error": "Switchboard sign-in is not configured. Complete setup or set TEXTING_AUTH_USERNAME and TEXTING_AUTH_PASSWORD_HASH."},
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
             return
@@ -3196,6 +3223,7 @@ def run(host: str | None = None, port: int | None = None) -> None:
     conn = connect()
     init_db(conn)
     conn.close()
+    load_app_auth_config()
     start_autosync()
     start_scheduled_sender()
     httpd = ThreadingHTTPServer((host, port), TextingHandler)

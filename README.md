@@ -14,6 +14,8 @@ The Android wrapper can be built generically and asks for your Switchboard serve
 
 Authored by [Alexander Peppe](https://www.alexanderpeppe.com/).
 
+Switchboard can fit into a privacy-minded communications setup like the workflows discussed in *Extreme Privacy 4th Edition* by Michael Bazzell.
+
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Capabilities
@@ -96,7 +98,7 @@ Copy `.env.example` to `.env` and fill in the values you use.
 
 ### Sign-In
 
-Switchboard uses an app login screen rather than Apache htpasswd or Basic Auth. On a new install, leave `TEXTING_AUTH_USERNAME` and `TEXTING_AUTH_PASSWORD_HASH` blank; the first browser visit shows a setup screen that writes the chosen account to `.env`. You can also preconfigure sign-in manually:
+Switchboard uses an app login screen rather than Apache htpasswd or Basic Auth. On a new install, leave `TEXTING_AUTH_USERNAME` and `TEXTING_AUTH_PASSWORD_HASH` blank; the first browser visit shows a setup screen that stores the chosen account in Switchboard's SQLite metadata. You can also preconfigure sign-in manually:
 
 ```env
 TEXTING_AUTH_USERNAME=
@@ -126,7 +128,7 @@ python -m texting_app.auth hash-password
 python -m texting_app.auth secret-key
 ```
 
-Account name, password, and optional app-based 2FA can be managed from `Settings` > `Security` after signing in. The in-app 2FA setup shows a QR code, the manual authenticator secret, and one-time backup codes, then enables 2FA after a valid authenticator code is entered.
+Account name, password, and optional app-based 2FA can be managed from `Settings` > `Security` after signing in. Those in-app changes are stored in Switchboard's SQLite metadata rather than written back to `.env`. The in-app 2FA setup shows a QR code, the manual authenticator secret, and one-time backup codes, then enables 2FA after a valid authenticator code is entered.
 
 For env-managed installs, generate authenticator values from the command line:
 
@@ -166,6 +168,7 @@ Important settings:
 - `REVAI_ACCESS_TOKEN`: Rev.ai access token for voicemail transcription.
 - `REVAI_API_BASE`: Rev.ai API base URL; normally leave the default.
 - `TEXTING_UI_LANGUAGE`: `auto`, `en`, `es`, or `fr`.
+- `TEXTING_UI_THEME`: `switchboard`, `console`, `midnight`, or `papyrus`.
 - `TEXTING_AUTO_REFRESH_SECONDS`: browser refresh check interval. Set to `0` to disable.
 - `TEXTING_SHOW_SUMMARY_STATS`: show or hide statistic bubbles above the conversation list.
 - `TEXTING_SHOW_COMPOSER_COUNTER`: show or hide the SMS segment counter in the composer.
@@ -190,7 +193,7 @@ Important settings:
 
 For smaller copyable starting points, see the documented samples in `docs/env/`: core server, Telnyx, Twilio, Rev.ai, and contact sync.
 
-The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values where a setting has an environment equivalent; settings without an env equivalent are still stored in SQLite. Settings covers behavior, language, hotkeys, notifications, sounds, uploads, messaging provider selection, calls, transcription, contacts, Telnyx, Twilio, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. Settings also includes a protected database download button; Switchboard creates a consistent SQLite backup for the logged-in user instead of exposing the data directory.
+The web UI also has a Settings menu. Values saved there are stored in SQLite and override the matching `.env` values where a setting has an environment equivalent; settings without an env equivalent are still stored in SQLite. Switchboard does not write Settings changes back to `.env`, so read-only checkouts and container images can keep `.env` deployment-owned. Settings covers behavior, language, hotkeys, notifications, sounds, uploads, messaging provider selection, calls, transcription, contacts, Telnyx, Twilio, Fastmail, and Google Contacts. Secrets are never echoed back to the browser; leave a secret field blank to keep its current value. Settings also includes a protected database download button; Switchboard creates a consistent SQLite backup for the logged-in user instead of exposing the data directory.
 
 ### Bring Your Own Numbers
 
@@ -307,9 +310,9 @@ The server starts a background scheduled-message worker at launch. It checks for
 
 Delivery status is updated from provider callbacks where available. Telnyx outbound events update sent, delivered, finalized, failed, delivery-failed, and delivery-unconfirmed states. Twilio status callbacks update queued/sent/delivered/undelivered/failed-style states for known message SIDs. Failed and warning statuses expose provider details in the UI when the webhook payload includes them.
 
-### Language and Hotkeys
+### Interface and Hotkeys
 
-The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings.
+The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings. Choose the Switchboard, Console, Midnight Commander, or Papyrus theme family in Settings; the header light/dark button switches only the selected theme family between light and dark mode.
 
 The browser checks `/api/refresh` on the configured auto-refresh interval. That endpoint returns lightweight change tokens first; the app only reloads the conversation list or open thread when those tokens change. Use `TEXTING_AUTO_REFRESH_SECONDS=0`, or set Auto-refresh seconds to `0` in Settings, to disable browser polling.
 

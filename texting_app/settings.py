@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from . import config
@@ -42,6 +41,21 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         config.UI_LANGUAGE,
         options=(("auto", "Automatic"), ("en", "English"), ("es", "Español"), ("fr", "Français")),
         env_names=("TEXTING_UI_LANGUAGE",),
+    ),
+    SettingDef(
+        "ui.theme_family",
+        "Theme",
+        "Interface",
+        "select",
+        config.UI_THEME_FAMILY if config.UI_THEME_FAMILY in {"switchboard", "console", "midnight", "papyrus"} else "switchboard",
+        options=(
+            ("switchboard", "Switchboard"),
+            ("console", "Console"),
+            ("midnight", "Midnight Commander"),
+            ("papyrus", "Papyrus"),
+        ),
+        help="Choose the theme family. Use the header light/dark button to switch that theme between light and dark.",
+        env_names=("TEXTING_UI_THEME",),
     ),
     SettingDef(
         "behavior.mark_read_on_open",
@@ -402,43 +416,10 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
 
 SETTINGS_BY_KEY = {definition.key: definition for definition in SETTING_DEFS}
 SECRET_KEYS = {definition.key for definition in SETTING_DEFS if definition.secret}
-ENV_PATH = config.ROOT / ".env"
 
 
 class SettingsError(ValueError):
     pass
-
-
-def _env_quote(value: str) -> str:
-    value = str(value or "")
-    if not value:
-        return ""
-    if all(char not in value for char in " \t\n\r#\"'\\"):
-        return value
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
-
-
-def write_env_values(values: dict[str, str], path: Path = ENV_PATH) -> None:
-    if not values:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    remaining = dict(values)
-    lines: list[str] = []
-    for line in existing:
-        prefix = "export " if line.lstrip().startswith("export ") else ""
-        body = line.lstrip().removeprefix("export ").strip() if prefix else line.strip()
-        key = body.split("=", 1)[0].strip() if "=" in body else ""
-        if key in remaining:
-            raw_value = remaining.pop(key)
-            lines.append(f"{prefix}{key}={_env_quote(raw_value)}")
-            os.environ[key] = raw_value
-        else:
-            lines.append(line)
-    for key, raw_value in remaining.items():
-        lines.append(f"{key}={_env_quote(raw_value)}")
-        os.environ[key] = raw_value
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def _stored_values() -> dict[str, str]:
@@ -531,16 +512,12 @@ def update_values(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(updates, dict):
         raise SettingsError("Settings payload must be an object.")
     timestamp = now_est()
-    env_updates: dict[str, str] = {}
     conn = connect()
     init_db(conn)
     for key in clear:
         if key not in SETTINGS_BY_KEY:
             raise SettingsError(f"Unknown setting: {key}")
         conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
-        definition = SETTINGS_BY_KEY[key]
-        if definition.env_names:
-            env_updates[definition.env_names[0]] = ""
     for key, raw_value in updates.items():
         definition = SETTINGS_BY_KEY.get(key)
         if not definition:
@@ -556,8 +533,5 @@ def update_values(payload: dict[str, Any]) -> dict[str, Any]:
             """,
             (key, value, timestamp),
         )
-        if definition.env_names:
-            env_updates[definition.env_names[0]] = value
     conn.commit()
-    write_env_values(env_updates)
     return configured_values()

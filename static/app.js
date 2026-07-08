@@ -48,6 +48,7 @@ const state = {
   conversationPressTargetId: null,
   conversationSwipe: null,
   suppressConversationClickUntil: 0,
+  conversationListPointerDownUntil: 0,
   reactionTargetId: null,
   reactionPressTimer: null,
   reactionPressPointerId: null,
@@ -71,6 +72,9 @@ const state = {
   messageUserScrollIntent: false,
   messageBottomStickStartedAt: 0,
   messageScrollAnchor: null,
+  messageSelectAllTarget: null,
+  messageSelectAllUntil: 0,
+  messageSelectionGuard: false,
   lastVisualViewportHeight: 0,
   maxVisualViewportHeight: 0,
   lastLayoutKeyboardInset: 0,
@@ -194,7 +198,35 @@ const els = {
 };
 
 const COLUMN_WIDTHS_KEY = "textingColumnWidths";
-const THEME_KEY = "textingTheme";
+const LEGACY_THEME_KEY = "textingTheme";
+const THEME_FAMILY_KEY = "textingThemeFamily";
+const THEME_MODE_KEY = "textingThemeMode";
+const THEME_FAMILIES = [
+  {
+    id: "switchboard",
+    labelKey: "theme.switchboard_name",
+    light: { metaColor: "#e6e8eb", nativeTheme: "light" },
+    dark: { metaColor: "#0c1117", nativeTheme: "dark" },
+  },
+  {
+    id: "console",
+    labelKey: "theme.console_name",
+    light: { metaColor: "#f2f2ea", nativeTheme: "light" },
+    dark: { metaColor: "#000000", nativeTheme: "dark" },
+  },
+  {
+    id: "midnight",
+    labelKey: "theme.midnight_name",
+    light: { metaColor: "#d8efff", nativeTheme: "light" },
+    dark: { metaColor: "#00005f", nativeTheme: "dark" },
+  },
+  {
+    id: "papyrus",
+    labelKey: "theme.papyrus_name",
+    light: { metaColor: "#ead9b3", nativeTheme: "light" },
+    dark: { metaColor: "#231b13", nativeTheme: "dark" },
+  },
+];
 const SCHEDULE_TIME_KEY = "textingScheduleTime";
 const STATS_PERIOD_KEY = "textingStatsPeriod";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
@@ -270,7 +302,7 @@ const I18N = {
   en: {
     "app.title": "Switchboard",
     "settings.title": "Settings",
-    "settings.description": "Changes are saved and written to .env when available.",
+    "settings.description": "Changes are saved in Switchboard's local database. .env values are used as install defaults.",
     "settings.close": "Close settings",
     "settings.empty": "No settings are available.",
     "settings.saved": "Settings saved.",
@@ -323,6 +355,10 @@ const I18N = {
     "source.default": "Default",
     "theme.light": "Use light mode",
     "theme.dark": "Use dark mode",
+    "theme.switchboard_name": "Switchboard",
+    "theme.console_name": "Console",
+    "theme.midnight_name": "Midnight Commander",
+    "theme.papyrus_name": "Papyrus",
     "search.placeholder": "Search",
     "search.clear": "Clear search",
     "category.aria": "Thread category",
@@ -382,6 +418,8 @@ const I18N = {
     "conversation.actions": "Conversation actions",
     "conversation.read": "Read",
     "conversation.unread": "Unread",
+    "conversation.mark_read": "Mark read",
+    "conversation.mark_unread": "Mark unread",
     "conversation.hide": "Hide",
     "conversation.unhide": "Unhide",
     "conversation.unknown": "Unknown",
@@ -522,7 +560,7 @@ const I18N = {
   es: {
     "app.title": "Switchboard",
     "settings.title": "Ajustes",
-    "settings.description": "Los cambios se guardan y se escriben en .env cuando es posible.",
+    "settings.description": "Los cambios se guardan en la base de datos local de Switchboard. Los valores de .env se usan como valores iniciales de instalación.",
     "settings.close": "Cerrar ajustes",
     "settings.empty": "No hay ajustes disponibles.",
     "settings.saved": "Ajustes guardados.",
@@ -575,6 +613,10 @@ const I18N = {
     "source.default": "Predeterminado",
     "theme.light": "Usar modo claro",
     "theme.dark": "Usar modo oscuro",
+    "theme.switchboard_name": "Switchboard",
+    "theme.console_name": "Consola",
+    "theme.midnight_name": "Midnight Commander",
+    "theme.papyrus_name": "Papiro",
     "search.placeholder": "Buscar",
     "search.clear": "Borrar búsqueda",
     "category.aria": "Categoría de conversaciones",
@@ -634,6 +676,8 @@ const I18N = {
     "conversation.actions": "Acciones de conversación",
     "conversation.read": "Leído",
     "conversation.unread": "No leído",
+    "conversation.mark_read": "Marcar como leído",
+    "conversation.mark_unread": "Marcar como no leído",
     "conversation.hide": "Ocultar",
     "conversation.unhide": "Mostrar",
     "conversation.unknown": "Desconocido",
@@ -774,7 +818,7 @@ const I18N = {
   fr: {
     "app.title": "Switchboard",
     "settings.title": "Réglages",
-    "settings.description": "Les changements sont enregistrés et écrits dans .env quand c'est possible.",
+    "settings.description": "Les changements sont enregistrés dans la base de données locale de Switchboard. Les valeurs .env servent de valeurs d'installation par défaut.",
     "settings.close": "Fermer les réglages",
     "settings.empty": "Aucun réglage disponible.",
     "settings.saved": "Réglages enregistrés.",
@@ -827,6 +871,10 @@ const I18N = {
     "source.default": "Défaut",
     "theme.light": "Utiliser le mode clair",
     "theme.dark": "Utiliser le mode sombre",
+    "theme.switchboard_name": "Switchboard",
+    "theme.console_name": "Console",
+    "theme.midnight_name": "Midnight Commander",
+    "theme.papyrus_name": "Papyrus",
     "search.placeholder": "Rechercher",
     "search.clear": "Effacer la recherche",
     "category.aria": "Catégorie de fils",
@@ -886,6 +934,8 @@ const I18N = {
     "conversation.actions": "Actions de conversation",
     "conversation.read": "Lu",
     "conversation.unread": "Non lu",
+    "conversation.mark_read": "Marquer comme lu",
+    "conversation.mark_unread": "Marquer comme non lu",
     "conversation.hide": "Masquer",
     "conversation.unhide": "Afficher",
     "conversation.unknown": "Inconnu",
@@ -1064,31 +1114,87 @@ function setDetailsCollapsed(collapsed) {
   applyColumnWidths();
 }
 
-function applyTheme(theme, { persist = true } = {}) {
-  const nextTheme = theme === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = nextTheme;
+function themeFamilyOption(family) {
+  return THEME_FAMILIES.find((option) => option.id === family) || THEME_FAMILIES[0];
+}
+
+function normalizeThemeFamily(family) {
+  const raw = String(family || "").trim().toLowerCase();
+  if (raw === "light" || raw === "dark") return "switchboard";
+  return themeFamilyOption(raw).id;
+}
+
+function normalizeThemeMode(mode) {
+  return String(mode || "").trim().toLowerCase() === "dark" ? "dark" : "light";
+}
+
+function parseThemeChoice(theme) {
+  const raw = String(theme || "").trim().toLowerCase();
+  if (raw.includes("-")) {
+    const [family, mode] = raw.split("-", 2);
+    return { family: normalizeThemeFamily(family), mode: normalizeThemeMode(mode) };
+  }
+  if (raw === "light" || raw === "dark") {
+    return { family: "switchboard", mode: raw };
+  }
+  if (["console", "midnight", "papyrus"].includes(raw)) {
+    return { family: raw, mode: null };
+  }
+  return { family: "switchboard", mode: null };
+}
+
+function currentThemeFamily() {
+  return normalizeThemeFamily(
+    document.documentElement.dataset.themeFamily ||
+      localStorage.getItem(THEME_FAMILY_KEY) ||
+      parseThemeChoice(localStorage.getItem(LEGACY_THEME_KEY)).family,
+  );
+}
+
+function currentThemeMode() {
+  const fromDataset = document.documentElement.dataset.themeMode;
+  const fromStorage = localStorage.getItem(THEME_MODE_KEY);
+  const fromLegacy = parseThemeChoice(localStorage.getItem(LEGACY_THEME_KEY)).mode;
+  return normalizeThemeMode(fromDataset || fromStorage || fromLegacy || "light");
+}
+
+function themeDatasetValue(family, mode) {
+  return family === "switchboard" ? mode : `${family}-${mode}`;
+}
+
+function applyTheme(theme, { mode = null, persist = true, persistFamily = persist, persistMode = persist } = {}) {
+  const parsed = parseThemeChoice(theme);
+  const family = normalizeThemeFamily(parsed.family);
+  const nextMode = normalizeThemeMode(mode || parsed.mode || currentThemeMode());
+  const familyOption = themeFamilyOption(family);
+  const modeOption = familyOption[nextMode];
+  document.documentElement.dataset.themeFamily = family;
+  document.documentElement.dataset.themeMode = nextMode;
+  document.documentElement.dataset.theme = themeDatasetValue(family, nextMode);
   if (els.themeColor) {
-    els.themeColor.content = nextTheme === "dark" ? "#0c1117" : "#e6e8eb";
+    els.themeColor.content = modeOption.metaColor;
   }
   try {
-    window.SwitchboardAndroid?.setTheme?.(nextTheme);
+    window.SwitchboardAndroid?.setTheme?.(modeOption.nativeTheme);
   } catch (_error) {
     // Native theme sync is optional outside the Android wrapper.
   }
   if (els.themeToggle) {
-    els.themeToggle.textContent = nextTheme === "dark" ? "☀" : "☾";
-    els.themeToggle.title = nextTheme === "dark" ? t("theme.light") : t("theme.dark");
+    els.themeToggle.textContent = nextMode === "dark" ? "☀" : "☾";
+    els.themeToggle.title = nextMode === "dark" ? t("theme.light") : t("theme.dark");
     els.themeToggle.setAttribute("aria-label", els.themeToggle.title);
-    els.themeToggle.setAttribute("aria-pressed", nextTheme === "dark" ? "true" : "false");
+    els.themeToggle.setAttribute("aria-pressed", nextMode === "dark" ? "true" : "false");
   }
-  if (persist) {
-    localStorage.setItem(THEME_KEY, nextTheme);
+  if (persistFamily) {
+    localStorage.setItem(THEME_FAMILY_KEY, family);
+  }
+  if (persistMode) {
+    localStorage.setItem(THEME_MODE_KEY, nextMode);
   }
 }
 
 function initializeTheme() {
-  const current = document.documentElement.dataset.theme || "light";
-  applyTheme(current, { persist: false });
+  applyTheme(currentThemeFamily(), { mode: currentThemeMode(), persist: false });
 }
 
 function clamp(value, min, max) {
@@ -1457,6 +1563,39 @@ function composerHasFocus() {
   return document.activeElement === els.messageText || document.activeElement === els.mediaUrls;
 }
 
+function composerContainsFocusTarget(target) {
+  return Boolean(target && els.composer?.contains(target));
+}
+
+function composerHasFocusWithin() {
+  return composerContainsFocusTarget(document.activeElement);
+}
+
+function conversationListContainsFocusTarget(target) {
+  return Boolean(target && els.conversationList?.contains(target));
+}
+
+function conversationListPointerDownIsPending() {
+  return performance.now() < state.conversationListPointerDownUntil;
+}
+
+function noteConversationListPointerDown(event) {
+  if (!event.target.closest(".conversation-item")) return;
+  state.conversationListPointerDownUntil = performance.now() + 1200;
+}
+
+function handleComposerFocusIn() {
+  renderConversationsPreservingScroll();
+}
+
+function handleComposerFocusOut(event) {
+  if (composerContainsFocusTarget(event.relatedTarget)) return;
+  if (saveComposerDraftForCurrentRecipients()) {
+    if (conversationListContainsFocusTarget(event.relatedTarget) || conversationListPointerDownIsPending()) return;
+    requestAnimationFrame(renderConversationsPreservingScroll);
+  }
+}
+
 function shouldPreserveMessageViewport() {
   return (
     isMobileLayout() &&
@@ -1819,7 +1958,11 @@ function applyRuntimeSettings() {
   configureComposerDisplay();
   applyStaticTranslations();
   restoreThreadHeaderAfterStaticTranslations();
-  applyTheme(document.documentElement.dataset.theme || "light", { persist: false });
+  applyTheme(bootstrapSettingValue("ui.theme_family", currentThemeFamily()), {
+    mode: currentThemeMode(),
+    persistFamily: true,
+    persistMode: false,
+  });
   updateDetailsControls();
 }
 
@@ -2904,7 +3047,7 @@ async function uploadSelectedMedia(files) {
       state.uploadedMedia.push(uploaded);
       state.mediaUploadProgress = state.mediaUploadProgress.filter((upload) => upload.id !== item.id);
       renderUploadedMedia();
-      saveAndRenderComposerDraftForCurrentRecipients();
+      saveAndRenderComposerDraftIfComposerBlurred();
     }
     toast(selected.length === 1 ? t("upload.one") : t("upload.many", { count: selected.length }));
   } catch (error) {
@@ -3340,8 +3483,20 @@ function groupTitleHtml(participants) {
     .join("");
 }
 
+function groupParticipantLineHtml(participants) {
+  return participants
+    .map(
+      (participant) => `<button class="participant-name-button participant-line-participant-button" type="button" data-participant-phone="${escapeHtml(
+        participant.phone_number,
+      )}" title="${escapeHtml(t("contact.rename"))}">${escapeHtml(phoneDisplay(participant.phone_number))}</button>`,
+    )
+    .join("");
+}
+
 function updateParticipantRowVisibility() {
-  els.participantLine?.parentElement?.classList.toggle("hidden", Boolean(els.contactNameToggle?.hidden));
+  const hasDetail = Boolean((els.participantLine?.textContent || "").trim() || els.participantLine?.children.length);
+  const hasNameAction = Boolean(els.contactNameToggle && !els.contactNameToggle.hidden);
+  els.participantLine?.parentElement?.classList.toggle("hidden", !hasDetail && !hasNameAction);
 }
 
 function normalizeDraftPhone(raw) {
@@ -3847,7 +4002,7 @@ function renderConversations() {
       const title = conversation.title || t("conversation.unknown");
       const searchMatch = conversation.search_match?.type === "message" ? conversation.search_match : null;
       const draftPreview = composerDraftPreviewText(conversationDraftSnapshot(conversation));
-      const showsDraftPreview = Boolean(draftPreview) && !searchMatch && !(isDesktopLayout() && isActiveConversation);
+      const showsDraftPreview = Boolean(draftPreview) && !searchMatch && !(isActiveConversation && composerHasFocusWithin());
       const failedClass = conversation.last_status_kind === "failed" && !showsDraftPreview ? "failed-message" : "";
       const previewPrefix = !showsDraftPreview && conversation.last_direction === "outbound" ? t("conversation.you") : "";
       const lastStatusLabel = localizedStatusLabel(conversation.last_status, conversation.last_status_label);
@@ -3857,8 +4012,8 @@ function renderConversations() {
               detail: conversation.last_status_detail || lastStatusLabel || t("conversation.could_not_deliver"),
             })
           : "";
-      const preview =
-        draftPreview || failedPreview || messagePreviewText(conversation) || (lastStatusLabel ? lastStatusLabel : "");
+      const basePreview = failedPreview || messagePreviewText(conversation) || (lastStatusLabel ? lastStatusLabel : "");
+      const preview = showsDraftPreview ? draftPreview : basePreview;
       const previewHtml = searchMatch
         ? renderHighlightedText(searchMatch.snippet || "", searchMatch.terms || [])
         : showsDraftPreview
@@ -4168,6 +4323,21 @@ function renderArchiveButton(archived = false) {
   els.archiveButton.classList.toggle("unarchive-button", archived);
 }
 
+function renderReadStateButton(conversation) {
+  const hasConversation = Boolean(conversation);
+  const isUnread = hasConversation && !conversationIsRead(conversation);
+  const label = !hasConversation ? t("conversation.read") : isUnread ? t("conversation.mark_read") : t("conversation.mark_unread");
+  els.dealtButton.disabled = !hasConversation;
+  els.dealtButton.title = label;
+  els.dealtButton.setAttribute("aria-label", label);
+  els.dealtButton.setAttribute("aria-pressed", isUnread ? "true" : "false");
+  els.dealtButton.classList.toggle("is-unread", isUnread);
+  els.dealtButton.classList.toggle("is-read", hasConversation && !isUnread);
+  if (!els.dealtButton.querySelector(".read-state-light")) {
+    els.dealtButton.innerHTML = `<span class="read-state-light" aria-hidden="true"></span>`;
+  }
+}
+
 function clearRecipientSuggestions() {
   state.recipientSuggestionSeq += 1;
   state.recipientSuggestions = [];
@@ -4286,9 +4456,8 @@ function renderThreadHeader() {
     setContactNameEditor(false);
     els.recipientBar.classList.remove("hidden");
     els.threadPane.classList.add("recipients-visible");
-    els.dealtButton.disabled = true;
     els.archiveButton.disabled = true;
-    els.dealtButton.textContent = t("conversation.read");
+    renderReadStateButton(null);
     renderArchiveButton(false);
     renderRecipientDraft();
     return;
@@ -4302,8 +4471,13 @@ function renderThreadHeader() {
   } else {
     els.threadTitle.textContent = conversation.title || t("thread.conversation");
   }
-  els.participantLine.textContent = "";
+  els.participantLine.replaceChildren();
   const participant = currentDirectParticipant(conversation);
+  if (conversation.kind === "group" && participants.length) {
+    els.participantLine.innerHTML = groupParticipantLineHtml(participants);
+  } else if (participant && participantSavedName(participant)) {
+    els.participantLine.textContent = phoneDisplay(participant.phone_number);
+  }
   els.threadTitle.classList.toggle("thread-title-group", conversation.kind === "group" && participants.length > 0);
   els.threadTitle.classList.toggle("thread-title-clickable", Boolean(participant));
   if (participant) {
@@ -4323,9 +4497,8 @@ function renderThreadHeader() {
   }
   els.recipientBar.classList.add("hidden");
   els.threadPane.classList.remove("recipients-visible");
-  els.dealtButton.disabled = false;
   els.archiveButton.disabled = false;
-  els.dealtButton.textContent = conversationIsRead(conversation) ? t("conversation.unread") : t("conversation.read");
+  renderReadStateButton(conversation);
   renderArchiveButton(archived);
 }
 
@@ -4688,6 +4861,101 @@ function cancelMessageBottomStick() {
 
 function messageBottomStickIsActive(token) {
   return token === state.messageBottomStickToken && !state.messageUserScrolledAwayFromBottom;
+}
+
+function elementFromNode(node) {
+  if (!node) return null;
+  return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+}
+
+function messageTextElementFromTarget(target) {
+  const element = elementFromNode(target);
+  if (!element) return null;
+  return element.closest(".message-text") || element.closest(".message-row[data-message-id]")?.querySelector(".message-text") || null;
+}
+
+function rememberMessageSelectAllTarget(target, duration = 6000) {
+  const messageText = messageTextElementFromTarget(target);
+  if (!messageText) return;
+  state.messageSelectAllTarget = messageText;
+  state.messageSelectAllUntil = performance.now() + duration;
+}
+
+function activeMessageSelectAllTarget() {
+  if (!state.messageSelectAllTarget || performance.now() > state.messageSelectAllUntil || !document.contains(state.messageSelectAllTarget)) {
+    state.messageSelectAllTarget = null;
+    state.messageSelectAllUntil = 0;
+    return null;
+  }
+  return state.messageSelectAllTarget;
+}
+
+function selectMessageText(messageText) {
+  if (!messageText) return;
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(messageText);
+  state.messageSelectionGuard = true;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  state.messageSelectionGuard = false;
+}
+
+function messageTextElementFromSelection(selection = window.getSelection()) {
+  if (!selection || !selection.rangeCount) return null;
+  return (
+    messageTextElementFromTarget(selection.anchorNode) ||
+    messageTextElementFromTarget(selection.focusNode) ||
+    messageTextElementFromTarget(selection.getRangeAt(0).commonAncestorContainer)
+  );
+}
+
+function selectionAlreadyMatchesMessage(selection, messageText) {
+  const selected = (selection?.toString() || "").trim();
+  const target = (messageText?.textContent || "").trim();
+  return Boolean(selected && target && selected === target);
+}
+
+function selectionLooksLikeWindowSelectAll(selection, messageText) {
+  if (!selection || !selection.rangeCount || selection.isCollapsed || !messageText) return false;
+  if (selectionAlreadyMatchesMessage(selection, messageText)) return false;
+  if (messageText.contains(selection.anchorNode) && messageText.contains(selection.focusNode)) return false;
+  const range = selection.getRangeAt(0);
+  const common = elementFromNode(range.commonAncestorContainer);
+  const selectedLength = selection.toString().trim().length;
+  const messageLength = (messageText.textContent || "").trim().length;
+  if ([document.body, document.documentElement, els.appShell, els.threadPane].includes(common)) return true;
+  return Boolean(common?.classList?.contains("messages") && selectedLength > messageLength + 40);
+}
+
+function handleMessageSelectionPointerDown(event) {
+  if (event.pointerType === "touch") {
+    rememberMessageSelectAllTarget(event.target);
+  }
+}
+
+function handleMessageSelectionContextMenu(event) {
+  rememberMessageSelectAllTarget(event.target, 10000);
+}
+
+function handleMessageSelectAllKeydown(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || String(event.key || "").toLowerCase() !== "a") return;
+  const messageText = messageTextElementFromTarget(event.target) || messageTextElementFromSelection() || activeMessageSelectAllTarget();
+  if (!messageText) return;
+  event.preventDefault();
+  rememberMessageSelectAllTarget(messageText);
+  selectMessageText(messageText);
+}
+
+function handleDocumentSelectionChange() {
+  if (state.messageSelectionGuard) return;
+  const messageText = activeMessageSelectAllTarget();
+  if (!messageText) return;
+  const selection = window.getSelection();
+  if (selectionLooksLikeWindowSelectAll(selection, messageText)) {
+    selectMessageText(messageText);
+  }
 }
 
 function renderMessages(messages, scrollMode = "bottom") {
@@ -5157,7 +5425,6 @@ function endComposerInputScrollGuard(event) {
 
 function handleComposerTextInput() {
   updateMessageCounter();
-  saveAndRenderComposerDraftForCurrentRecipients();
   keepComposerInputVisible();
   restoreComposerInputScrollGuard();
   requestAnimationFrame(() => restoreComposerInputScrollGuard());
@@ -6257,6 +6524,12 @@ function saveAndRenderComposerDraftForCurrentRecipients() {
   }
 }
 
+function saveAndRenderComposerDraftIfComposerBlurred() {
+  if (!composerHasFocusWithin()) {
+    saveAndRenderComposerDraftForCurrentRecipients();
+  }
+}
+
 function deleteSavedComposerDraft(recipients = currentRecipients()) {
   const key = composerDraftKey(recipients);
   if (key) state.composerDraftsByRecipient.delete(key);
@@ -6798,13 +7071,14 @@ async function saveCurrentContactName() {
 function bindEvents() {
   document.addEventListener("pointerdown", unlockAudio, { once: true, passive: true });
   document.addEventListener("keydown", unlockAudio, { once: true });
+  document.addEventListener("keydown", handleMessageSelectAllKeydown, true);
+  document.addEventListener("selectionchange", handleDocumentSelectionChange);
   bindColumnResizers();
   els.mobileBackButton.addEventListener("click", () => {
     closeMobileThread();
   });
   els.themeToggle.addEventListener("click", () => {
-    const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-    applyTheme(current === "dark" ? "light" : "dark");
+    applyTheme(currentThemeFamily(), { mode: currentThemeMode() === "dark" ? "light" : "dark" });
   });
   els.settingsButton.addEventListener("click", () => {
     if (confirmDiscardIdentityChanges()) openSettings();
@@ -6858,6 +7132,7 @@ function bindEvents() {
   els.bulkReadButton.addEventListener("click", () => bulkConversationAction("read"));
   els.bulkUnreadButton.addEventListener("click", () => bulkConversationAction("unread"));
   els.bulkHideButton.addEventListener("click", () => bulkConversationAction("hide"));
+  els.conversationList.addEventListener("pointerdown", noteConversationListPointerDown, { capture: true });
   els.conversationList.addEventListener("click", (event) => {
     if (Date.now() < state.suppressConversationClickUntil) {
       event.preventDefault();
@@ -7073,10 +7348,12 @@ function bindEvents() {
   els.messageText.addEventListener("focus", keepComposerInputVisible);
   els.messageText.addEventListener("touchstart", beginComposerTextTouch, { passive: true });
   els.messageText.addEventListener("touchmove", containComposerTextTouch, { passive: false });
+  els.composer.addEventListener("focusin", handleComposerFocusIn);
+  els.composer.addEventListener("focusout", handleComposerFocusOut);
   els.mediaUrls.addEventListener("input", () => {
     keepComposerInputVisible();
     showComposerError("");
-    saveAndRenderComposerDraftForCurrentRecipients();
+    saveAndRenderComposerDraftIfComposerBlurred();
   });
   els.mediaUrls.addEventListener("focus", keepComposerInputVisible);
   els.fromNumber.addEventListener("change", () => selectFromNumber(els.fromNumber.value));
@@ -7099,10 +7376,12 @@ function bindEvents() {
     if (!button) return;
     state.uploadedMedia.splice(Number(button.dataset.removeUpload), 1);
     renderUploadedMedia();
-    saveAndRenderComposerDraftForCurrentRecipients();
+    saveAndRenderComposerDraftIfComposerBlurred();
   });
   els.messages.addEventListener("wheel", markMessageUserScrollIntent, { passive: true });
   els.messages.addEventListener("touchstart", markMessageUserScrollIntent, { passive: true });
+  els.messages.addEventListener("pointerdown", handleMessageSelectionPointerDown, { capture: true });
+  els.messages.addEventListener("contextmenu", handleMessageSelectionContextMenu);
   els.messages.addEventListener("pointerdown", markMessageUserScrollIntent, { passive: true });
   els.messages.addEventListener("scroll", handleMessagesScroll, { passive: true });
   document.addEventListener("keydown", markMessageKeyboardScrollIntent, true);
