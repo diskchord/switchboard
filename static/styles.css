@@ -2299,8 +2299,11 @@ select:focus {
   overflow: visible;
   padding: 0;
   position: relative;
-  transition: none;
+  transition: none !important;
+  transition-delay: 0s !important;
+  transition-duration: 0s !important;
   width: 42px;
+  will-change: auto;
 }
 
 .read-state-light {
@@ -2311,8 +2314,11 @@ select:focus {
   box-shadow: none;
   display: block;
   height: 16px;
-  transition: none;
+  transition: none !important;
+  transition-delay: 0s !important;
+  transition-duration: 0s !important;
   width: 16px;
+  will-change: auto;
 }
 
 .read-state-button.is-unread {
@@ -2340,6 +2346,10 @@ select:focus {
   background: transparent;
   border-color: transparent;
   transform: none;
+}
+
+.read-state-button:disabled {
+  opacity: 1;
 }
 
 .read-state-button:focus-visible {
