@@ -2289,6 +2289,7 @@ select:focus {
 
 .read-state-button {
   animation: none;
+  -webkit-tap-highlight-color: transparent;
   background: transparent;
   border-color: transparent;
   border-radius: 999px;
@@ -2302,6 +2303,7 @@ select:focus {
   transition: none !important;
   transition-delay: 0s !important;
   transition-duration: 0s !important;
+  user-select: none;
   width: 42px;
   will-change: auto;
 }
@@ -2342,9 +2344,13 @@ select:focus {
 }
 
 .read-state-button:hover,
+.read-state-button:active,
+.read-state-button:focus,
 .read-state-button:focus-visible {
   background: transparent;
   border-color: transparent;
+  box-shadow: none;
+  outline: 0;
   transform: none;
 }
 
@@ -2352,9 +2358,8 @@ select:focus {
   opacity: 1;
 }
 
-.read-state-button:focus-visible {
-  box-shadow: 0 0 0 3px var(--focus-ring);
-  outline: 0;
+.read-state-button:focus-visible .read-state-light {
+  box-shadow: 0 0 0 4px var(--focus-ring);
 }
 
 .panel-button {
