@@ -73,7 +73,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Compose stores runtime data in the `switchboard-data` volume and binds the app to `${SWITCHBOARD_PORT:-8766}` on the host. The image includes `ffmpeg` for 3GP-to-MP4 conversion and `poppler-utils` for fax PDF previews.
+Compose stores runtime data in the `switchboard-data` volume and binds the app to `${SWITCHBOARD_PORT:-8766}` on the host. The image includes `ffmpeg` for 3GP-to-MP4 conversion; fax PDFs use the browser's lazy inline viewer.
 
 For systemd-managed Docker:
 
@@ -134,7 +134,7 @@ If you mix providers:
 TEXTING_PROVIDER_BY_NUMBER={"+15551230001":"telnyx","+15551230002":"twilio"}
 ```
 
-Restart the server after adding numbers. The Numbers panel in the UI lets you rename, recolor, activate/deactivate, and configure call behavior for each sender identity.
+Restart the server after adding numbers through `.env`. This seed mechanism remains useful for automated deployments. Alternatively, add a number without a restart from **Settings > Numbers** or **Numbers > Add number** in the sidebar; it is stored in SQLite and can coexist with `.env`-seeded numbers. The Numbers panel also lets you rename, recolor, activate/deactivate, choose the provider when adding, and configure call behavior for each sender identity.
 
 For copyable `.env` starting points, see `docs/env/`. It includes separate examples for core server settings, Telnyx, Twilio, Rev.ai transcription, and contact sync.
 
@@ -166,13 +166,9 @@ https://switchboard.example/api/telnyx/voice/recording
 https://switchboard.example/api/telnyx/voice/transcription
 ```
 
-Set `TELNYX_PUBLIC_KEY` so Switchboard can verify Telnyx webhook signatures. Leave it blank only for trusted local testing. Set `TELNYX_FAX_CONNECTION_ID` to the Programmable Fax Application connection ID if you want outbound fax from the composer.
+Set `TELNYX_PUBLIC_KEY` so Switchboard can verify Telnyx webhook signatures. Missing signing credentials reject provider callbacks by default. For isolated local tests only, opt in with `TEXTING_ALLOW_UNSIGNED_PROVIDER_WEBHOOKS=1`. Set `TELNYX_FAX_CONNECTION_ID` to the Programmable Fax Application connection ID if you want outbound fax from the composer.
 
-Inbound fax PDFs are downloaded to `TEXTING_MEDIA_DIR`. Install `poppler-utils` on non-Docker hosts if you want fax page PNG previews:
-
-```bash
-sudo apt install poppler-utils
-```
+Inbound fax PDFs are downloaded in the background to `TEXTING_MEDIA_DIR` and displayed in a fixed-height lazy viewer, without generating a separate attachment for every page.
 
 ## 7. Connect Twilio
 

@@ -30,7 +30,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=c9f12a6d" />
+    <link rel="stylesheet" href="/static/styles.css?v=39afb6c5" />
   </head>
   <body>
     <div class="app-shell">
@@ -191,7 +191,29 @@
         <section class="panel-section active" id="identitiesPanel">
           <div class="panel-heading">
             <h3 data-i18n="identities.heading">Sender Identities</h3>
+            <button class="small-button" id="addIdentityButton" type="button" data-i18n="identities.add">Add number</button>
           </div>
+          <form class="identity-add-form hidden" id="identityAddForm">
+            <label>
+              <span data-i18n="identities.phone">Phone number</span>
+              <input id="identityAddPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+15551234567" required />
+            </label>
+            <label>
+              <span data-i18n="identities.label">Identity label</span>
+              <input id="identityAddLabel" type="text" autocomplete="off" data-i18n-placeholder="identities.label_optional" placeholder="Optional label" />
+            </label>
+            <label>
+              <span data-i18n="identities.provider">Provider</span>
+              <select id="identityAddProvider">
+                <option value="telnyx">Telnyx</option>
+                <option value="twilio">Twilio</option>
+              </select>
+            </label>
+            <div class="identity-add-actions">
+              <button class="small-button" id="identityAddCancel" type="button" data-i18n="common.cancel">Cancel</button>
+              <button class="small-button primary" type="submit" data-i18n="identities.add_submit">Add number</button>
+            </div>
+          </form>
           <div class="identity-list" id="identityList"></div>
         </section>
 
@@ -328,6 +350,6 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=c9f12a6d" type="module"></script>
+    <script src="/static/app.js?v=39afb6c5" type="module"></script>
   </body>
 </html>

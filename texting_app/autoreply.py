@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timedelta
 from typing import Any
 
-from .db import connect, init_db
+from .db import connect
 from .phone import normalize_phone
 from .timeutil import now_est
 
@@ -137,44 +138,43 @@ def maybe_send_autoreply(
     if len(thread_remote_numbers) != 1 or thread_remote_numbers[0] != recipient_number:
         return {"sent": False, "reason": "group_thread"}
 
-    conn = connect()
-    init_db(conn)
-    rule = _enabled_rule_for_candidates(conn, candidate_self_numbers)
-    if not rule:
-        return {"sent": False, "reason": "disabled"}
+    with closing(connect()) as conn:
+        rule = _enabled_rule_for_candidates(conn, candidate_self_numbers)
+        if not rule:
+            return {"sent": False, "reason": "disabled"}
 
-    phone_number = normalize_phone(rule["phone_number"])
-    message = str(rule["message"] or "").strip()
-    cooldown_hours = _clean_cooldown_hours(rule["cooldown_hours"])
-    if _delivery_recent(conn, phone_number, recipient_number, cooldown_hours):
-        return {"sent": False, "reason": "cooldown"}
+        phone_number = normalize_phone(rule["phone_number"])
+        message = str(rule["message"] or "").strip()
+        cooldown_hours = _clean_cooldown_hours(rule["cooldown_hours"])
+        if _delivery_recent(conn, phone_number, recipient_number, cooldown_hours):
+            return {"sent": False, "reason": "cooldown"}
 
-    try:
-        from .messaging import send_message
+        try:
+            from .messaging import send_message
 
-        result = send_message(
-            from_number=phone_number,
-            to_numbers=[recipient_number],
-            text=message,
-            media_urls=[],
-            conversation_id=conversation_id,
-        )
-    except Exception as exc:
-        print(f"autoreply failed from {phone_number} to {recipient_number}: {exc}", flush=True)
-        return {"sent": False, "reason": "send_failed", "error": str(exc)}
+            result = send_message(
+                from_number=phone_number,
+                to_numbers=[recipient_number],
+                text=message,
+                media_urls=[],
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:
+            print(f"autoreply failed from {phone_number} to {recipient_number}: {exc}", flush=True)
+            return {"sent": False, "reason": "send_failed", "error": str(exc)}
 
-    message_id = result.get("message_id")
-    if message_id:
-        conn.execute(
-            "UPDATE messages SET source = 'autoreply', updated_at = ? WHERE id = ?",
-            (now_est(), int(message_id)),
-        )
-    _record_delivery(conn, phone_number, recipient_number, int(message_id) if message_id else None)
-    conn.commit()
-    return {
-        "sent": True,
-        "message_id": message_id,
-        "trigger_message_id": trigger_message_id,
-        "from_number": phone_number,
-        "to_number": recipient_number,
-    }
+        message_id = result.get("message_id")
+        if message_id:
+            conn.execute(
+                "UPDATE messages SET source = 'autoreply', updated_at = ? WHERE id = ?",
+                (now_est(), int(message_id)),
+            )
+        _record_delivery(conn, phone_number, recipient_number, int(message_id) if message_id else None)
+        conn.commit()
+        return {
+            "sent": True,
+            "message_id": message_id,
+            "trigger_message_id": trigger_message_id,
+            "from_number": phone_number,
+            "to_number": recipient_number,
+        }

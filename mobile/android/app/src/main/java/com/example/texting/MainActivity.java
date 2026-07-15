@@ -70,7 +70,7 @@ public class MainActivity extends Activity {
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
     private static final int FILE_CHOOSER_REQUEST = 41;
     private static final int PHONE_CONTACTS_PERMISSION_REQUEST = 42;
-    private static final String APP_ASSET_VERSION = "5b7a3f21";
+    private static final String APP_ASSET_VERSION = "39afb6c5";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
     private boolean promptedForServerAfterFailure = false;
@@ -150,7 +150,6 @@ public class MainActivity extends Activity {
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             settings.setForceDark(WebSettings.FORCE_DARK_OFF);
         }
-        webView.clearCache(true);
         webView.addJavascriptInterface(new AndroidBridge(), "SwitchboardAndroid");
         webView.setWebChromeClient(new WebChromeClient() {
             @Override

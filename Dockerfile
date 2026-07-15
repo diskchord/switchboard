@@ -19,7 +19,6 @@ RUN apt-get update \
         ca-certificates \
         ffmpeg \
         gosu \
-        poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid "${SWITCHBOARD_GID}" switchboard \
     && useradd --uid "${SWITCHBOARD_UID}" --gid switchboard --home-dir /app --shell /usr/sbin/nologin --no-create-home switchboard

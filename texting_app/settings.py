@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import json
+import sqlite3
+import threading
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,6 +102,15 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         str(config.AUTO_REFRESH_SECONDS),
         help="Browser polling interval. Set to 0 to disable.",
         env_names=("TEXTING_AUTO_REFRESH_SECONDS",),
+    ),
+    SettingDef(
+        "webhooks.allow_unsigned_provider",
+        "Allow unsigned provider webhooks",
+        "Webhooks",
+        "bool",
+        "1" if config.ALLOW_UNSIGNED_PROVIDER_WEBHOOKS else "0",
+        help="Unsafe outside isolated local testing. Production Telnyx and Twilio callbacks should always be signed.",
+        env_names=("TEXTING_ALLOW_UNSIGNED_PROVIDER_WEBHOOKS",),
     ),
     SettingDef(
         "notifications.ntfy_enabled",
@@ -212,7 +224,7 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         "Uploads",
         "bool",
         "1" if config.MEDIA_CACHE_ATTACHMENTS else "0",
-        help="Stores remote media locally after it appears so attachments open quickly.",
+        help="Legacy cache preference. Provider-received media is stored by the background ingestion worker.",
         env_names=("TEXTING_CACHE_ATTACHMENTS",),
     ),
     SettingDef(
@@ -422,13 +434,37 @@ class SettingsError(ValueError):
     pass
 
 
+_SETTINGS_CACHE_LOCK = threading.RLock()
+_SETTINGS_CACHE: dict[str, str] | None = None
+_SETTINGS_CACHE_DB_PATH = ""
+
+
+def invalidate_settings_cache() -> None:
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_DB_PATH
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE = None
+        _SETTINGS_CACHE_DB_PATH = ""
+
+
 def _stored_values() -> dict[str, str]:
-    conn = connect()
-    init_db(conn)
-    return {
-        row["key"]: row["value"]
-        for row in conn.execute("SELECT key, value FROM app_settings").fetchall()
-    }
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_DB_PATH
+    db_path = str(config.DB_PATH)
+    with _SETTINGS_CACHE_LOCK:
+        if _SETTINGS_CACHE is not None and _SETTINGS_CACHE_DB_PATH == db_path:
+            return dict(_SETTINGS_CACHE)
+        with closing(connect()) as conn:
+            try:
+                rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+            except sqlite3.OperationalError as exc:
+                # Normal server startup creates the schema once. Keep direct library
+                # calls and first-run utilities safe without migrating every read.
+                if "no such table: app_settings" not in str(exc).lower():
+                    raise
+                init_db(conn)
+                rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+        _SETTINGS_CACHE = {row["key"]: row["value"] for row in rows}
+        _SETTINGS_CACHE_DB_PATH = db_path
+        return dict(_SETTINGS_CACHE)
 
 
 def _coerce_value(definition: SettingDef, value: Any) -> str:
@@ -456,11 +492,9 @@ def _coerce_value(definition: SettingDef, value: Any) -> str:
 def get_value(key: str, default: str | None = None) -> str:
     definition = SETTINGS_BY_KEY.get(key)
     fallback = definition.default if definition else (default or "")
-    conn = connect()
-    init_db(conn)
-    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
-    if row:
-        value = str(row["value"])
+    stored = _stored_values()
+    if key in stored:
+        value = str(stored[key])
         if definition and definition.secret and not value.strip():
             return fallback
         return value
@@ -507,31 +541,35 @@ def configured_values() -> dict[str, Any]:
 
 
 def update_values(payload: dict[str, Any]) -> dict[str, Any]:
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_DB_PATH
     updates = payload.get("settings") or {}
     clear = set(payload.get("clear") or [])
     if not isinstance(updates, dict):
         raise SettingsError("Settings payload must be an object.")
     timestamp = now_est()
-    conn = connect()
-    init_db(conn)
-    for key in clear:
-        if key not in SETTINGS_BY_KEY:
-            raise SettingsError(f"Unknown setting: {key}")
-        conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
-    for key, raw_value in updates.items():
-        definition = SETTINGS_BY_KEY.get(key)
-        if not definition:
-            raise SettingsError(f"Unknown setting: {key}")
-        if definition.secret and not str(raw_value or "").strip():
-            continue
-        value = _coerce_value(definition, raw_value)
-        conn.execute(
-            """
-            INSERT INTO app_settings(key, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-            """,
-            (key, value, timestamp),
-        )
-    conn.commit()
+    with _SETTINGS_CACHE_LOCK:
+        with closing(connect()) as conn:
+            init_db(conn)
+            for key in clear:
+                if key not in SETTINGS_BY_KEY:
+                    raise SettingsError(f"Unknown setting: {key}")
+                conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+            for key, raw_value in updates.items():
+                definition = SETTINGS_BY_KEY.get(key)
+                if not definition:
+                    raise SettingsError(f"Unknown setting: {key}")
+                if definition.secret and not str(raw_value or "").strip():
+                    continue
+                value = _coerce_value(definition, raw_value)
+                conn.execute(
+                    """
+                    INSERT INTO app_settings(key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, value, timestamp),
+                )
+            conn.commit()
+        _SETTINGS_CACHE = None
+        _SETTINGS_CACHE_DB_PATH = ""
     return configured_values()

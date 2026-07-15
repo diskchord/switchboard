@@ -117,7 +117,28 @@ CREATE TABLE IF NOT EXISTS attachments (
   size INTEGER,
   sha256 TEXT,
   filename TEXT,
-  source TEXT NOT NULL DEFAULT 'local'
+  source TEXT NOT NULL DEFAULT 'local',
+  ingestion_status TEXT NOT NULL DEFAULT 'ready',
+  ingestion_error TEXT NOT NULL DEFAULT '',
+  ingestion_updated_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS attachment_ingestion_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attachment_id INTEGER NOT NULL UNIQUE REFERENCES attachments(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  dedupe_key TEXT UNIQUE,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK(status IN ('queued', 'processing', 'retry', 'completed', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 8,
+  available_at REAL NOT NULL DEFAULT 0,
+  locked_at REAL,
+  worker_id TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS telnyx_events (
@@ -209,10 +230,17 @@ CREATE TABLE IF NOT EXISTS voicemail_recordings (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_time ON messages(conversation_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_messages_telnyx_id ON messages(telnyx_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_contact_phones_phone ON contact_phones(phone_number);
 CREATE INDEX IF NOT EXISTS idx_conversations_last ON conversations(last_message_at DESC);
 CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_conversation_status_time
+  ON scheduled_messages(conversation_id, status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_attachment_ingestion_jobs_ready
+  ON attachment_ingestion_jobs(status, available_at, id);
+CREATE INDEX IF NOT EXISTS idx_attachment_ingestion_jobs_locked
+  ON attachment_ingestion_jobs(status, locked_at);
 CREATE INDEX IF NOT EXISTS idx_autoreply_deliveries_recipient ON autoreply_deliveries(recipient_number);
 """
 
@@ -264,6 +292,48 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id)")
+    attachment_columns = {row["name"] for row in conn.execute("PRAGMA table_info(attachments)").fetchall()}
+    for name, definition in {
+        "ingestion_status": "TEXT NOT NULL DEFAULT 'ready'",
+        "ingestion_error": "TEXT NOT NULL DEFAULT ''",
+        "ingestion_updated_at": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in attachment_columns:
+            conn.execute(f"ALTER TABLE attachments ADD COLUMN {name} {definition}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attachment_ingestion_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          attachment_id INTEGER NOT NULL UNIQUE REFERENCES attachments(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL,
+          dedupe_key TEXT UNIQUE,
+          status TEXT NOT NULL DEFAULT 'queued'
+            CHECK(status IN ('queued', 'processing', 'retry', 'completed', 'failed')),
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 8,
+          available_at REAL NOT NULL DEFAULT 0,
+          locked_at REAL,
+          worker_id TEXT NOT NULL DEFAULT '',
+          last_error TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          completed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attachment_ingestion_jobs_ready
+        ON attachment_ingestion_jobs(status, available_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attachment_ingestion_jobs_locked
+        ON attachment_ingestion_jobs(status, locked_at)
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scheduled_messages (
@@ -294,6 +364,12 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         if name not in scheduled_columns:
             conn.execute(f"ALTER TABLE scheduled_messages ADD COLUMN {name} {definition}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for)")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scheduled_messages_conversation_status_time
+        ON scheduled_messages(conversation_id, status, scheduled_for)
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS autoreply_rules (
@@ -617,14 +693,33 @@ def add_attachment(
     sha256: str | None = None,
     filename: str | None = None,
     source: str = "local",
-) -> None:
-    conn.execute(
+    ingestion_status: str = "ready",
+    ingestion_error: str = "",
+    ingestion_updated_at: str | None = None,
+) -> int:
+    cur = conn.execute(
         """
-        INSERT INTO attachments(message_id, local_path, remote_url, content_type, size, sha256, filename, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO attachments(
+          message_id, local_path, remote_url, content_type, size, sha256, filename, source,
+          ingestion_status, ingestion_error, ingestion_updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (message_id, local_path, remote_url, content_type, size, sha256, filename, source),
+        (
+            message_id,
+            local_path,
+            remote_url,
+            content_type,
+            size,
+            sha256,
+            filename,
+            source,
+            ingestion_status,
+            ingestion_error,
+            ingestion_updated_at or now_est(),
+        ),
     )
+    return int(cur.lastrowid)
 
 
 def add_provider_message_ref(

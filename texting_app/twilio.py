@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import config
 from . import settings as app_settings
+from .attachment_ingestion import enqueue_remote_attachment
 from .db import (
     add_attachment,
     add_provider_message_ref,
@@ -88,54 +89,6 @@ def _form_request(url: str, params: list[tuple[str, str]], account_sid: str, aut
         raise TwilioError(_twilio_error_response(exc.code, detail)) from exc
     except urllib.error.URLError as exc:
         raise TwilioError(f"Twilio API request failed: {exc}") from exc
-
-
-def _extension_for_content_type(content_type: str | None) -> str:
-    if not content_type:
-        return ""
-    return {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-        "video/mp4": ".mp4",
-        "audio/mpeg": ".mp3",
-        "audio/mp4": ".m4a",
-        "application/pdf": ".pdf",
-    }.get(content_type.split(";", 1)[0].strip().lower(), "")
-
-
-def _download_media(url: str, content_type: str | None = None) -> tuple[str | None, int | None, str | None]:
-    if not url:
-        return None, None, None
-    config.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    parsed_name = Path(urlparse(url).path).name
-    extension = Path(parsed_name).suffix or _extension_for_content_type(content_type)
-    base = parsed_name or hashlib.sha256(url.encode("utf-8")).hexdigest()
-    filename = base if base.endswith(extension) else f"{base}{extension}"
-    target = config.MEDIA_DIR / filename
-    sha = None
-    if not target.exists():
-        request = urllib.request.Request(url, headers={"User-Agent": "switchboard/0.1"})
-        account_sid = _account_sid()
-        auth_token = _auth_token()
-        if account_sid and auth_token:
-            request.add_header("Authorization", _basic_auth_value(account_sid, auth_token))
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                payload = response.read()
-        except Exception:
-            return None, None, None
-        target.write_bytes(payload)
-        sha = hashlib.sha256(payload).hexdigest()
-    size = target.stat().st_size if target.exists() else None
-    if target.exists() and sha is None:
-        digest = hashlib.sha256()
-        with target.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        sha = digest.hexdigest()
-    return f"media/{filename}" if target.exists() else None, size, sha
 
 
 def _webhook_url(request_url: str) -> str:
@@ -249,7 +202,10 @@ def _verify_json_signature(raw_body: bytes, signature: str, request_url: str, au
 def verify_signature(raw_body: bytes, headers: dict[str, str], request_url: str) -> bool:
     auth_token = _auth_token()
     if not auth_token:
-        return True
+        return app_settings.get_bool(
+            "webhooks.allow_unsigned_provider",
+            config.ALLOW_UNSIGNED_PROVIDER_WEBHOOKS,
+        )
     signature = headers.get("x-twilio-signature", "")
     if not signature:
         return False
@@ -371,6 +327,7 @@ def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, Any]) -> 
         return None
 
     existing_id = _find_message_id(conn, sid) if sid else None
+    is_new_message = existing_id is None
     if existing_id:
         conn.execute(
             """
@@ -380,47 +337,53 @@ def _store_inbound_message(conn: sqlite3.Connection, params: dict[str, Any]) -> 
             """,
             (as_json({"twilio": params}), now_est(), existing_id),
         )
-        return existing_id
-
-    known_self = self_numbers(conn)
-    participants = {from_number, *to_numbers}
-    remote_numbers = sorted(n for n in participants if n and n != primary_to) or ([from_number] if from_number else [])
-    self_participants = [primary_to] if primary_to else []
-    if known_self:
-        remote_numbers = sorted(n for n in participants if n and n not in known_self)
-        self_participants = sorted(n for n in participants if n in known_self)
-    conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
-    message_id = upsert_message(
-        conn,
-        conversation_id=conversation_id,
-        direction="inbound",
-        from_number=from_number,
-        to_numbers=to_numbers,
-        cc_numbers=[],
-        text=text,
-        occurred_at=_message_timestamp(params),
-        message_type="MMS" if media_items or len(to_numbers) > 1 else "SMS",
-        status="received",
-        source="twilio",
-        telnyx_id=sid or None,
-        telnyx_event_id=None,
-        raw_json={"twilio": params},
-    )
+        message_id = existing_id
+        conversation_row = conn.execute("SELECT conversation_id FROM messages WHERE id = ?", (message_id,)).fetchone()
+        conversation_id = int(conversation_row["conversation_id"])
+        remote_numbers = []
+        self_participants = []
+    else:
+        known_self = self_numbers(conn)
+        participants = {from_number, *to_numbers}
+        remote_numbers = sorted(n for n in participants if n and n != primary_to) or ([from_number] if from_number else [])
+        self_participants = [primary_to] if primary_to else []
+        if known_self:
+            remote_numbers = sorted(n for n in participants if n and n not in known_self)
+            self_participants = sorted(n for n in participants if n in known_self)
+        conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
+        message_id = upsert_message(
+            conn,
+            conversation_id=conversation_id,
+            direction="inbound",
+            from_number=from_number,
+            to_numbers=to_numbers,
+            cc_numbers=[],
+            text=text,
+            occurred_at=_message_timestamp(params),
+            message_type="MMS" if media_items or len(to_numbers) > 1 else "SMS",
+            status="received",
+            source="twilio",
+            telnyx_id=sid or None,
+            telnyx_event_id=None,
+            raw_json={"twilio": params},
+        )
     add_provider_message_ref(conn, provider="twilio", provider_message_id=sid, message_id=message_id)
-    for media in media_items:
-        local_path, size, sha = _download_media(media["url"], media.get("content_type"))
-        filename = Path(local_path or urlparse(media["url"]).path).name
-        add_attachment(
+    for index, media in enumerate(media_items):
+        enqueue_remote_attachment(
             conn,
             message_id,
-            local_path=local_path,
+            provider="twilio",
             remote_url=media["url"],
             content_type=media.get("content_type"),
-            size=size,
-            sha256=sha,
-            filename=filename,
+            filename=Path(urlparse(media["url"]).path).name,
             source="twilio",
+            dedupe_key=f"twilio:{sid or message_id}:{index}",
         )
+    if not is_new_message:
+        return message_id
+
+    # Commit the message, remote metadata, and jobs before optional notification
+    # and autoreply I/O. The daemon worker can only claim jobs after this commit.
     conn.commit()
     _notify_incoming_message(
         from_number=from_number,
@@ -556,6 +519,14 @@ def _params_from_json_body(raw_body: bytes) -> list[dict[str, Any]]:
 
 def handle_webhook(raw_body: bytes, headers: dict[str, str], request_url: str) -> dict[str, Any]:
     if not verify_signature(raw_body, headers, request_url):
+        if not _auth_token() and not app_settings.get_bool(
+            "webhooks.allow_unsigned_provider",
+            config.ALLOW_UNSIGNED_PROVIDER_WEBHOOKS,
+        ):
+            raise TwilioError(
+                "Twilio webhook verification requires TWILIO_AUTH_TOKEN. "
+                "For isolated local testing only, set TEXTING_ALLOW_UNSIGNED_PROVIDER_WEBHOOKS=1."
+            )
         raise TwilioError("Twilio webhook signature verification failed.")
     content_type = headers.get("content-type", "").lower()
     if "application/json" in content_type:

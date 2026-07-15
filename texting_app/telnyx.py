@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
-import shutil
 import sqlite3
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import config
 from . import settings as app_settings
+from .attachment_ingestion import enqueue_remote_attachment
 from .db import (
     add_attachment,
     add_provider_message_ref,
@@ -79,103 +77,6 @@ def _format_telnyx_error_response(status_code: int, detail: str) -> str:
         if message:
             return f"Telnyx rejected the message ({status_code}): {message}"
     return f"Telnyx API returned {status_code}: {detail}"
-
-
-def _extension_for_content_type(content_type: str | None) -> str:
-    if not content_type:
-        return ""
-    return {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-        "video/mp4": ".mp4",
-        "audio/mpeg": ".mp3",
-        "audio/mp4": ".m4a",
-        "application/pdf": ".pdf",
-    }.get(content_type.split(";", 1)[0].strip().lower(), "")
-
-
-def _download_media(media: dict[str, Any]) -> tuple[str | None, int | None, str | None]:
-    url = media.get("url")
-    if not url:
-        return None, media.get("size"), media.get("sha256")
-    config.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    parsed_name = Path(urlparse(url).path).name
-    sha = media.get("sha256")
-    extension = Path(parsed_name).suffix or _extension_for_content_type(media.get("content_type"))
-    base = sha or parsed_name or hashlib.sha256(url.encode("utf-8")).hexdigest()
-    filename = base if base.endswith(extension) else f"{base}{extension}"
-    target = config.MEDIA_DIR / filename
-    if not target.exists():
-        request = urllib.request.Request(url, headers={"User-Agent": "switchboard/0.1"})
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                payload = response.read()
-        except Exception:
-            return None, media.get("size"), sha
-        target.write_bytes(payload)
-        if not sha:
-            sha = hashlib.sha256(payload).hexdigest()
-    size = target.stat().st_size if target.exists() else media.get("size")
-    return f"media/{filename}" if target.exists() else None, size, sha
-
-
-def _media_file(local_path: str | None) -> Path | None:
-    if not local_path:
-        return None
-    path = config.MEDIA_DIR / Path(local_path).name
-    return path if path.exists() else None
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _page_number(path: Path) -> tuple[int, str]:
-    stem = path.stem
-    _, _, suffix = stem.rpartition("-")
-    try:
-        return int(suffix), path.name
-    except ValueError:
-        return 0, path.name
-
-
-def _render_pdf_pages(local_path: str | None) -> list[dict[str, Any]]:
-    pdf_path = _media_file(local_path)
-    pdftoppm = shutil.which("pdftoppm")
-    if not pdf_path or not pdftoppm:
-        return []
-    prefix = config.MEDIA_DIR / f"{pdf_path.stem}-page"
-    pages = sorted(config.MEDIA_DIR.glob(f"{prefix.name}-*.png"), key=_page_number)
-    if not pages:
-        try:
-            subprocess.run(
-                [pdftoppm, "-png", "-r", "160", str(pdf_path), str(prefix)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=90,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return []
-        pages = sorted(config.MEDIA_DIR.glob(f"{prefix.name}-*.png"), key=_page_number)
-    attachments: list[dict[str, Any]] = []
-    for page in pages:
-        attachments.append(
-            {
-                "local_path": f"media/{page.name}",
-                "content_type": "image/png",
-                "size": page.stat().st_size,
-                "sha256": _file_sha256(page),
-                "filename": page.name,
-            }
-        )
-    return attachments
 
 
 def _json_request(url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
@@ -403,7 +304,10 @@ def send_fax(
 def verify_signature(raw_body: bytes, signature: str | None, timestamp: str | None) -> bool:
     public_key_value = app_settings.get_value("telnyx.public_key", config.TELNYX_PUBLIC_KEY)
     if not public_key_value:
-        return True
+        return app_settings.get_bool(
+            "webhooks.allow_unsigned_provider",
+            config.ALLOW_UNSIGNED_PROVIDER_WEBHOOKS,
+        )
     if not signature or not timestamp:
         return False
     try:
@@ -614,6 +518,37 @@ def _normalize_webhook_event(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+def _enqueue_webhook_media(
+    conn: sqlite3.Connection,
+    message_id: int,
+    media_items: Any,
+    *,
+    key_prefix: str,
+    source: str = "telnyx",
+) -> int:
+    count = 0
+    for index, media in enumerate(media_items if isinstance(media_items, list) else []):
+        if not isinstance(media, dict):
+            continue
+        remote_url = str(media.get("url") or "").strip()
+        if not remote_url:
+            continue
+        enqueue_remote_attachment(
+            conn,
+            message_id,
+            provider="telnyx",
+            remote_url=remote_url,
+            content_type=media.get("content_type"),
+            size=media.get("size"),
+            sha256=media.get("sha256"),
+            filename=Path(urlparse(remote_url).path).name,
+            source=source,
+            dedupe_key=f"telnyx:{key_prefix}:{index}",
+        )
+        count += 1
+    return count
+
+
 def _store_fax_event(conn, event: dict[str, Any], raw_event: dict[str, Any] | None = None) -> int | None:
     data = event.get("data", {})
     payload = data.get("payload", {})
@@ -654,6 +589,19 @@ def _store_fax_event(conn, event: dict[str, Any], raw_event: dict[str, Any] | No
     conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
     status = str(payload.get("status") or ("failed" if _fax_failed(payload, event_type) else "received"))
     text = _fax_message_text(payload, event_type)
+    media_url = str(payload.get("media_url") or "").strip()
+    fax_media = (
+        [
+            {
+                "url": media_url,
+                "content_type": "application/pdf",
+                "size": payload.get("media_size") or payload.get("file_size"),
+                "sha256": payload.get("sha256"),
+            }
+        ]
+        if media_url
+        else []
+    )
 
     if telnyx_id:
         row = conn.execute("SELECT id FROM messages WHERE telnyx_id = ? ORDER BY id LIMIT 1", (telnyx_id,)).fetchone()
@@ -666,8 +614,16 @@ def _store_fax_event(conn, event: dict[str, Any], raw_event: dict[str, Any] | No
                 """,
                 (text, status, data.get("id"), as_json(stored_event), now_est(), row["id"]),
             )
-            add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=int(row["id"]))
-            return int(row["id"])
+            existing_id = int(row["id"])
+            add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=existing_id)
+            _enqueue_webhook_media(
+                conn,
+                existing_id,
+                fax_media,
+                key_prefix=f"fax:{fax_id or telnyx_id}",
+                source="telnyx-fax",
+            )
+            return existing_id
 
     message_id = upsert_message(
         conn,
@@ -687,36 +643,16 @@ def _store_fax_event(conn, event: dict[str, Any], raw_event: dict[str, Any] | No
     )
     add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
 
-    media_url = payload.get("media_url")
-    attachment_count = 0
-    if isinstance(media_url, str) and media_url:
-        local_path, size, sha = _download_media(
-            {
-                "url": media_url,
-                "content_type": "application/pdf",
-                "size": payload.get("media_size") or payload.get("file_size"),
-                "sha256": payload.get("sha256"),
-            }
-        )
-        rendered_pages = _render_pdf_pages(local_path)
-        if rendered_pages:
-            for attachment in rendered_pages:
-                add_attachment(conn, message_id, **attachment, source="telnyx-fax")
-            attachment_count = len(rendered_pages)
-        else:
-            add_attachment(
-                conn,
-                message_id,
-                local_path=local_path,
-                remote_url=media_url,
-                content_type="application/pdf",
-                size=size,
-                sha256=sha,
-                filename=Path(local_path or urlparse(media_url).path).name,
-                source="telnyx-fax",
-            )
-            attachment_count = 1
+    attachment_count = _enqueue_webhook_media(
+        conn,
+        message_id,
+        fax_media,
+        key_prefix=f"fax:{fax_id or telnyx_id or message_id}",
+        source="telnyx-fax",
+    )
 
+    # Commit the message, remote metadata, and ingestion job before notification
+    # delivery. PDF download/page rendering now happens solely in the worker.
     conn.commit()
     _notify_incoming_message(
         from_number=from_number,
@@ -758,6 +694,7 @@ def _store_webhook_message(conn, event: dict[str, Any], raw_event: dict[str, Any
     self_participants = sorted(n for n in participants if n in known_self)
     conversation_id = ensure_conversation(conn, remote_numbers, self_participants)
     status = "received" if direction == "inbound" else _payload_status(payload, event_type)
+    media_items = payload.get("media") or []
     if telnyx_id:
         row = conn.execute("SELECT id FROM messages WHERE telnyx_id = ? ORDER BY id LIMIT 1", (telnyx_id,)).fetchone()
         if row:
@@ -769,7 +706,15 @@ def _store_webhook_message(conn, event: dict[str, Any], raw_event: dict[str, Any
                 """,
                 (status, data.get("id"), as_json(stored_event), now_est(), row["id"]),
             )
-            return int(row["id"])
+            existing_id = int(row["id"])
+            _enqueue_webhook_media(
+                conn,
+                existing_id,
+                media_items,
+                key_prefix=str(telnyx_id or existing_id),
+            )
+            add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=existing_id)
+            return existing_id
     message_id = upsert_message(
         conn,
         conversation_id=conversation_id,
@@ -786,30 +731,21 @@ def _store_webhook_message(conn, event: dict[str, Any], raw_event: dict[str, Any
         telnyx_event_id=data.get("id"),
         raw_json=stored_event,
     )
-    media_items = payload.get("media") or []
-    for media in media_items:
-        if not isinstance(media, dict):
-            continue
-        local_path, size, sha = _download_media(media)
-        add_attachment(
-            conn,
-            message_id,
-            local_path=local_path,
-            remote_url=media.get("url"),
-            content_type=media.get("content_type"),
-            size=size,
-            sha256=sha,
-            filename=Path(local_path or media.get("url", "")).name,
-            source="telnyx",
-        )
+    media_count = _enqueue_webhook_media(
+        conn,
+        message_id,
+        media_items,
+        key_prefix=str(telnyx_id or data.get("id") or message_id),
+    )
     add_provider_message_ref(conn, provider="telnyx", provider_message_id=telnyx_id, message_id=message_id)
     if direction == "inbound":
+        # The worker cannot claim these jobs until this prompt commit succeeds.
         conn.commit()
         _notify_incoming_message(
             from_number=from_number,
             sender_name=_contact_name_for_phone(conn, from_number),
             text=payload.get("text") or "",
-            media_count=len(media_items),
+            media_count=media_count,
         )
         try:
             from .autoreply import maybe_send_autoreply
@@ -830,6 +766,15 @@ def handle_webhook(raw_body: bytes, headers: dict[str, str]) -> dict[str, Any]:
     signature = headers.get("telnyx-signature-ed25519")
     timestamp = headers.get("telnyx-timestamp")
     if not verify_signature(raw_body, signature, timestamp):
+        public_key_value = app_settings.get_value("telnyx.public_key", config.TELNYX_PUBLIC_KEY).strip()
+        if not public_key_value and not app_settings.get_bool(
+            "webhooks.allow_unsigned_provider",
+            config.ALLOW_UNSIGNED_PROVIDER_WEBHOOKS,
+        ):
+            raise TelnyxError(
+                "Telnyx webhook verification requires TELNYX_PUBLIC_KEY. "
+                "For isolated local testing only, set TEXTING_ALLOW_UNSIGNED_PROVIDER_WEBHOOKS=1."
+            )
         raise TelnyxError("Telnyx webhook signature verification failed.")
     raw_event = json.loads(raw_body.decode("utf-8"))
     event = _normalize_webhook_event(raw_event)

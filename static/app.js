@@ -9,21 +9,34 @@ const state = {
   loadedConversationSearchQuery: "",
   conversationRequestSeq: 0,
   openConversationSeq: 0,
+  pendingConversationId: null,
+  pendingConversationTargetMessageId: "",
+  pendingConversationShouldReceiveFocus: false,
   currentConversationId: null,
   currentConversation: null,
   messages: [],
   hasMoreMessages: false,
   olderCount: 0,
   statusPollTimer: null,
-  statusPollInFlight: false,
+  statusPollInFlight: 0,
+  threadRefreshSeq: 0,
   autoRefreshTimer: null,
   autoRefreshInFlight: false,
-  autoRefreshSeconds: 15,
+  autoRefreshSeconds: 5,
   refreshTokens: null,
   foregroundRefreshInFlight: false,
   lastListRefreshAt: 0,
   lastThreadRefreshAt: 0,
-  threadNavigationInFlight: false,
+  openConversationController: null,
+  threadLoadedConversationId: null,
+  threadCache: new Map(),
+  threadRevalidationFailedIds: new Set(),
+  readOnOpenPendingIds: new Set(),
+  readOnOpenFailedIds: new Set(),
+  readOnOpenPromises: new Map(),
+  conversationReadMutationIds: new Set(),
+  conversationReadMutationTargets: new Map(),
+  conversationReadMutationResults: new Map(),
   searchTimer: null,
   searchTargetMessageId: "",
   searchTargetTerms: [],
@@ -67,11 +80,24 @@ const state = {
   pendingPassiveMessageRender: false,
   pendingPassiveMessageScrollMode: "preserve",
   messageBottomStickToken: 0,
+  messageBottomStickActive: false,
   messageLayoutToken: 0,
+  messageRenderGeneration: 0,
+  messageDomConversationId: null,
+  messageUserIntentGeneration: 0,
+  messageAnchorCaptureFrame: null,
+  messageLayoutFrame: null,
+  layoutResizeFrame: null,
+  pendingLayoutViewportState: null,
+  layoutResizeViewportCaptured: false,
+  layoutResizeNeedsColumns: false,
+  visualViewportFrame: null,
   messageUserScrolledAwayFromBottom: false,
   messageUserScrollIntent: false,
   messageBottomStickStartedAt: 0,
   messageScrollAnchor: null,
+  pendingNewMessageCount: 0,
+  pendingNewMessageConversationId: null,
   messageSelectAllTarget: null,
   messageSelectAllUntil: 0,
   messageSelectionGuard: false,
@@ -160,6 +186,7 @@ const els = {
   recipientInput: document.querySelector("#recipientInput"),
   recipientSuggestions: document.querySelector("#recipientSuggestions"),
   messages: document.querySelector("#messages"),
+  newMessagesButton: null,
   composer: document.querySelector(".composer"),
   messageText: document.querySelector("#messageText"),
   messageCounter: document.querySelector("#messageCounter"),
@@ -177,6 +204,12 @@ const els = {
   detailRail: document.querySelector(".detail-rail"),
   mobileDetailCloseButton: document.querySelector("#mobileDetailCloseButton"),
   identityList: document.querySelector("#identityList"),
+  addIdentityButton: document.querySelector("#addIdentityButton"),
+  identityAddForm: document.querySelector("#identityAddForm"),
+  identityAddPhone: document.querySelector("#identityAddPhone"),
+  identityAddLabel: document.querySelector("#identityAddLabel"),
+  identityAddProvider: document.querySelector("#identityAddProvider"),
+  identityAddCancel: document.querySelector("#identityAddCancel"),
   contactSearch: document.querySelector("#contactSearch"),
   contactResults: document.querySelector("#contactResults"),
   syncPhoneContactsButton: document.querySelector("#syncPhoneContactsButton"),
@@ -198,6 +231,7 @@ const els = {
 };
 
 const COLUMN_WIDTHS_KEY = "textingColumnWidths";
+const THREAD_CACHE_LIMIT = 6;
 const LEGACY_THEME_KEY = "textingTheme";
 const THEME_FAMILY_KEY = "textingThemeFamily";
 const THEME_MODE_KEY = "textingThemeMode";
@@ -460,6 +494,9 @@ const I18N = {
     "messages.aria": "Messages",
     "messages.empty": "No messages yet.",
     "messages.load_older": "Load older ({count})",
+    "messages.loading": "Loading messages",
+    "messages.new": "New messages",
+    "messages.new_count": "New messages ({count})",
     "message.reaction_preview": "{icon}",
     "message.reaction_badge": "{name} reacted",
     "message.reaction_badge_count": "{name} +{count} reacted",
@@ -511,9 +548,18 @@ const I18N = {
     "attachment.image": "Image",
     "attachment.file": "Attachment",
     "attachment.pdf": "PDF",
+    "attachment.processing": "Processing attachment…",
+    "attachment.unavailable": "Attachment unavailable",
     "tabs.numbers": "Numbers",
     "tabs.contacts": "Contacts",
     "identities.heading": "Sender Identities",
+    "identities.add": "Add number",
+    "identities.add_submit": "Add number",
+    "identities.phone": "Phone number",
+    "identities.provider": "Provider",
+    "identities.label_optional": "Optional label",
+    "identities.added": "Number added.",
+    "identities.settings_help": "Add sender numbers here or from the Numbers sidebar. Existing .env numbers remain available.",
     "identities.label": "Identity label",
     "identities.color": "Identity color",
     "identities.autoreply": "Vacation reply",
@@ -718,6 +764,9 @@ const I18N = {
     "messages.aria": "Mensajes",
     "messages.empty": "Aún no hay mensajes.",
     "messages.load_older": "Cargar anteriores ({count})",
+    "messages.loading": "Cargando mensajes",
+    "messages.new": "Mensajes nuevos",
+    "messages.new_count": "Mensajes nuevos ({count})",
     "message.reaction_preview": "{icon}",
     "message.reaction_badge": "{name} reaccionó",
     "message.reaction_badge_count": "{name} +{count} reaccionaron",
@@ -769,9 +818,18 @@ const I18N = {
     "attachment.image": "Imagen",
     "attachment.file": "Adjunto",
     "attachment.pdf": "PDF",
+    "attachment.processing": "Procesando adjunto…",
+    "attachment.unavailable": "Adjunto no disponible",
     "tabs.numbers": "Números",
     "tabs.contacts": "Contactos",
     "identities.heading": "Identidades de envío",
+    "identities.add": "Añadir número",
+    "identities.add_submit": "Añadir número",
+    "identities.phone": "Número de teléfono",
+    "identities.provider": "Proveedor",
+    "identities.label_optional": "Etiqueta opcional",
+    "identities.added": "Número añadido.",
+    "identities.settings_help": "Añade números de envío aquí o desde la barra lateral Números. Los números de .env siguen disponibles.",
     "identities.label": "Etiqueta de identidad",
     "identities.color": "Color de identidad",
     "identities.autoreply": "Respuesta de ausencia",
@@ -976,6 +1034,9 @@ const I18N = {
     "messages.aria": "Messages",
     "messages.empty": "Aucun message pour le moment.",
     "messages.load_older": "Charger les anciens ({count})",
+    "messages.loading": "Chargement des messages",
+    "messages.new": "Nouveaux messages",
+    "messages.new_count": "Nouveaux messages ({count})",
     "message.reaction_preview": "{icon}",
     "message.reaction_badge": "{name} a réagi",
     "message.reaction_badge_count": "{name} +{count} ont réagi",
@@ -1025,9 +1086,18 @@ const I18N = {
     "attachment.image": "Image",
     "attachment.file": "Pièce jointe",
     "attachment.pdf": "PDF",
+    "attachment.processing": "Traitement de la pièce jointe…",
+    "attachment.unavailable": "Pièce jointe indisponible",
     "tabs.numbers": "Numéros",
     "tabs.contacts": "Contacts",
     "identities.heading": "Identités d'envoi",
+    "identities.add": "Ajouter un numéro",
+    "identities.add_submit": "Ajouter un numéro",
+    "identities.phone": "Numéro de téléphone",
+    "identities.provider": "Fournisseur",
+    "identities.label_optional": "Libellé facultatif",
+    "identities.added": "Numéro ajouté.",
+    "identities.settings_help": "Ajoutez des numéros d’envoi ici ou dans la barre latérale Numéros. Les numéros .env restent disponibles.",
     "identities.label": "Libellé d'identité",
     "identities.color": "Couleur d'identité",
     "identities.autoreply": "Réponse d'absence",
@@ -1291,10 +1361,12 @@ function pushMobileThreadState(detail = {}) {
 
 function closeMobileThread({ fromHistory = false } = {}) {
   clearStatusPoll();
+  cancelPendingConversationOpen({ renderList: false, restorePoll: false });
   saveComposerDraftForCurrentRecipients();
   closeDetailsOverlay();
   setMobileThreadOpen(false);
   renderConversationsPreservingScroll();
+  restoreConversationSwitchFocus(state.currentConversationId);
   if (!fromHistory && !isDesktopLayout() && history.state?.textingApp === true && history.state.view === "thread") {
     history.back();
   }
@@ -1427,17 +1499,10 @@ function resizeComposerTextArea({ preserveViewport = false } = {}) {
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > nextHeight + 1 ? "auto" : "hidden";
   if (viewportState && Math.abs(nextHeight - previousHeight) > 1) {
-    if (viewportState.stickToBottom) {
-      updateComposerOffset();
-      setMessagesScrollTop(maxMessagesScrollTop());
-      state.messageScrollAnchor = null;
-      requestAnimationFrame(() => setMessagesScrollTop(maxMessagesScrollTop()));
-      return;
-    }
     scheduleMessageViewportRestore(viewportState);
     return;
   }
-  requestAnimationFrame(updateComposerOffset);
+  scheduleMessageViewportRestore(null);
 }
 
 function maxMessagesScrollTop() {
@@ -1536,8 +1601,16 @@ function syncVisualViewportMetrics() {
   if (viewportState) {
     scheduleMessageViewportRestore(viewportState);
   } else {
-    requestAnimationFrame(updateComposerOffset);
+    scheduleMessageViewportRestore(null);
   }
+}
+
+function scheduleVisualViewportMetricsSync() {
+  if (state.visualViewportFrame !== null) return;
+  state.visualViewportFrame = requestAnimationFrame(() => {
+    state.visualViewportFrame = null;
+    syncVisualViewportMetrics();
+  });
 }
 
 window.textingSetNativeKeyboardInset = (inset) => {
@@ -1554,9 +1627,7 @@ function keepComposerInputVisible() {
   if (!isMobileLayout()) return;
   const viewportState = captureMessageViewportState({ preferStickyBottom: true });
   syncVisualViewportMetrics();
-  window.setTimeout(() => {
-    scheduleMessageViewportRestore(viewportState);
-  }, 80);
+  scheduleMessageViewportRestore(viewportState);
 }
 
 function composerHasFocus() {
@@ -1607,7 +1678,10 @@ function shouldPreserveMessageViewport() {
 
 function captureMessageViewportState({ preferStickyBottom = false } = {}) {
   if (!shouldPreserveMessageViewport()) return null;
-  const stickToBottom = isNearMessageBottom() || (preferStickyBottom && !state.messageUserScrolledAwayFromBottom);
+  const stickToBottom =
+    (state.messageBottomStickActive && !state.messageUserScrolledAwayFromBottom) ||
+    isNearMessageBottom() ||
+    (preferStickyBottom && !state.messageUserScrolledAwayFromBottom);
   return {
     stickToBottom,
     anchor: stickToBottom ? null : captureMessageScrollAnchor(),
@@ -1628,21 +1702,51 @@ function restoreMessageViewportState(viewportState) {
   }
 }
 
+function invalidateMessageLayoutCorrections({ userIntent = false } = {}) {
+  state.messageLayoutToken += 1;
+  if (state.messageLayoutFrame !== null) {
+    cancelAnimationFrame(state.messageLayoutFrame);
+    state.messageLayoutFrame = null;
+  }
+  if (userIntent) {
+    state.messageUserIntentGeneration += 1;
+  }
+}
+
 function scheduleMessageViewportRestore(viewportState) {
   if (!viewportState) {
-    requestAnimationFrame(updateComposerOffset);
+    const conversationId = state.currentConversationId;
+    const renderGeneration = state.messageRenderGeneration;
+    requestAnimationFrame(() => {
+      if (conversationId === state.currentConversationId && renderGeneration === state.messageRenderGeneration) {
+        updateComposerOffset();
+      }
+    });
     return;
   }
-  const token = ++state.messageLayoutToken;
+  invalidateMessageLayoutCorrections();
+  const token = state.messageLayoutToken;
+  const conversationId = state.currentConversationId;
+  const renderGeneration = state.messageRenderGeneration;
+  const userIntentGeneration = state.messageUserIntentGeneration;
+  const isCurrent = () =>
+    token === state.messageLayoutToken &&
+    conversationId === state.currentConversationId &&
+    renderGeneration === state.messageRenderGeneration &&
+    userIntentGeneration === state.messageUserIntentGeneration;
   const restore = () => {
-    if (token !== state.messageLayoutToken) return;
+    if (!isCurrent()) return;
     restoreMessageViewportState(viewportState);
   };
-  requestAnimationFrame(() => {
+  state.messageLayoutFrame = requestAnimationFrame(() => {
+    state.messageLayoutFrame = null;
     restore();
-    requestAnimationFrame(restore);
+    if (!isCurrent()) return;
+    state.messageLayoutFrame = requestAnimationFrame(() => {
+      state.messageLayoutFrame = null;
+      restore();
+    });
   });
-  [90, 180, 320].forEach((delay) => window.setTimeout(restore, delay));
 }
 
 function isDetailColumnVisible() {
@@ -1752,6 +1856,7 @@ function applyStaticTranslations() {
   document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
     element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel));
   });
+  if (els.newMessagesButton) updateNewMessagesAffordance();
   renderStatsPeriodOptions();
 }
 
@@ -1829,7 +1934,7 @@ function configureHotkeys() {
 }
 
 function configureAutoRefresh() {
-  const rawSeconds = Number(bootstrapSettingValue("behavior.auto_refresh_seconds", "15"));
+  const rawSeconds = Number(bootstrapSettingValue("behavior.auto_refresh_seconds", "5"));
   if (!Number.isFinite(rawSeconds) || rawSeconds <= 0) {
     state.autoRefreshSeconds = 0;
     clearAutoRefresh();
@@ -2010,7 +2115,10 @@ function settingsAnchor(name) {
 
 function renderSettingsNav(sections) {
   if (!els.settingsNav) return;
-  const items = [{ name: t("security.title"), anchor: "securitySettings" }].concat(
+  const items = [
+    { name: t("security.title"), anchor: "securitySettings" },
+    { name: t("tabs.numbers"), anchor: "settings-numbers" },
+  ].concat(
     sections.map((section) => ({ name: section.name, anchor: settingsAnchor(section.name) })),
   );
   els.settingsNav.innerHTML = items
@@ -2177,11 +2285,36 @@ function renderSettings(payload = state.bootstrap?.settings) {
   const sections = payload?.sections || [];
   renderSettingsNav(sections);
   renderTwoFactorSettings();
-  if (!sections.length) {
-    els.settingsSections.innerHTML = `<div class="empty-state">${escapeHtml(t("settings.empty"))}</div>`;
-    return;
-  }
-  els.settingsSections.innerHTML = sections
+  const defaultProvider = state.bootstrap?.messaging_provider || "telnyx";
+  const numbersSection = `
+    <section class="settings-section" id="settings-numbers">
+      <div class="settings-section-heading">
+        <h3>${escapeHtml(t("tabs.numbers"))}</h3>
+      </div>
+      <p class="setting-help">${escapeHtml(t("identities.settings_help"))}</p>
+      <div class="settings-fields settings-number-fields">
+        <label class="setting-field">
+          <span><strong>${escapeHtml(t("identities.phone"))}</strong></span>
+          <input class="settings-identity-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+15551234567" />
+        </label>
+        <label class="setting-field">
+          <span><strong>${escapeHtml(t("identities.label"))}</strong></span>
+          <input class="settings-identity-label" type="text" autocomplete="off" placeholder="${escapeHtml(t("identities.label_optional"))}" />
+        </label>
+        <label class="setting-field">
+          <span><strong>${escapeHtml(t("identities.provider"))}</strong></span>
+          <select class="settings-identity-provider">
+            <option value="telnyx" ${defaultProvider === "telnyx" ? "selected" : ""}>Telnyx</option>
+            <option value="twilio" ${defaultProvider === "twilio" ? "selected" : ""}>Twilio</option>
+          </select>
+        </label>
+        <div class="setting-field settings-number-action">
+          <span><strong>${escapeHtml(t("identities.add"))}</strong></span>
+          <button class="small-button done-button settings-add-identity" type="button">${escapeHtml(t("identities.add_submit"))}</button>
+        </div>
+      </div>
+    </section>`;
+  els.settingsSections.innerHTML = numbersSection + sections
     .map(
       (section) => `
         <section class="settings-section" id="${escapeHtml(settingsAnchor(section.name))}">
@@ -2615,7 +2748,7 @@ function formatStatsChartBucket(bucket, bucketType = "day", full = false, option
   } else {
     options = { ...(full ? { weekday: "short" } : {}), ...(includeYear ? { year: "numeric" } : {}), month: "short", day: "numeric", timeZone: "UTC" };
   }
-  return new Intl.DateTimeFormat(localeForLanguage(), options).format(dateForDisplay(dateParts));
+  return dateTimeFormatter(options).format(dateForDisplay(dateParts));
 }
 
 function normalizeStatsTimeline(payload) {
@@ -3256,6 +3389,19 @@ function localeForLanguage() {
   return "en";
 }
 
+const DATE_TIME_FORMATTERS = new Map();
+
+function dateTimeFormatter(options) {
+  const locale = localeForLanguage();
+  const key = `${locale}:${JSON.stringify(options)}`;
+  let formatter = DATE_TIME_FORMATTERS.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, options);
+    DATE_TIME_FORMATTERS.set(key, formatter);
+  }
+  return formatter;
+}
+
 function dateForDisplay(parts) {
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour || 0, parts.minute || 0));
 }
@@ -3265,7 +3411,7 @@ function isBeforeCurrentYear(parts) {
 }
 
 function formatClock(parts) {
-  return new Intl.DateTimeFormat(localeForLanguage(), {
+  return dateTimeFormatter({
     hour: "numeric",
     minute: "2-digit",
     hour12: state.language === "en",
@@ -3278,7 +3424,7 @@ function formatTime(value, compact = false) {
   const parts = localTimeParts(value);
   if (!parts) return "";
   const includeYear = isBeforeCurrentYear(parts);
-  const month = new Intl.DateTimeFormat(localeForLanguage(), {
+  const month = dateTimeFormatter({
     month: compact ? "short" : "long",
     day: "numeric",
     ...(includeYear ? { year: "numeric" } : {}),
@@ -3290,7 +3436,7 @@ function formatTime(value, compact = false) {
 function formatDay(value) {
   const parts = localTimeParts(value);
   if (!parts) return "";
-  return new Intl.DateTimeFormat(localeForLanguage(), {
+  return dateTimeFormatter({
     weekday: "short",
     month: "short",
     day: "numeric",
@@ -3865,12 +4011,14 @@ function renderIdentities() {
           </label>
           <div class="identity-main">
             <input class="identity-label" value="${escapeHtml(identity.label)}" aria-label="${escapeHtml(t("identities.label"))}" />
-            <div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div>
           </div>
-          <label class="identity-default-toggle">
-            <input class="identity-default-from" name="identity-default-from" type="radio" ${defaultChecked} />
-            <span>${escapeHtml(t("identities.default_from"))}</span>
-          </label>
+          <div class="identity-meta">
+            <div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div>
+            <label class="identity-default-toggle">
+              <input class="identity-default-from" name="identity-default-from" type="radio" ${defaultChecked} />
+              <span>${escapeHtml(t("identities.default_from"))}</span>
+            </label>
+          </div>
           <button class="icon-button save-identity" title="${escapeHtml(t("common.save"))}" aria-label="${escapeHtml(t("common.save"))}">✓</button>
           <details class="identity-autoreply" ${autoreplyOpen}>
             <summary class="identity-autoreply-summary">
@@ -3994,6 +4142,8 @@ function renderConversations() {
     .map((conversation) => {
       const isActiveConversation = Number(conversation.id) === Number(state.currentConversationId);
       const active = isActiveConversation ? "active" : "";
+      const isOpeningConversation = Number(conversation.id) === Number(state.pendingConversationId);
+      const openingClass = isOpeningConversation ? "opening" : "";
       const selected = state.selectedConversationIds.has(Number(conversation.id));
       const selectedClass = selected ? "selected" : "";
       const selectingClass = state.selectedConversationIds.size ? "selecting" : "";
@@ -4023,7 +4173,7 @@ function renderConversations() {
         ? "conversation-preview conversation-search-preview"
         : `conversation-preview${showsDraftPreview ? " conversation-draft-preview" : ""}`;
       return `
-        <button class="conversation-item ${active} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}">
+        <button class="conversation-item ${active} ${openingClass} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}" aria-busy="${isOpeningConversation ? "true" : "false"}">
           <span class="avatar conversation-selector" role="checkbox" aria-checked="${selected ? "true" : "false"}" title="${escapeHtml(t("selection.actions"))}">
             ${conversationAvatarHtml(conversation, selected)}
           </span>
@@ -4048,8 +4198,10 @@ function renderConversations() {
 
 function renderConversationsPreservingScroll() {
   const previousScrollTop = els.conversationList.scrollTop;
+  const focusedConversationId = Number(document.activeElement?.closest?.(".conversation-item")?.dataset.id);
   renderConversations();
   els.conversationList.scrollTop = previousScrollTop;
+  if (focusedConversationId) focusConversationRow(focusedConversationId);
 }
 
 function selectedConversationIds() {
@@ -4074,6 +4226,7 @@ function clearConversationSelection() {
 function toggleConversationSelection(id, selected) {
   const conversationId = Number(id);
   if (!conversationId) return;
+  if (conversationId === Number(state.pendingConversationId)) return;
   const nextSelected = selected ?? !state.selectedConversationIds.has(conversationId);
   if (nextSelected) {
     state.selectedConversationIds.add(conversationId);
@@ -4090,11 +4243,16 @@ async function bulkConversationAction(action) {
     toast(t("selection.none"));
     return;
   }
+  if (ids.includes(Number(state.pendingConversationId))) {
+    cancelPendingConversationOpen();
+  }
   const controls = [els.bulkReadButton, els.bulkUnreadButton, els.bulkHideButton, els.selectionCancelButton];
   controls.forEach((control) => {
     control.disabled = true;
   });
   try {
+    const pendingReadPromises = ids.map((id) => state.readOnOpenPromises.get(id)).filter(Boolean);
+    if (pendingReadPromises.length) await Promise.allSettled(pendingReadPromises);
     const payload = await api("/api/conversations/bulk", {
       method: "POST",
       body: JSON.stringify({ action, conversation_ids: ids }),
@@ -4135,6 +4293,9 @@ function clearConversationPressTimer() {
 async function hideConversationFromList(id) {
   const conversationId = Number(id);
   if (!conversationId) return;
+  if (conversationId === Number(state.pendingConversationId)) {
+    cancelPendingConversationOpen();
+  }
   try {
     await api(`/api/conversations/${conversationId}/archive`, {
       method: "POST",
@@ -4230,9 +4391,63 @@ function endConversationGesture(event) {
 
 function scrollActiveConversationIntoView() {
   requestAnimationFrame(() => {
-    const active = els.conversationList.querySelector(".conversation-item.active");
-    active?.scrollIntoView({ block: "nearest" });
+    const target =
+      els.conversationList.querySelector(".conversation-item.opening") ||
+      els.conversationList.querySelector(".conversation-item.active");
+    target?.scrollIntoView({ block: "nearest" });
   });
+}
+
+function focusConversationRow(conversationId) {
+  const id = Number(conversationId);
+  if (!id) return false;
+  const item = [...els.conversationList.querySelectorAll(".conversation-item")].find(
+    (conversationItem) => Number(conversationItem.dataset.id) === id,
+  );
+  if (!item) return false;
+  item.focus({ preventScroll: true });
+  return true;
+}
+
+function focusPendingConversationRow() {
+  if (!state.pendingConversationShouldReceiveFocus || !state.pendingConversationId) return false;
+  const activeElement = document.activeElement;
+  const focusedConversationId = Number(activeElement?.closest?.(".conversation-item")?.dataset.id);
+  const focusIsAvailable =
+    !activeElement ||
+    activeElement === document.body ||
+    activeElement === document.documentElement ||
+    focusedConversationId === Number(state.pendingConversationId);
+  if (!focusIsAvailable) {
+    state.pendingConversationShouldReceiveFocus = false;
+    return false;
+  }
+  return focusConversationRow(state.pendingConversationId);
+}
+
+function restoreConversationSwitchFocus(conversationId, fallbackConversationId = null) {
+  if (!state.pendingConversationShouldReceiveFocus) return false;
+  const activeElement = document.activeElement;
+  const focusedConversationId = Number(activeElement?.closest?.(".conversation-item")?.dataset.id);
+  const allowedConversationIds = new Set(
+    [conversationId, fallbackConversationId].map(Number).filter(Boolean),
+  );
+  const focusIsAvailable =
+    !activeElement ||
+    activeElement === document.body ||
+    activeElement === document.documentElement ||
+    allowedConversationIds.has(focusedConversationId);
+  if (!focusIsAvailable) {
+    state.pendingConversationShouldReceiveFocus = false;
+    return false;
+  }
+  const restored =
+    focusConversationRow(conversationId) ||
+    focusConversationRow(fallbackConversationId) ||
+    (Number(conversationId) === Number(state.currentConversationId) &&
+      (els.messages.focus({ preventScroll: true }) || document.activeElement === els.messages));
+  state.pendingConversationShouldReceiveFocus = false;
+  return Boolean(restored);
 }
 
 function mergeConversationIntoList(conversation) {
@@ -4241,6 +4456,25 @@ function mergeConversationIntoList(conversation) {
   if (index >= 0) {
     state.conversations[index] = { ...state.conversations[index], ...conversation };
   }
+}
+
+function mergeThreadConversationFreshnessIntoList(conversation) {
+  if (!conversation?.id) return;
+  const update = { id: Number(conversation.id) };
+  [
+    "last_direction",
+    "last_occurred_at",
+    "last_message_at",
+    "sort_at",
+    "dealt_with_at",
+    "manual_unread_at",
+    "needs_attention",
+    "is_archived",
+    "updated_at",
+  ].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(conversation, key)) update[key] = conversation[key];
+  });
+  mergeConversationIntoList(update);
 }
 
 function mergeConversationIntoLoadedState(conversation) {
@@ -4274,6 +4508,52 @@ function markLoadedConversationRead(conversationId) {
   };
   state.currentConversation = mark(state.currentConversation);
   state.conversations = state.conversations.map(mark);
+}
+
+function conversationReadPatch(conversation) {
+  return {
+    id: Number(conversation?.id) || null,
+    dealt_with_at: conversation?.dealt_with_at || null,
+    manual_unread_at: conversation?.manual_unread_at || null,
+  };
+}
+
+function applyConversationReadPatch(conversation, patch) {
+  if (!conversation || !patch) return conversation;
+  const dealtWithAt = patch.dealt_with_at || null;
+  const manualUnreadAt = patch.manual_unread_at || null;
+  const lastDirection = String(conversation.last_direction || "").toLowerCase();
+  const lastOccurredAt =
+    conversation.last_occurred_at || conversation.last_message_at || conversation.sort_at || "";
+  const needsAttention = manualUnreadAt
+    ? 1
+    : Number(lastDirection === "inbound" && Boolean(lastOccurredAt) && (!dealtWithAt || lastOccurredAt > dealtWithAt));
+  return {
+    ...conversation,
+    dealt_with_at: dealtWithAt,
+    manual_unread_at: manualUnreadAt,
+    needs_attention: needsAttention,
+  };
+}
+
+function mergeConversationReadPatchIntoLoadedState(conversationId, patch) {
+  const id = Number(conversationId);
+  if (!id || !patch) return false;
+  const isCurrent = Number(state.currentConversationId) === id;
+  if (isCurrent && Number(state.currentConversation?.id) === id) {
+    state.currentConversation = applyConversationReadPatch(state.currentConversation, patch);
+  }
+  state.conversations = state.conversations.map((conversation) =>
+    Number(conversation.id) === id ? applyConversationReadPatch(conversation, patch) : conversation,
+  );
+  const cached = state.threadCache.get(id);
+  if (cached?.conversation) {
+    state.threadCache.set(id, {
+      ...cached,
+      conversation: applyConversationReadPatch(cached.conversation, patch),
+    });
+  }
+  return isCurrent;
 }
 
 function applyIdentityToLoadedState(identity) {
@@ -4326,8 +4606,10 @@ function renderArchiveButton(archived = false) {
 function renderReadStateButton(conversation) {
   const hasConversation = Boolean(conversation);
   const isUnread = hasConversation && !conversationIsRead(conversation);
+  const mutationPending = hasConversation && state.conversationReadMutationIds.has(Number(conversation.id));
   const label = !hasConversation ? t("conversation.read") : isUnread ? t("conversation.mark_read") : t("conversation.mark_unread");
-  els.dealtButton.disabled = !hasConversation;
+  els.dealtButton.disabled = !hasConversation || mutationPending;
+  els.dealtButton.classList.toggle("is-pending", mutationPending);
   els.dealtButton.title = label;
   els.dealtButton.setAttribute("aria-label", label);
   els.dealtButton.setAttribute("aria-pressed", isUnread ? "true" : "false");
@@ -4532,8 +4814,29 @@ function pdfViewerUrl(url) {
   return `${url}${String(url).includes("#") ? "&" : "#"}toolbar=1&navpanes=0`;
 }
 
+function attachmentIngestionPlaceholder(attachment, url) {
+  const status = String(attachment.ingestion_status || "").trim().toLowerCase();
+  if (attachment.local_path || !status || status === "ready") return "";
+  const failed = status === "failed";
+  const contentType = String(attachment.content_type || "").toLowerCase();
+  const sizeClass = isAudioAttachment(attachment, url)
+    ? "audio"
+    : isPdfAttachment(attachment, url)
+      ? "pdf"
+      : isImageAttachment(attachment, url) || contentType.startsWith("video/")
+        ? "visual"
+        : "file";
+  const label = failed ? t("attachment.unavailable") : t("attachment.processing");
+  return `<div class="attachment-ingestion-card ${sizeClass} ${failed ? "failed" : "processing"}" role="${failed ? "note" : "status"}" aria-label="${escapeHtml(label)}">
+    <span class="attachment-ingestion-indicator" aria-hidden="true"></span>
+    <span>${escapeHtml(label)}</span>
+  </div>`;
+}
+
 function renderAttachment(attachment) {
   const url = mediaUrl(attachment);
+  const ingestionPlaceholder = attachmentIngestionPlaceholder(attachment, url);
+  if (ingestionPlaceholder) return ingestionPlaceholder;
   if (!url) return "";
   const contentType = attachment.content_type || "";
   const mediaKey = escapeHtml(normalizedMediaKey(url));
@@ -4553,9 +4856,7 @@ function renderAttachment(attachment) {
     const safeFilename = escapeHtml(filename);
     return `<div class="pdf-attachment">
       <a class="pdf-attachment-link" href="${safeUrl}" target="_blank" rel="noopener">${safeFilename}</a>
-      <object class="pdf-attachment-viewer" data="${safeViewerUrl}" type="application/pdf" aria-label="${safeFilename}">
-        <a class="attachment-link" href="${safeUrl}" target="_blank" rel="noopener">${safeFilename}</a>
-      </object>
+      <iframe class="pdf-attachment-viewer" src="${safeViewerUrl}" title="${safeFilename}" loading="lazy"></iframe>
     </div>`;
   }
   return `<a class="attachment-link" href="${escapeHtml(url)}" target="_blank">${escapeHtml(
@@ -4744,6 +5045,23 @@ function captureMessageScrollAnchor() {
   };
 }
 
+function scheduleMessageScrollAnchorCapture() {
+  if (state.messageAnchorCaptureFrame !== null) return;
+  const conversationId = state.currentConversationId;
+  const renderGeneration = state.messageRenderGeneration;
+  state.messageAnchorCaptureFrame = requestAnimationFrame(() => {
+    state.messageAnchorCaptureFrame = null;
+    if (
+      conversationId !== state.currentConversationId ||
+      renderGeneration !== state.messageRenderGeneration ||
+      isNearMessageBottom()
+    ) {
+      return;
+    }
+    state.messageScrollAnchor = captureMessageScrollAnchor() || state.messageScrollAnchor;
+  });
+}
+
 function captureFallbackMessageRowAnchor() {
   const viewport = els.messages.getBoundingClientRect();
   const row =
@@ -4847,6 +5165,7 @@ function restoreMessageMediaPlayback(states) {
 
 function beginMessageBottomStick() {
   state.messageBottomStickToken += 1;
+  state.messageBottomStickActive = true;
   state.messageUserScrolledAwayFromBottom = false;
   state.messageUserScrollIntent = false;
   state.messageBottomStickStartedAt = performance.now();
@@ -4856,11 +5175,11 @@ function beginMessageBottomStick() {
 
 function cancelMessageBottomStick() {
   state.messageBottomStickToken += 1;
-  state.messageUserScrolledAwayFromBottom = false;
+  state.messageBottomStickActive = false;
 }
 
 function messageBottomStickIsActive(token) {
-  return token === state.messageBottomStickToken && !state.messageUserScrolledAwayFromBottom;
+  return state.messageBottomStickActive && token === state.messageBottomStickToken && !state.messageUserScrolledAwayFromBottom;
 }
 
 function elementFromNode(node) {
@@ -4958,13 +5277,117 @@ function handleDocumentSelectionChange() {
   }
 }
 
-function renderMessages(messages, scrollMode = "bottom") {
+function ensureNewMessagesButton() {
+  if (els.newMessagesButton) return els.newMessagesButton;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "new-messages-button hidden";
+  button.addEventListener("click", () => {
+    if (state.pendingPassiveMessageRender) {
+      renderMessages(state.messages, "bottom");
+      els.messages.focus({ preventScroll: true });
+      return;
+    }
+    clearNewMessagesAffordance();
+    const token = beginMessageBottomStick();
+    scrollMessagesToBottom(token);
+    els.messages.focus({ preventScroll: true });
+  });
+  els.threadPane.insertBefore(button, els.composer);
+  els.newMessagesButton = button;
+  return button;
+}
+
+function updateNewMessagesAffordance() {
+  const button = ensureNewMessagesButton();
+  const visible =
+    state.pendingNewMessageCount > 0 &&
+    Number(state.pendingNewMessageConversationId) === Number(state.currentConversationId);
+  button.classList.toggle("hidden", !visible);
+  button.textContent = visible
+    ? state.pendingNewMessageCount > 1
+      ? t("messages.new_count", { count: state.pendingNewMessageCount })
+      : t("messages.new")
+    : t("messages.new");
+  button.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+function clearNewMessagesAffordance() {
+  state.pendingNewMessageCount = 0;
+  state.pendingNewMessageConversationId = null;
+  updateNewMessagesAffordance();
+}
+
+function showNewMessagesAffordance(count, conversationId = state.currentConversationId) {
+  const nextCount = Math.max(1, Number(count) || 1);
+  if (Number(state.pendingNewMessageConversationId) === Number(conversationId)) {
+    state.pendingNewMessageCount += nextCount;
+  } else {
+    state.pendingNewMessageConversationId = Number(conversationId);
+    state.pendingNewMessageCount = nextCount;
+  }
+  updateNewMessagesAffordance();
+}
+
+function renderThreadLoadingState() {
+  invalidateMessageLayoutCorrections();
+  cancelMessageBottomStick();
+  state.messageRenderGeneration += 1;
   state.pendingPassiveMessageRender = false;
   state.pendingPassiveMessageScrollMode = "preserve";
-  const mediaPlayback = captureMessageMediaPlayback();
+  state.messageScrollAnchor = null;
+  state.messageDomConversationId = state.currentConversationId;
+  els.threadPane.classList.add("thread-loading");
+  els.messages.setAttribute("aria-busy", "true");
+  els.messages.setAttribute("aria-label", t("messages.loading"));
+  els.messages.innerHTML = `
+    <div class="thread-loading-state" role="status" aria-label="${escapeHtml(t("messages.loading"))}">
+      <span class="thread-loading-bubble short"></span>
+      <span class="thread-loading-bubble"></span>
+      <span class="thread-loading-bubble outbound"></span>
+      <span class="thread-loading-bubble medium"></span>
+    </div>`;
+  updateComposerOffset();
+}
+
+function finishThreadLoadingState() {
+  els.threadPane.classList.remove("thread-loading");
+  els.messages.removeAttribute("aria-busy");
+  els.messages.setAttribute("aria-label", t("messages.aria"));
+}
+
+function renderThreadLoadError(message) {
+  invalidateMessageLayoutCorrections();
+  state.messageRenderGeneration += 1;
+  state.messageDomConversationId = state.currentConversationId;
+  finishThreadLoadingState();
+  els.messages.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+  updateComposerOffset();
+}
+
+function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
+  invalidateMessageLayoutCorrections();
+  state.messageRenderGeneration += 1;
+  finishThreadLoadingState();
+  state.pendingPassiveMessageRender = false;
+  state.pendingPassiveMessageScrollMode = "preserve";
+  const mediaPlayback =
+    Number(state.messageDomConversationId) === Number(state.currentConversationId)
+      ? captureMessageMediaPlayback()
+      : new Map();
+  state.messageDomConversationId = state.currentConversationId;
   const bottomStickToken = scrollMode === "bottom" ? beginMessageBottomStick() : null;
   if (scrollMode !== "bottom") cancelMessageBottomStick();
-  const scrollAnchor = scrollMode === "preserve" ? captureMessageScrollAnchor() : null;
+  if (scrollMode === "bottom") clearNewMessagesAffordance();
+  const shouldRestoreAnchor = scrollMode === "preserve" || scrollMode === "restore";
+  const scrollAnchor =
+    scrollMode === "preserve"
+      ? captureMessageScrollAnchor()
+      : scrollMode === "restore" && scrollOptions.anchor?.key
+        ? scrollOptions.anchor
+        : null;
+  const oldScrollTop =
+    scrollMode === "restore" ? Math.max(0, Number(scrollOptions.scrollTop) || 0) : els.messages.scrollTop;
   const visibleMessages = messagesWithInlineReactions(messages);
   if (!visibleMessages.length) {
     els.messages.innerHTML = `<div class="empty-state">${escapeHtml(t("messages.empty"))}</div>`;
@@ -4972,7 +5395,6 @@ function renderMessages(messages, scrollMode = "bottom") {
     watchMessageMediaForScrollMode(scrollMode, null, els.messages.scrollTop, bottomStickToken);
     return;
   }
-  const oldScrollTop = els.messages.scrollTop;
   let lastDay = "";
   const loadOlder = state.hasMoreMessages
     ? `<div class="older-row"><button class="small-button" id="loadOlderButton">${escapeHtml(t("messages.load_older", { count: state.olderCount }))}</button></div>`
@@ -5058,7 +5480,7 @@ function renderMessages(messages, scrollMode = "bottom") {
       .join("");
   restoreMessageMediaPlayback(mediaPlayback);
   updateComposerOffset();
-  if (scrollMode === "preserve") {
+  if (shouldRestoreAnchor) {
     restoreMessageScrollAnchor(scrollAnchor, oldScrollTop);
     state.messageScrollAnchor = captureMessageScrollAnchor() || scrollAnchor;
   } else if (scrollMode === "bottom") {
@@ -5074,11 +5496,21 @@ function watchMessageMediaForScrollMode(
   bottomStickToken = null,
 ) {
   const shouldStick = scrollMode === "bottom";
-  const shouldPreserve = scrollMode === "preserve" && Boolean(scrollAnchor);
-  const media = [...els.messages.querySelectorAll("img, video, audio, object")];
+  const shouldPreserve = (scrollMode === "preserve" || scrollMode === "restore") && Boolean(scrollAnchor);
+  const media = [...els.messages.querySelectorAll("img, video, audio, iframe")];
   if (!media.length) return;
   let expectedScrollTop = initialScrollTop;
+  let correctionFrame = null;
+  const conversationId = state.currentConversationId;
+  const renderGeneration = state.messageRenderGeneration;
+  const userIntentGeneration = state.messageUserIntentGeneration;
+  const isCurrent = () =>
+    conversationId === state.currentConversationId &&
+    renderGeneration === state.messageRenderGeneration &&
+    userIntentGeneration === state.messageUserIntentGeneration;
   const keepScrollPosition = () => {
+    correctionFrame = null;
+    if (!isCurrent()) return;
     updateComposerOffset();
     if (shouldStick) {
       if (messageBottomStickIsActive(bottomStickToken)) {
@@ -5098,15 +5530,16 @@ function watchMessageMediaForScrollMode(
       expectedScrollTop = els.messages.scrollTop;
     }
   };
+  const queueScrollCorrection = () => {
+    if (!isCurrent() || correctionFrame !== null) return;
+    correctionFrame = requestAnimationFrame(keepScrollPosition);
+  };
   media.forEach((item) => {
     if (item.tagName === "IMG" && item.complete) return;
-    item.addEventListener("load", keepScrollPosition, { once: true });
-    item.addEventListener("loadedmetadata", keepScrollPosition, { once: true });
-    item.addEventListener("error", keepScrollPosition, { once: true });
+    item.addEventListener("load", queueScrollCorrection, { once: true });
+    item.addEventListener("loadedmetadata", queueScrollCorrection, { once: true });
+    item.addEventListener("error", queueScrollCorrection, { once: true });
   });
-  window.setTimeout(keepScrollPosition, 120);
-  window.setTimeout(keepScrollPosition, 350);
-  window.setTimeout(keepScrollPosition, 1000);
 }
 
 function messageById(id) {
@@ -5128,22 +5561,69 @@ function scrollMessageRowIntoView(id) {
   const rowRect = row.getBoundingClientRect();
   const nextTop = els.messages.scrollTop + rowRect.top - viewport.top - Math.max(24, (viewport.height - rowRect.height) * 0.35);
   setMessagesScrollTop(nextTop);
+  const settledRowRect = row.getBoundingClientRect();
+  const targetAnchor = {
+    key: `message:${row.dataset.messageId}:row`,
+    offsetTop: settledRowRect.top - els.messages.getBoundingClientRect().top,
+  };
+  invalidateMessageLayoutCorrections({ userIntent: true });
+  cancelMessageBottomStick();
+  state.messageScrollAnchor = targetAnchor;
+  state.messageUserScrolledAwayFromBottom = !isNearMessageBottom();
+  watchMessageMediaForScrollMode("preserve", targetAnchor, els.messages.scrollTop, null);
   row.classList.add("search-target-flash");
   window.setTimeout(() => row.classList.remove("search-target-flash"), 1800);
   return true;
 }
 
-async function revealMessageInThread(messageId) {
+async function revealMessageInThread(messageId, options = {}) {
   const targetId = String(messageId || "");
   if (!targetId) return false;
+  const conversationId = Number(options.conversationId || state.currentConversationId);
+  const requestSeq = options.requestSeq;
+  const isCurrent = () =>
+    conversationId === Number(state.currentConversationId) &&
+    (requestSeq === undefined || requestSeq === state.openConversationSeq);
   let attempts = 0;
-  while (!messageById(targetId) && state.hasMoreMessages && attempts < 30) {
+  while (isCurrent() && !messageById(targetId) && state.hasMoreMessages && attempts < 30) {
     attempts += 1;
-    const loaded = await loadOlderMessages({ render: false, schedulePoll: false });
+    const loaded = await loadOlderMessages({ render: false, schedulePoll: false, signal: options.signal });
     if (!loaded) break;
   }
+  if (!isCurrent()) return false;
   renderMessages(state.messages, "preserve");
   return scrollMessageRowIntoView(targetId);
+}
+
+async function expandThreadPayloadToMessage(payload, messageId, options = {}) {
+  const targetId = String(messageId || "");
+  const conversationId = Number(options.conversationId);
+  const shouldContinue = typeof options.shouldContinue === "function" ? options.shouldContinue : () => true;
+  const expanded = {
+    ...payload,
+    messages: [...(payload?.messages || [])],
+    has_more: Boolean(payload?.has_more),
+    older_count: Number(payload?.older_count || 0),
+  };
+  let attempts = 0;
+  const hasTarget = () => expanded.messages.some((message) => String(message.id) === targetId);
+  while (targetId && conversationId && shouldContinue() && !hasTarget() && expanded.has_more && attempts < 30) {
+    const oldest = expanded.messages[0];
+    if (!oldest?.occurred_at || oldest.id === undefined || oldest.id === null) break;
+    attempts += 1;
+    const before = encodeURIComponent(oldest.occurred_at);
+    const olderPayload = await api(
+      `/api/conversations/${conversationId}/messages?limit=80&before=${before}&before_id=${oldest.id}`,
+      { signal: options.signal },
+    );
+    if (!shouldContinue()) break;
+    const olderMessages = olderPayload.messages || [];
+    expanded.messages = [...olderMessages, ...expanded.messages];
+    expanded.has_more = Boolean(olderPayload.has_more) && olderMessages.length > 0;
+    expanded.older_count = Number(olderPayload.older_count || 0);
+    if (!olderMessages.length) break;
+  }
+  return expanded;
 }
 
 function messageCanBeReactedTo(message) {
@@ -5224,15 +5704,75 @@ function reactionMessageText(action, message) {
   return `${verb} “${targetText}”`;
 }
 
-function removeOptimisticMessage(optimisticId, scrollMode = "preserve") {
-  const previousLength = state.messages.length;
-  state.messages = state.messages.filter((message) => message.id !== optimisticId);
-  if (state.messages.length !== previousLength) {
-    renderMessages(state.messages, scrollMode);
+function updateOptimisticMessage(
+  optimisticId,
+  conversationId,
+  updater,
+  { active = Number(conversationId) === Number(state.currentConversationId), scrollMode = null } = {},
+) {
+  let activeChanged = false;
+  if (active) {
+    state.messages = state.messages.map((message) => {
+      if (message.id !== optimisticId) return message;
+      activeChanged = true;
+      return updater(message);
+    });
+    if (activeChanged && scrollMode) renderMessages(state.messages, scrollMode);
   }
+  const id = Number(conversationId);
+  const cached = id ? state.threadCache.get(id) : null;
+  if (cached) {
+    let cachedChanged = false;
+    const messages = cached.messages.map((message) => {
+      if (message.id !== optimisticId) return message;
+      cachedChanged = true;
+      return updater(message);
+    });
+    if (cachedChanged) state.threadCache.set(id, { ...cached, messages });
+  }
+  return activeChanged;
+}
+
+function confirmOptimisticMessage(optimisticId, conversationId, payload, options = {}) {
+  const rawMessageId = payload?.message_id;
+  const numericMessageId = Number(rawMessageId);
+  const confirmedMessageId = Number.isFinite(numericMessageId) && numericMessageId > 0 ? numericMessageId : rawMessageId;
+  updateOptimisticMessage(
+    optimisticId,
+    conversationId,
+    (message) => ({
+      ...message,
+      ...(confirmedMessageId ? { id: confirmedMessageId } : {}),
+      conversation_id: Number(conversationId) || message.conversation_id,
+      source: "api",
+    }),
+    options,
+  );
+}
+
+function removeOptimisticMessage(optimisticId, conversationId, options = {}) {
+  let activeChanged = false;
+  const active = options.active ?? Number(conversationId) === Number(state.currentConversationId);
+  if (active) {
+    const previousLength = state.messages.length;
+    state.messages = state.messages.filter((message) => message.id !== optimisticId);
+    activeChanged = state.messages.length !== previousLength;
+    if (activeChanged) renderMessages(state.messages, options.scrollMode || "preserve");
+  }
+  const id = Number(conversationId);
+  const cached = id ? state.threadCache.get(id) : null;
+  if (cached) {
+    const messages = cached.messages.filter((message) => message.id !== optimisticId);
+    if (messages.length !== cached.messages.length) state.threadCache.set(id, { ...cached, messages });
+  }
+  return activeChanged;
 }
 
 async function sendReaction(action) {
+  if (state.pendingConversationId) {
+    closeReactionMenu();
+    return;
+  }
   const message = messageById(state.reactionTargetId);
   if (!messageCanBeReactedTo(message)) {
     closeReactionMenu();
@@ -5246,31 +5786,44 @@ async function sendReaction(action) {
     text: reactionMessageText(action, message),
     media_urls: [],
   };
+  const conversationId = Number(draft.conversation_id);
   if (!draft.to_numbers.length) {
     toast(t("recipient.add_one"));
     return;
   }
   closeReactionMenu();
   const optimisticMessageId = applyOptimisticOutgoingMessage(draft, null, { scrollMode: "preserve" });
+  let sendSucceeded = false;
   try {
     const payload = await api("/api/messages", {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    sendSucceeded = true;
+    confirmOptimisticMessage(optimisticMessageId, conversationId, payload, {
+      active: state.currentConversationId === conversationId,
+    });
     playMessageSound("send");
-    if (payload.conversation && Number(payload.conversation.id) === state.currentConversationId) {
+    if (payload.conversation) {
       mergeConversationIntoLoadedState(payload.conversation);
-      markLoadedConversationRead(state.currentConversationId);
+      markLoadedConversationRead(conversationId);
+    }
+    if (state.currentConversationId === conversationId) {
       renderThreadHeader();
-      renderConversations();
     }
-    await loadConversations({ preserveScroll: true });
-    if (state.currentConversationId === Number(draft.conversation_id)) {
-      await refreshCurrentConversationStatus({ knownChanged: true, force: true });
-    }
+    renderConversations();
+    await Promise.all([
+      loadConversations({ preserveScroll: true }),
+      state.currentConversationId === conversationId
+        ? refreshCurrentConversationStatus({ knownChanged: true, force: true })
+        : Promise.resolve(),
+    ]);
   } catch (error) {
-    removeOptimisticMessage(optimisticMessageId, "preserve");
-    showComposerError(error.message || t("message.react_failed"));
+    if (!sendSucceeded) {
+      const active = state.currentConversationId === conversationId;
+      removeOptimisticMessage(optimisticMessageId, conversationId, { active, scrollMode: "preserve" });
+      if (active) showComposerError(error.message || t("message.react_failed"));
+    }
     toast(error.message || t("message.react_failed"));
   }
 }
@@ -5348,14 +5901,16 @@ function stepLightbox(offset) {
 
 function scrollMessagesToBottom(bottomStickToken = null) {
   updateComposerOffset();
+  const conversationId = state.currentConversationId;
+  const renderGeneration = state.messageRenderGeneration;
   const scroll = () => {
+    if (conversationId !== state.currentConversationId || renderGeneration !== state.messageRenderGeneration) return;
     if (bottomStickToken !== null && !messageBottomStickIsActive(bottomStickToken)) return;
     setMessagesScrollTop(maxMessagesScrollTop());
   };
   requestAnimationFrame(() => {
     scroll();
     requestAnimationFrame(scroll);
-    window.setTimeout(scroll, 120);
   });
 }
 
@@ -5366,6 +5921,8 @@ function isNearMessageBottom() {
 function markMessageUserScrollIntent() {
   state.composerInputScrollGuard = null;
   state.messageUserScrollIntent = true;
+  invalidateMessageLayoutCorrections({ userIntent: true });
+  cancelMessageBottomStick();
 }
 
 function markMessageKeyboardScrollIntent(event) {
@@ -5438,12 +5995,17 @@ function handleMessagesScroll() {
     state.messageUserScrolledAwayFromBottom = false;
     state.messageUserScrollIntent = false;
     state.messageScrollAnchor = null;
+    if (state.pendingPassiveMessageRender && state.pendingNewMessageCount > 0) {
+      state.pendingPassiveMessageScrollMode = "bottom";
+      return;
+    }
+    clearNewMessagesAffordance();
     return;
   }
   const initializingBottomStick = performance.now() - state.messageBottomStickStartedAt < 180;
   if (state.messageUserScrollIntent || !initializingBottomStick) {
     state.messageUserScrolledAwayFromBottom = true;
-    state.messageScrollAnchor = captureMessageScrollAnchor() || state.messageScrollAnchor;
+    scheduleMessageScrollAnchorCapture();
   }
 }
 
@@ -5456,21 +6018,20 @@ function navigateThreadsWithArrowKey(event) {
   if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return false;
   if (!["ArrowUp", "ArrowDown"].includes(event.key)) return false;
   if (isEditableKeyTarget(event.target)) return false;
-  if (!state.currentConversationId || !state.conversations.length) return false;
+  const navigationConversationId = Number(state.pendingConversationId || state.currentConversationId);
+  if (!navigationConversationId || !state.conversations.length) return false;
   event.preventDefault();
-  if (state.threadNavigationInFlight) return true;
   const offset = event.key === "ArrowDown" ? 1 : -1;
-  const currentIndex = state.conversations.findIndex((conversation) => conversation.id === state.currentConversationId);
+  const currentIndex = state.conversations.findIndex(
+    (conversation) => Number(conversation.id) === navigationConversationId,
+  );
   const baseIndex = currentIndex >= 0 ? currentIndex : 0;
   const nextIndex = clamp(baseIndex + offset, 0, state.conversations.length - 1);
   const next = state.conversations[nextIndex];
-  if (!next || next.id === state.currentConversationId) return true;
-  state.threadNavigationInFlight = true;
-  openConversation(next.id)
-    .catch((error) => toast(error.message))
-    .finally(() => {
-      state.threadNavigationInFlight = false;
-    });
+  if (!next || Number(next.id) === navigationConversationId) return true;
+  openConversation(next.id, { focusConversation: true }).catch((error) => {
+    if (error?.name !== "AbortError") toast(error.message);
+  });
   return true;
 }
 
@@ -5484,6 +6045,10 @@ function runHotkey(event) {
   if (!hotkeyCanRunInTarget(event)) return false;
   const command = state.hotkeys[hotkeyFromEvent(event)];
   if (!command) return false;
+  if (state.pendingConversationId && ["focus_message", "toggle_read", "archive"].includes(command)) {
+    event.preventDefault();
+    return true;
+  }
   const handler = HOTKEY_COMMANDS[command];
   if (!handler) return false;
   event.preventDefault();
@@ -5579,7 +6144,7 @@ function clearStatusPoll() {
 
 function scheduleStatusPoll() {
   clearStatusPoll();
-  if (!state.currentConversationId || !hasPendingOutboundMessages() || document.hidden) return;
+  if (state.pendingConversationId || !state.currentConversationId || !hasPendingOutboundMessages() || document.hidden) return;
   state.statusPollTimer = setTimeout(() => {
     refreshCurrentConversationStatus({ passive: true }).catch((error) => toast(error.message));
   }, 5000);
@@ -5658,12 +6223,57 @@ function messageIdentityKey(message) {
   return parts.some(Boolean) ? parts.join("|") : "";
 }
 
-function messagePayloadHasNewItems(previousMessages = [], nextMessages = []) {
-  const previousKeys = new Set(previousMessages.map(messageIdentityKey).filter(Boolean));
-  return nextMessages.some((message) => {
+function messageChronologyKey(message) {
+  return `${String(message?.occurred_at || "")}|${String(message?.id || "").padStart(16, "0")}`;
+}
+
+function mergeRefreshedMessageTail(previousMessages = [], nextMessages = []) {
+  if (!previousMessages.length || !nextMessages.length) return nextMessages;
+  const nextKeys = new Set(nextMessages.map(messageIdentityKey).filter(Boolean));
+  const unresolvedOptimisticMessages = previousMessages.filter(
+    (message) =>
+      message.source === "optimistic" &&
+      message.status === "sending" &&
+      !nextKeys.has(messageIdentityKey(message)),
+  );
+  const overlapIndex = previousMessages.findIndex((message) => nextKeys.has(messageIdentityKey(message)));
+  const prefix =
+    overlapIndex >= 0
+      ? previousMessages.slice(0, overlapIndex)
+      : previousMessages.filter((message) => messageChronologyKey(message) < messageChronologyKey(nextMessages[0]));
+  const merged = [
+    ...prefix.filter((message) => !nextKeys.has(messageIdentityKey(message))),
+    ...nextMessages,
+  ];
+  const mergedKeys = new Set(merged.map(messageIdentityKey).filter(Boolean));
+  unresolvedOptimisticMessages.forEach((message) => {
     const key = messageIdentityKey(message);
-    return Boolean(key && !previousKeys.has(key));
+    if (!key || mergedKeys.has(key)) return;
+    merged.push(message);
+    mergedKeys.add(key);
   });
+  return merged;
+}
+
+function mergeRefreshedThreadPayload(previousMessages, payload) {
+  const freshMessages = payload?.messages || [];
+  const messages = mergeRefreshedMessageTail(previousMessages, freshMessages);
+  const preservedOlderCount = Math.max(0, messages.length - freshMessages.length);
+  const olderCount = Math.max(0, Number(payload?.older_count || 0) - preservedOlderCount);
+  return {
+    ...payload,
+    messages,
+    older_count: olderCount,
+    has_more: Boolean(payload?.has_more) && olderCount > 0,
+  };
+}
+
+function newMessageItemCount(previousMessages = [], nextMessages = []) {
+  const previousKeys = new Set(previousMessages.map(messageIdentityKey).filter(Boolean));
+  return nextMessages.reduce((count, message) => {
+    const key = messageIdentityKey(message);
+    return count + (key && !previousKeys.has(key) ? 1 : 0);
+  }, 0);
 }
 
 function trackInboundSoundKey(key, { play = false } = {}) {
@@ -5690,26 +6300,37 @@ async function pollForChanges({ prime = false, force = false, passive = true } =
     state.refreshTokens = payload.tokens || {};
     if (prime || (!Object.keys(previous).length && !force)) return;
 
-    const listChanged = force || previous.bootstrap !== state.refreshTokens.bootstrap || previous.list !== state.refreshTokens.list;
+    const bootstrapChanged = force || previous.bootstrap !== state.refreshTokens.bootstrap;
+    const listChanged = force || previous.list !== state.refreshTokens.list;
     const conversationChanged =
       Boolean(conversationId) &&
       state.currentConversationId === conversationId &&
       (force || previous.conversation !== state.refreshTokens.conversation);
 
-    if (listChanged) {
-      state.bootstrap = await api("/api/bootstrap");
-      applyRuntimeSettings();
-      renderBootstrap();
-      await loadConversations({
-        append: false,
-        preserveScroll: true,
-        limit: Math.max(80, state.conversations.length || 0),
-        soundForNew: true,
-      });
-    }
+    const refreshes = [];
     if (conversationChanged && state.currentConversationId === conversationId) {
-      await refreshCurrentConversationStatus({ knownChanged: true, force, passive });
+      refreshes.push(refreshCurrentConversationStatus({ knownChanged: true, force, passive }));
     }
+    if (listChanged) {
+      refreshes.push(
+        loadConversations({
+          append: false,
+          preserveScroll: true,
+          limit: Math.max(80, state.conversations.length || 0),
+          soundForNew: true,
+        }),
+      );
+    }
+    if (bootstrapChanged) {
+      refreshes.push(
+        api("/api/bootstrap").then((bootstrap) => {
+          state.bootstrap = bootstrap;
+          applyRuntimeSettings();
+          renderBootstrap();
+        }),
+      );
+    }
+    await Promise.all(refreshes);
   } finally {
     state.autoRefreshInFlight = false;
     scheduleAutoRefresh();
@@ -5717,16 +6338,19 @@ async function pollForChanges({ prime = false, force = false, passive = true } =
 }
 
 async function refreshCurrentConversationStatus({ knownChanged = false, force = false, passive = false } = {}) {
-  if (!state.currentConversationId || state.statusPollInFlight) return;
-  state.statusPollInFlight = true;
+  if (state.pendingConversationId || !state.currentConversationId || (state.statusPollInFlight && !force)) return;
+  state.statusPollInFlight += 1;
+  const requestSeq = ++state.threadRefreshSeq;
   const conversationId = state.currentConversationId;
-  const shouldStickToBottom = !passive && isNearMessageBottom();
+  const wasNearBottom = isNearMessageBottom();
+  const shouldStickToBottom = wasNearBottom;
   const mediaWasPlaying = messageMediaIsPlaying();
-  const limit = Math.max(80, state.messages.length || 0);
+  const limit = Math.min(250, Math.max(80, state.messages.length || 0));
   let messageScrollMode = shouldStickToBottom ? "bottom" : "preserve";
   try {
     if (!knownChanged && !force) {
       const refreshPayload = await api(`/api/refresh${refreshQuery()}`);
+      if (requestSeq !== state.threadRefreshSeq || state.currentConversationId !== conversationId) return;
       const previous = state.refreshTokens || {};
       const next = refreshPayload.tokens || {};
       if (Object.keys(previous).length && previous.conversation === next.conversation) {
@@ -5739,8 +6363,9 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
         return;
       }
     }
-    const payload = await api(`/api/conversations/${conversationId}/messages?limit=${limit}`);
-    if (state.currentConversationId !== conversationId) return;
+    const freshPayload = await api(`/api/conversations/${conversationId}/messages?limit=${limit}`);
+    if (requestSeq !== state.threadRefreshSeq || state.currentConversationId !== conversationId) return;
+    const payload = mergeRefreshedThreadPayload(state.messages, freshPayload);
     const conversationChanged = !conversationPayloadMatchesState(payload);
     const messagesChanged = !messagePayloadMatchesState(payload);
     if (!conversationChanged && !messagesChanged) {
@@ -5750,8 +6375,14 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     mergeConversationIntoLoadedState(payload.conversation);
     state.lastThreadRefreshAt = Date.now();
     if (messagesChanged) {
-      const hasNewMessages = messagePayloadHasNewItems(state.messages, payload.messages);
-      messageScrollMode = hasNewMessages || shouldStickToBottom ? "bottom" : "preserve";
+      const newMessageCount = newMessageItemCount(state.messages, payload.messages);
+      const hasNewMessages = newMessageCount > 0;
+      messageScrollMode = shouldStickToBottom ? "bottom" : "preserve";
+      if (hasNewMessages && !wasNearBottom) {
+        showNewMessagesAffordance(newMessageCount, conversationId);
+      } else if (wasNearBottom) {
+        clearNewMessagesAffordance();
+      }
       trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: !(passive && mediaWasPlaying) });
       state.messages = payload.messages;
       state.hasMoreMessages = payload.has_more;
@@ -5770,9 +6401,10 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     if (payload.conversation) {
       renderConversations();
     }
+    cacheCurrentThread();
   } finally {
-    state.statusPollInFlight = false;
-    scheduleStatusPoll();
+    state.statusPollInFlight = Math.max(0, state.statusPollInFlight - 1);
+    if (!state.statusPollInFlight) scheduleStatusPoll();
   }
 }
 
@@ -5923,7 +6555,6 @@ async function refreshFromPull() {
   setPullRefreshState("refreshing", 72);
   try {
     await refreshForegroundData({ force: true });
-    await loadConversations({ append: false, preserveScroll: true });
     toast(t("refresh.updated"));
   } catch (error) {
     toast(error.message);
@@ -6001,6 +6632,29 @@ function resizeColumn(side, deltaX, startWidths = state.columnWidths) {
   applyColumnWidths();
 }
 
+function scheduleLayoutResizeWork({ syncColumns = false } = {}) {
+  if (!state.layoutResizeViewportCaptured) {
+    state.pendingLayoutViewportState = captureMessageViewportState({ preferStickyBottom: composerHasFocus() });
+    state.layoutResizeViewportCaptured = true;
+  }
+  state.layoutResizeNeedsColumns ||= syncColumns;
+  if (state.layoutResizeFrame !== null) return;
+  state.layoutResizeFrame = requestAnimationFrame(() => {
+    state.layoutResizeFrame = null;
+    const viewportState = state.pendingLayoutViewportState;
+    const shouldSyncColumns = state.layoutResizeNeedsColumns;
+    state.pendingLayoutViewportState = null;
+    state.layoutResizeViewportCaptured = false;
+    state.layoutResizeNeedsColumns = false;
+    if (shouldSyncColumns) {
+      syncDetailsLayout();
+      applyColumnWidths();
+    }
+    updateComposerOffset();
+    if (viewportState) scheduleMessageViewportRestore(viewportState);
+  });
+}
+
 function bindColumnResizers() {
   let drag = null;
   els.columnResizers.forEach((handle) => {
@@ -6048,17 +6702,14 @@ function bindColumnResizers() {
   window.addEventListener("pointerup", endDrag);
   window.addEventListener("pointercancel", endDrag);
   window.addEventListener("resize", () => {
-    const viewportState = captureMessageViewportState({ preferStickyBottom: composerHasFocus() });
-    syncDetailsLayout();
-    applyColumnWidths();
-    scheduleMessageViewportRestore(viewportState);
+    if (state.pendingConversationId && !isDesktopLayout()) {
+      cancelPendingConversationOpen();
+    }
+    scheduleLayoutResizeWork({ syncColumns: true });
   });
   if (window.ResizeObserver) {
-    state.layoutResizeObserver = new ResizeObserver(() => {
-      const viewportState = captureMessageViewportState({ preferStickyBottom: composerHasFocus() });
-      scheduleMessageViewportRestore(viewportState);
-    });
-    [els.threadHeader, els.messages, els.composer].filter(Boolean).forEach((element) => {
+    state.layoutResizeObserver = new ResizeObserver(() => scheduleLayoutResizeWork());
+    [els.threadHeader, els.composer].filter(Boolean).forEach((element) => {
       state.layoutResizeObserver.observe(element);
     });
   }
@@ -6124,83 +6775,423 @@ async function loadConversations({ append = false, preserveScroll = false, limit
   }
 }
 
+function cacheThreadPayload(conversationId, payload, viewport = {}) {
+  const id = Number(conversationId);
+  if (!id || !payload?.conversation) return;
+  const entry = {
+    conversation: payload.conversation,
+    messages: payload.messages || [],
+    has_more: Boolean(payload.has_more),
+    older_count: Number(payload.older_count || 0),
+    scrollTop: Math.max(0, Number(viewport.scrollTop) || 0),
+    nearBottom: viewport.nearBottom !== false,
+    anchor: viewport.anchor?.key ? { ...viewport.anchor } : null,
+  };
+  state.threadCache.delete(id);
+  state.threadCache.set(id, entry);
+  while (state.threadCache.size > THREAD_CACHE_LIMIT) {
+    state.threadCache.delete(state.threadCache.keys().next().value);
+  }
+}
+
+function cachedThreadPayload(conversationId) {
+  const id = Number(conversationId);
+  const entry = state.threadCache.get(id);
+  if (!entry) return null;
+  state.threadCache.delete(id);
+  state.threadCache.set(id, entry);
+  return entry;
+}
+
+function cacheCurrentThread() {
+  if (
+    !state.currentConversationId ||
+    Number(state.threadLoadedConversationId) !== Number(state.currentConversationId) ||
+    Number(state.currentConversation?.id) !== Number(state.currentConversationId)
+  ) {
+    return;
+  }
+  const nearBottom = isNearMessageBottom();
+  const anchor = nearBottom ? null : captureMessageScrollAnchor() || state.messageScrollAnchor;
+  cacheThreadPayload(
+    state.currentConversationId,
+    {
+      conversation: state.currentConversation,
+      messages: state.messages,
+      has_more: state.hasMoreMessages,
+      older_count: state.olderCount,
+    },
+    { scrollTop: els.messages.scrollTop, nearBottom, anchor },
+  );
+}
+
+function applyThreadPayload(payload, conversationId) {
+  state.currentConversationId = Number(conversationId);
+  state.currentConversation = payload.conversation;
+  state.messages = payload.messages || [];
+  state.hasMoreMessages = Boolean(payload.has_more);
+  state.olderCount = Number(payload.older_count || 0);
+  state.threadLoadedConversationId = Number(conversationId);
+}
+
+function setThreadSwitchControlsInert(inert) {
+  [els.threadHeader, els.recipientBar, els.messages, els.composer].filter(Boolean).forEach((element) => {
+    element.toggleAttribute("inert", Boolean(inert));
+  });
+}
+
+function reconcileReadConversationInUnreadList(conversationId) {
+  const id = Number(conversationId);
+  if (state.conversationCategory !== "unread" || !id) return false;
+  const conversation = state.conversations.find((item) => Number(item.id) === id);
+  if (!conversationIsRead(conversation)) return false;
+  state.conversations = state.conversations.filter((item) => Number(item.id) !== id);
+  return true;
+}
+
+function finishDesktopThreadSwitch(expectedConversationId, { renderList = true } = {}) {
+  const expectedId = Number(expectedConversationId || 0);
+  if (expectedId && expectedId !== Number(state.pendingConversationId)) return false;
+  const openingConversationId = Number(state.pendingConversationId);
+  const wasSwitching = Boolean(state.pendingConversationId) || els.threadPane.classList.contains("thread-switching");
+  state.pendingConversationId = null;
+  state.pendingConversationTargetMessageId = "";
+  els.threadPane.classList.remove("thread-switching");
+  els.threadPane.removeAttribute("aria-busy");
+  setThreadSwitchControlsInert(false);
+  reconcileReadConversationInUnreadList(openingConversationId);
+  if (wasSwitching && renderList) {
+    renderConversationsPreservingScroll();
+    restoreConversationSwitchFocus(state.currentConversationId, openingConversationId);
+  }
+  return wasSwitching;
+}
+
+function beginDesktopThreadSwitch(conversationId, targetMessageId = "", { receiveFocus = false } = {}) {
+  const activeElement = document.activeElement;
+  if (
+    receiveFocus ||
+    (activeElement && els.conversationList.contains(activeElement)) ||
+    (activeElement && els.threadPane.contains(activeElement))
+  ) {
+    state.pendingConversationShouldReceiveFocus = true;
+  }
+  reconcileReadConversationInUnreadList(state.pendingConversationId);
+  state.pendingConversationId = Number(conversationId);
+  state.pendingConversationTargetMessageId = String(targetMessageId || "");
+  els.threadPane.classList.add("thread-switching");
+  els.threadPane.setAttribute("aria-busy", "true");
+  if (activeElement && els.threadPane.contains(activeElement) && typeof activeElement.blur === "function") {
+    activeElement.blur();
+  }
+  closeReactionMenu();
+  setThreadSwitchControlsInert(true);
+  renderConversationsPreservingScroll();
+  focusPendingConversationRow();
+  scrollActiveConversationIntoView();
+}
+
+function cancelPendingConversationOpen({ renderList = true, restorePoll = true } = {}) {
+  if (!state.pendingConversationId) return false;
+  state.openConversationController?.abort();
+  state.openConversationController = null;
+  state.openConversationSeq += 1;
+  state.threadRefreshSeq += 1;
+  finishDesktopThreadSwitch(undefined, { renderList });
+  if (restorePoll) scheduleStatusPoll();
+  return true;
+}
+
+function canStageDesktopThreadSwitch(conversationId, cached, targetMessageId = "") {
+  const currentConversationId = Number(state.currentConversationId);
+  const cachedHasTarget =
+    Boolean(targetMessageId) &&
+    Boolean(cached?.messages?.some((message) => String(message.id) === String(targetMessageId)));
+  const needsDeferredPayload = !cached || (Boolean(targetMessageId) && !cachedHasTarget);
+  return (
+    isDesktopLayout() &&
+    needsDeferredPayload &&
+    Boolean(currentConversationId) &&
+    Number(conversationId) !== currentConversationId &&
+    Number(state.currentConversation?.id) === currentConversationId &&
+    Number(state.threadLoadedConversationId) === currentConversationId &&
+    Number(state.messageDomConversationId) === currentConversationId &&
+    !els.threadPane.classList.contains("thread-loading")
+  );
+}
+
+function restoreCachedThreadScroll(entry, requestSeq) {
+  if (entry.nearBottom) return;
+  const conversationId = state.currentConversationId;
+  const renderGeneration = state.messageRenderGeneration;
+  const userIntentGeneration = state.messageUserIntentGeneration;
+  const restore = () => {
+    if (
+      requestSeq !== state.openConversationSeq ||
+      conversationId !== state.currentConversationId ||
+      renderGeneration !== state.messageRenderGeneration ||
+      userIntentGeneration !== state.messageUserIntentGeneration
+    ) {
+      return;
+    }
+    restoreMessageScrollAnchor(entry.anchor, entry.scrollTop);
+    state.messageUserScrolledAwayFromBottom = !isNearMessageBottom();
+    if (state.messageUserScrolledAwayFromBottom) {
+      state.messageScrollAnchor = entry.anchor || captureMessageScrollAnchor() || state.messageScrollAnchor;
+    }
+  };
+  restore();
+  requestAnimationFrame(restore);
+}
+
+function markConversationReadOnOpen(conversationId, conversation, { allowPending = false } = {}) {
+  const id = Number(conversationId);
+  if (!state.bootstrap?.mark_read_on_open || conversationIsRead(conversation)) return false;
+  if (state.readOnOpenPendingIds.has(id)) return true;
+  if (state.conversationReadMutationIds.has(id)) return false;
+  state.readOnOpenFailedIds.delete(id);
+  state.readOnOpenPendingIds.add(id);
+  const readPromise = setConversationRead(id, true, { silent: true, allowPending });
+  state.readOnOpenPromises.set(id, readPromise);
+  readPromise
+    .then((succeeded) => {
+      if (!succeeded) state.readOnOpenFailedIds.add(id);
+    })
+    .finally(() => {
+      state.readOnOpenPendingIds.delete(id);
+      if (state.readOnOpenPromises.get(id) === readPromise) state.readOnOpenPromises.delete(id);
+    });
+  return true;
+}
+
 async function openConversation(id, options = {}) {
   const updateHistory = options.updateHistory !== false;
+  const focusConversation = options.focusConversation === true;
   const targetMessageId = options.targetMessageId ? String(options.targetMessageId) : "";
   const targetTerms = Array.isArray(options.searchTerms) ? options.searchTerms : [];
-  clearStatusPoll();
   const conversationId = Number(id);
   if (!conversationId) return;
-  saveComposerDraftForCurrentRecipients();
-  const requestSeq = ++state.openConversationSeq;
-  const previousConversationId = state.currentConversationId;
-  const shouldOpenBeforeLoad = isDesktopLayout() || document.body.classList.contains("mobile-thread-open");
-  const selectionChanged = previousConversationId !== conversationId;
-  if (selectionChanged) {
-    state.currentConversationId = conversationId;
-    renderConversations();
-    scrollActiveConversationIntoView();
+  if (
+    conversationId === Number(state.pendingConversationId) &&
+    targetMessageId === state.pendingConversationTargetMessageId
+  ) {
+    return;
   }
-  if (shouldOpenBeforeLoad) {
+  const sameLoadedConversation =
+    conversationId === Number(state.currentConversationId) &&
+    conversationId === Number(state.threadLoadedConversationId);
+  const retryingCachedConversation = sameLoadedConversation && state.threadRevalidationFailedIds.has(conversationId);
+  if (
+    sameLoadedConversation &&
+    !retryingCachedConversation &&
+    !targetMessageId
+  ) {
+    cancelPendingConversationOpen({ restorePoll: false });
     setMobileThreadOpen(true);
+    if (updateHistory) pushMobileThreadState({ conversationId });
+    scheduleStatusPoll();
+    pollForChanges().catch((error) => toast(error.message));
+    return;
   }
+  clearStatusPoll();
+  saveComposerDraftForCurrentRecipients();
+  cacheCurrentThread();
+  state.openConversationController?.abort();
+  const controller = new AbortController();
+  state.openConversationController = controller;
+  const requestSeq = ++state.openConversationSeq;
+  state.threadRefreshSeq += 1;
+  const listConversation = state.conversations.find((item) => Number(item.id) === conversationId) || { id: conversationId };
+  const cached = cachedThreadPayload(conversationId);
+  const stageDesktopSwitch = canStageDesktopThreadSwitch(conversationId, cached, targetMessageId);
+  if (stageDesktopSwitch) {
+    beginDesktopThreadSwitch(conversationId, targetMessageId, { receiveFocus: focusConversation });
+    setMobileThreadOpen(true);
+  } else {
+    const clearedDesktopSwitch = finishDesktopThreadSwitch(undefined, { renderList: false });
+    state.searchTargetMessageId = targetMessageId;
+    state.searchTargetTerms = targetMessageId ? targetTerms : [];
+    if (retryingCachedConversation && cached) {
+      if (clearedDesktopSwitch) {
+        renderConversationsPreservingScroll();
+        restoreConversationSwitchFocus(conversationId);
+      }
+      setMobileThreadOpen(true);
+      if (updateHistory) pushMobileThreadState({ conversationId });
+    } else {
+      clearNewMessagesAffordance();
+      invalidateMessageLayoutCorrections();
+      state.messageUserScrolledAwayFromBottom = false;
+      state.messageUserScrollIntent = false;
+      state.currentConversationId = conversationId;
+      if (cached) {
+        applyThreadPayload(cached, conversationId);
+      } else {
+        state.currentConversation = listConversation;
+        state.messages = [];
+        state.hasMoreMessages = false;
+        state.olderCount = 0;
+        state.threadLoadedConversationId = null;
+      }
+      renderConversations();
+      restoreConversationSwitchFocus(conversationId);
+      scrollActiveConversationIntoView();
+      renderThreadHeader();
+      selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
+      restoreComposerDraftForRecipients();
+      if (cached) {
+        renderMessages(state.messages, cached.nearBottom ? "bottom" : "restore", {
+          anchor: cached.anchor,
+          scrollTop: cached.scrollTop,
+        });
+        restoreCachedThreadScroll(cached, requestSeq);
+        if (targetMessageId) scrollMessageRowIntoView(targetMessageId);
+      } else {
+        renderThreadLoadingState();
+      }
+      setMobileThreadOpen(true);
+      if (updateHistory) pushMobileThreadState({ conversationId });
+    }
+  }
+  const readWasOptimistic = markConversationReadOnOpen(
+    conversationId,
+    stageDesktopSwitch ? listConversation : state.currentConversation,
+    { allowPending: stageDesktopSwitch },
+  );
   let payload;
   try {
-    payload = await api(`/api/conversations/${id}/messages?limit=80`);
+    payload = await api(`/api/conversations/${conversationId}/messages?limit=80`, { signal: controller.signal });
+    if (stageDesktopSwitch && targetMessageId) {
+      payload = await expandThreadPayloadToMessage(payload, targetMessageId, {
+        conversationId,
+        signal: controller.signal,
+        shouldContinue: () =>
+          requestSeq === state.openConversationSeq &&
+          Number(state.pendingConversationId) === conversationId,
+      });
+      if (
+        requestSeq === state.openConversationSeq &&
+        Number(state.pendingConversationId) === conversationId
+      ) {
+        const freshTail = await api(`/api/conversations/${conversationId}/messages?limit=80`, {
+          signal: controller.signal,
+        });
+        payload = mergeRefreshedThreadPayload(payload.messages, freshTail);
+      }
+    }
   } catch (error) {
-    if (requestSeq === state.openConversationSeq && selectionChanged) {
-      state.currentConversationId = previousConversationId;
-      renderConversations();
-      scrollActiveConversationIntoView();
+    if (error?.name === "AbortError" || requestSeq !== state.openConversationSeq) return;
+    if (state.openConversationController === controller) state.openConversationController = null;
+    if (stageDesktopSwitch) {
+      finishDesktopThreadSwitch(conversationId);
+      scheduleStatusPoll();
+    } else if (cached) {
+      state.threadRevalidationFailedIds.add(conversationId);
+      cacheCurrentThread();
+      scheduleStatusPoll();
+    } else {
+      renderThreadLoadError(error.message);
     }
     throw error;
   }
   if (requestSeq !== state.openConversationSeq) return;
-  state.currentConversationId = conversationId;
-  state.currentConversation = payload.conversation;
-  state.messages = payload.messages;
-  state.hasMoreMessages = payload.has_more;
-  state.olderCount = payload.older_count;
-  state.searchTargetMessageId = targetMessageId;
-  state.searchTargetTerms = targetMessageId ? targetTerms : [];
+  if (stageDesktopSwitch && Number(state.pendingConversationId) !== conversationId) return;
+  state.threadRevalidationFailedIds.delete(conversationId);
+  const cachedMessages = stageDesktopSwitch ? cached?.messages || [] : state.messages;
+  if (cached) payload = mergeRefreshedThreadPayload(cachedMessages, payload);
+  const wasNearBottom = cached && !stageDesktopSwitch ? isNearMessageBottom() : true;
+  const conversationChanged = !conversationPayloadMatchesState(payload);
+  const messagesChanged = !messagePayloadMatchesState(payload);
+  const newMessageCount = cached ? newMessageItemCount(cachedMessages, payload.messages) : 0;
+  if (stageDesktopSwitch) {
+    state.searchTargetMessageId = targetMessageId;
+    state.searchTargetTerms = targetMessageId ? targetTerms : [];
+    clearNewMessagesAffordance();
+    invalidateMessageLayoutCorrections();
+    state.messageUserScrolledAwayFromBottom = false;
+    state.messageUserScrollIntent = false;
+  }
+  applyThreadPayload(payload, conversationId);
+  mergeThreadConversationFreshnessIntoList(payload.conversation);
+  if (stageDesktopSwitch) {
+    finishDesktopThreadSwitch(conversationId, { renderList: false });
+    setMobileThreadOpen(true);
+    if (updateHistory) pushMobileThreadState({ conversationId });
+  }
+  const confirmedReadPatch = state.conversationReadMutationResults.get(conversationId);
+  const pendingReadPatch = state.conversationReadMutationTargets.get(conversationId);
+  const activeReadPatch = confirmedReadPatch || pendingReadPatch;
+  if (activeReadPatch) {
+    mergeConversationReadPatchIntoLoadedState(conversationId, activeReadPatch);
+    if (confirmedReadPatch) state.conversationReadMutationResults.delete(conversationId);
+  } else if (!readWasOptimistic) {
+    markConversationReadOnOpen(conversationId, state.currentConversation);
+  }
+  if (
+    state.conversationCategory === "unread" &&
+    readWasOptimistic &&
+    !state.readOnOpenFailedIds.has(conversationId) &&
+    conversationIsRead(state.currentConversation)
+  ) {
+    state.conversations = state.conversations.filter(
+      (conversation) => Number(conversation.id) !== conversationId,
+    );
+  }
   trackInboundSoundKey(latestInboundSoundKeyFromMessages(state.messages));
   state.lastThreadRefreshAt = Date.now();
   selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
   restoreComposerDraftForRecipients();
   renderConversations();
+  restoreConversationSwitchFocus(conversationId);
   scrollActiveConversationIntoView();
   renderThreadHeader();
-  renderMessages(state.messages, "bottom");
+  if (!cached || messagesChanged || targetMessageId) {
+    const scrollMode = !cached || wasNearBottom ? "bottom" : "preserve";
+    if (newMessageCount > 0 && !wasNearBottom) showNewMessagesAffordance(newMessageCount, conversationId);
+    renderMessages(state.messages, scrollMode);
+  } else if (conversationChanged) {
+    finishThreadLoadingState();
+  }
   if (targetMessageId) {
-    const found = await revealMessageInThread(targetMessageId);
+    let found = stageDesktopSwitch ? scrollMessageRowIntoView(targetMessageId) : false;
+    if (!stageDesktopSwitch) {
+      try {
+        found = await revealMessageInThread(targetMessageId, {
+          conversationId,
+          requestSeq,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error?.name === "AbortError" || requestSeq !== state.openConversationSeq) return;
+        if (state.openConversationController === controller) state.openConversationController = null;
+        throw error;
+      }
+      if (requestSeq !== state.openConversationSeq) return;
+    }
     if (!found) toast("That matching message is no longer available.");
   }
-  if (updateHistory) {
-    pushMobileThreadState({ conversationId });
-  }
-  if (!shouldOpenBeforeLoad) {
-    setMobileThreadOpen(true);
-  }
+  cacheCurrentThread();
+  if (state.openConversationController === controller) state.openConversationController = null;
   scheduleStatusPoll();
   pollForChanges({ prime: true }).catch((error) => toast(error.message));
-  if (state.bootstrap?.mark_read_on_open && !conversationIsRead(state.currentConversation)) {
-    setCurrentConversationRead(true, { silent: true }).catch((error) => toast(error.message));
-  }
 }
 
 async function openAdjacentConversation(offset) {
   if (!state.conversations.length) return;
-  const currentIndex = state.conversations.findIndex((conversation) => conversation.id === state.currentConversationId);
+  const navigationConversationId = Number(state.pendingConversationId || state.currentConversationId);
+  const currentIndex = state.conversations.findIndex(
+    (conversation) => Number(conversation.id) === navigationConversationId,
+  );
   const baseIndex = currentIndex >= 0 ? currentIndex : 0;
   const nextIndex = clamp(baseIndex + offset, 0, state.conversations.length - 1);
   const next = state.conversations[nextIndex];
-  if (next && next.id !== state.currentConversationId) {
-    await openConversation(next.id);
+  if (next && Number(next.id) !== navigationConversationId) {
+    await openConversation(next.id, { focusConversation: true });
   }
 }
 
 async function setCurrentConversationArchived(archived) {
-  if (!state.currentConversationId) return;
+  if (state.pendingConversationId || !state.currentConversationId) return;
   els.archiveButton.disabled = true;
   try {
     await api(`/api/conversations/${state.currentConversationId}/archive`, {
@@ -6224,68 +7215,113 @@ async function setCurrentConversationArchived(archived) {
   }
 }
 
-async function setCurrentConversationRead(dealt, { silent = false } = {}) {
-  if (!state.currentConversationId) return;
-  const conversationId = state.currentConversationId;
+async function setConversationRead(conversationId, dealt, { silent = false, allowPending = false } = {}) {
+  conversationId = Number(conversationId);
+  if (!conversationId) return false;
+  const pendingConversationId = Number(state.pendingConversationId);
+  if (pendingConversationId && (!allowPending || pendingConversationId !== conversationId)) return false;
+  if (state.conversationReadMutationIds.has(conversationId)) return false;
+  state.conversationReadMutationIds.add(conversationId);
+  state.conversationReadMutationResults.delete(conversationId);
+  const listContext = {
+    category: state.conversationCategory,
+    search: (els.conversationSearch?.value || "").trim(),
+  };
   const listIndex = state.conversations.findIndex((conversation) => Number(conversation.id) === conversationId);
   const previousListConversation = listIndex >= 0 ? { ...state.conversations[listIndex] } : null;
   const previousCurrentConversation =
     state.currentConversation && Number(state.currentConversation.id) === conversationId ? { ...state.currentConversation } : null;
   const timestamp = localIsoTimestamp();
   const optimisticBase = previousCurrentConversation || previousListConversation || { id: conversationId };
+  const previousReadPatch = conversationReadPatch(optimisticBase);
   const lastMessageTime =
     optimisticBase.last_occurred_at || optimisticBase.last_message_at || optimisticBase.sort_at || timestamp;
-  mergeConversationIntoLoadedState({
-    ...optimisticBase,
+  const optimisticReadPatch = {
     id: conversationId,
     dealt_with_at: dealt ? lastMessageTime : optimisticBase.dealt_with_at || "",
     manual_unread_at: dealt ? null : timestamp,
-    needs_attention: dealt ? 0 : 1,
-  });
-  if (state.conversationCategory === "unread" && dealt) {
+  };
+  state.conversationReadMutationTargets.set(conversationId, optimisticReadPatch);
+  mergeConversationReadPatchIntoLoadedState(conversationId, optimisticReadPatch);
+  if (
+    state.conversationCategory === "unread" &&
+    dealt &&
+    Number(state.pendingConversationId) !== conversationId
+  ) {
     state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
   }
-  renderConversations();
-  renderThreadHeader();
-  els.dealtButton.disabled = true;
+  renderConversationsPreservingScroll();
+  focusPendingConversationRow();
+  if (Number(state.currentConversationId) === conversationId) renderThreadHeader();
   try {
     const payload = await api(`/api/conversations/${conversationId}/dealt`, {
       method: "POST",
       body: JSON.stringify({ dealt }),
     });
-    const isCurrent = mergeConversationIntoLoadedState(payload.conversation);
-    state.bootstrap = await api("/api/bootstrap");
-    applyRuntimeSettings();
-    renderBootstrap();
-    if (state.conversationCategory === "unread" && dealt) {
+    const confirmedReadPatch = {
+      ...conversationReadPatch(payload.conversation),
+      id: conversationId,
+    };
+    state.conversationReadMutationResults.set(conversationId, confirmedReadPatch);
+    while (state.conversationReadMutationResults.size > 100) {
+      state.conversationReadMutationResults.delete(state.conversationReadMutationResults.keys().next().value);
+    }
+    const isCurrent = mergeConversationReadPatchIntoLoadedState(conversationId, confirmedReadPatch);
+    const unreadCount = Number(payload.unread_count);
+    if (Number.isFinite(unreadCount) && state.bootstrap?.stats) {
+      state.bootstrap.stats.unread_conversations = unreadCount;
+      renderCategoryTabs();
+    } else {
+      state.bootstrap = await api("/api/bootstrap");
+      applyRuntimeSettings();
+      renderBootstrap();
+    }
+    if (
+      state.conversationCategory === "unread" &&
+      dealt &&
+      Number(state.pendingConversationId) !== conversationId
+    ) {
       state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
     }
-    renderConversations();
+    renderConversationsPreservingScroll();
+    focusPendingConversationRow();
     if (isCurrent) {
       renderThreadHeader();
     }
     if (!silent) {
       toast(dealt ? t("conversation.marked_read") : t("conversation.marked_unread"));
     }
+    if (Number(state.currentConversationId) === conversationId) cacheCurrentThread();
+    return true;
   } catch (error) {
+    state.conversationReadMutationResults.delete(conversationId);
     const currentIndex = state.conversations.findIndex((conversation) => Number(conversation.id) === conversationId);
-    if (previousListConversation) {
-      if (currentIndex >= 0) {
-        state.conversations[currentIndex] = previousListConversation;
-      } else {
-        const insertAt = listIndex >= 0 ? Math.min(listIndex, state.conversations.length) : 0;
-        state.conversations.splice(insertAt, 0, previousListConversation);
-      }
-    } else if (currentIndex >= 0) {
-      state.conversations.splice(currentIndex, 1);
-    }
-    if (state.currentConversationId === conversationId) {
-      state.currentConversation = previousCurrentConversation;
+    mergeConversationReadPatchIntoLoadedState(conversationId, previousReadPatch);
+    const listContextIsCurrent =
+      state.conversationCategory === listContext.category &&
+      (els.conversationSearch?.value || "").trim() === listContext.search;
+    if (previousListConversation && currentIndex < 0 && listContextIsCurrent) {
+      const rollbackBase =
+        Number(state.currentConversationId) === conversationId && state.currentConversation
+          ? state.currentConversation
+          : previousListConversation;
+      const insertAt = listIndex >= 0 ? Math.min(listIndex, state.conversations.length) : 0;
+      state.conversations.splice(insertAt, 0, applyConversationReadPatch(rollbackBase, previousReadPatch));
     }
     toast(error.message);
-    renderConversations();
-    renderThreadHeader();
+    renderConversationsPreservingScroll();
+    focusPendingConversationRow();
+    return false;
+  } finally {
+    state.conversationReadMutationIds.delete(conversationId);
+    state.conversationReadMutationTargets.delete(conversationId);
+    if (state.currentConversationId === conversationId) renderThreadHeader();
   }
+}
+
+async function setCurrentConversationRead(dealt, { silent = false } = {}) {
+  if (state.pendingConversationId || !state.currentConversationId) return false;
+  return setConversationRead(state.currentConversationId, dealt, { silent });
 }
 
 async function toggleCurrentConversationRead() {
@@ -6297,20 +7333,25 @@ async function toggleCurrentConversationRead() {
   await setCurrentConversationRead(shouldMarkRead);
 }
 
-async function loadOlderMessages({ render = true, scrollMode = "preserve", schedulePoll = true } = {}) {
+async function loadOlderMessages({ render = true, scrollMode = "preserve", schedulePoll = true, signal } = {}) {
+  if (state.pendingConversationId) return 0;
   if (schedulePoll) clearStatusPoll();
   if (!state.currentConversationId || !state.messages.length || !state.hasMoreMessages) return 0;
+  const conversationId = Number(state.currentConversationId);
   const oldest = state.messages[0];
   const before = encodeURIComponent(oldest.occurred_at);
   const payload = await api(
-    `/api/conversations/${state.currentConversationId}/messages?limit=80&before=${before}&before_id=${oldest.id}`,
+    `/api/conversations/${conversationId}/messages?limit=80&before=${before}&before_id=${oldest.id}`,
+    { signal },
   );
+  if (conversationId !== Number(state.currentConversationId)) return 0;
   state.messages = [...payload.messages, ...state.messages];
   state.hasMoreMessages = payload.has_more;
   state.olderCount = payload.older_count;
   if (render) {
     renderMessages(state.messages, scrollMode);
   }
+  cacheCurrentThread();
   if (schedulePoll) scheduleStatusPoll();
   return payload.messages.length;
 }
@@ -6319,13 +7360,22 @@ function startNewConversation(options = {}) {
   const updateHistory = options.updateHistory !== false;
   clearStatusPoll();
   saveComposerDraftForCurrentRecipients();
+  cacheCurrentThread();
+  state.openConversationController?.abort();
+  state.openConversationController = null;
   state.openConversationSeq += 1;
+  state.threadRefreshSeq += 1;
+  finishDesktopThreadSwitch(undefined, { renderList: false });
+  state.pendingConversationShouldReceiveFocus = false;
+  invalidateMessageLayoutCorrections();
+  clearNewMessagesAffordance();
   setMobileThreadOpen(true);
   if (updateHistory) {
     pushMobileThreadState({ draft: true });
   }
   state.currentConversationId = null;
   state.currentConversation = null;
+  state.threadLoadedConversationId = null;
   state.messages = [];
   state.hasMoreMessages = false;
   state.olderCount = 0;
@@ -6644,71 +7694,127 @@ function applyOptimisticOutgoingMessage(draft, snapshot, { scrollMode = "bottom"
   return optimisticId;
 }
 
-function markOptimisticMessageFailed(optimisticId, detail, conversationId) {
+function sendContextIsActive(context) {
+  if (context.conversationId) return Number(state.currentConversationId) === context.conversationId;
+  return (
+    !state.currentConversationId &&
+    state.openConversationSeq === context.openConversationSeq &&
+    composerDraftKey() === context.recipientKey
+  );
+}
+
+function restoreFailedSendDraft(context, snapshot) {
+  const existing = context.recipientKey ? state.composerDraftsByRecipient.get(context.recipientKey) : null;
+  const active = sendContextIsActive(context);
+  if (active && composerIsEmpty()) {
+    restoreComposerSnapshot(snapshot);
+    return;
+  }
+  if (context.recipientKey && !composerSnapshotHasContent(existing)) {
+    saveComposerSnapshotForKey(context.recipientKey, snapshot);
+  }
+  renderConversationsPreservingScroll();
+}
+
+function markOptimisticMessageFailed(optimisticId, detail, conversationId, { active = false } = {}) {
   const failureDetail = detail || t("message.send_failed");
-  const hasOptimisticMessage = state.messages.some((message) => message.id === optimisticId);
-  state.messages = state.messages.map((message) => {
-    if (message.id !== optimisticId) return message;
-    return {
+  const failureUpdate = (message) => ({
       ...message,
       status: "delivery_failed",
       status_kind: "failed",
       status_label: t("status.delivery_failed"),
       status_detail: failureDetail,
-    };
-  });
-  if (hasOptimisticMessage) {
-    renderMessages(state.messages, "bottom");
-  }
-  if (conversationId) {
-    mergeConversationIntoLoadedState({
-      id: conversationId,
-      last_status: "delivery_failed",
-      last_status_kind: "failed",
-      last_status_label: t("status.delivery_failed"),
-      last_status_detail: failureDetail,
     });
-    renderThreadHeader();
-    renderConversations();
+  const wasNearBottom = active && isNearMessageBottom();
+  let activeChanged = false;
+  if (active) {
+    state.messages = state.messages.map((message) => {
+      if (message.id !== optimisticId) return message;
+      activeChanged = true;
+      return failureUpdate(message);
+    });
+    if (activeChanged) renderMessages(state.messages, wasNearBottom ? "bottom" : "preserve");
   }
+  const id = Number(conversationId);
+  const conversationUpdate = {
+    id,
+    last_status: "delivery_failed",
+    last_status_kind: "failed",
+    last_status_label: t("status.delivery_failed"),
+    last_status_detail: failureDetail,
+  };
+  const cached = id ? state.threadCache.get(id) : null;
+  if (cached) {
+    const messages = cached.messages.map((message) => (message.id === optimisticId ? failureUpdate(message) : message));
+    state.threadCache.set(id, {
+      ...cached,
+      messages,
+      conversation: { ...cached.conversation, ...conversationUpdate },
+    });
+  }
+  if (id) {
+    mergeConversationIntoLoadedState({
+      ...conversationUpdate,
+    });
+    if (active) renderThreadHeader();
+  }
+  renderConversations();
 }
 
 async function sendCurrentMessage() {
+  if (state.pendingConversationId) return;
   if (!commitPendingRecipientInput()) return;
   const draft = currentComposerDraft();
   if (!validateComposerDraft(draft)) return;
   const snapshot = composerSnapshot();
+  const sendContext = {
+    conversationId: Number(draft.conversation_id) || null,
+    recipientKey: composerDraftKey(draft.to_numbers),
+    openConversationSeq: state.openConversationSeq,
+  };
   const optimisticMessageId = applyOptimisticOutgoingMessage(draft, snapshot);
   clearComposerDraft();
   showComposerError("");
   els.sendButton.disabled = true;
+  let sendSucceeded = false;
   try {
     const payload = await api("/api/messages", {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    sendSucceeded = true;
+    const sentConversationId = Number(payload.conversation?.id || draft.conversation_id || 0);
+    confirmOptimisticMessage(optimisticMessageId, sentConversationId || sendContext.conversationId, payload, {
+      active: sendContextIsActive(sendContext),
+    });
     playMessageSound("send");
-    if (payload.conversation && Number(payload.conversation.id) === state.currentConversationId) {
+    if (payload.conversation) {
       mergeConversationIntoLoadedState(payload.conversation);
-      markLoadedConversationRead(state.currentConversationId);
-      renderThreadHeader();
-      renderConversations();
-    } else if (state.currentConversationId) {
-      markLoadedConversationRead(state.currentConversationId);
-      renderThreadHeader();
-      renderConversations();
     }
-    await loadConversations({ preserveScroll: true });
-    if (state.currentConversationId) {
-      await openConversation(state.currentConversationId);
-    } else {
-      const first = state.conversations[0];
-      if (first) await openConversation(first.id);
+    if (sentConversationId) markLoadedConversationRead(sentConversationId);
+    if (sentConversationId === Number(state.currentConversationId)) {
+      renderThreadHeader();
+    }
+    renderConversations();
+    const listRefresh = loadConversations({ preserveScroll: true });
+    const shouldRefreshActiveThread = sentConversationId === Number(state.currentConversationId);
+    const threadRefresh = shouldRefreshActiveThread
+      ? refreshCurrentConversationStatus({ knownChanged: true, force: true })
+      : Promise.resolve();
+    await Promise.all([listRefresh, threadRefresh]);
+    if (!state.currentConversationId && sentConversationId) {
+      await openConversation(sentConversationId);
     }
   } catch (error) {
-    markOptimisticMessageFailed(optimisticMessageId, error.message, draft.conversation_id);
-    restoreComposerSnapshot(snapshot);
-    showComposerError(error.message);
+    if (sendSucceeded) {
+      scheduleStatusPoll();
+      toast(error.message);
+      return;
+    }
+    const active = sendContextIsActive(sendContext);
+    markOptimisticMessageFailed(optimisticMessageId, error.message, sendContext.conversationId, { active });
+    restoreFailedSendDraft(sendContext, snapshot);
+    if (active) showComposerError(error.message);
     toast(error.message);
   } finally {
     els.sendButton.disabled = false;
@@ -6998,6 +8104,73 @@ async function saveIdentity(card) {
   }
 }
 
+function setIdentityAddFormOpen(open) {
+  if (!els.identityAddForm) return;
+  els.identityAddForm.classList.toggle("hidden", !open);
+  els.addIdentityButton?.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    els.identityAddProvider.value = state.bootstrap?.messaging_provider || "telnyx";
+    window.setTimeout(() => els.identityAddPhone?.focus(), 0);
+  } else {
+    els.identityAddForm.reset();
+  }
+}
+
+async function createIdentityFromControls({ phone, label, provider, controls, onSuccess }) {
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    await api("/api/identities", {
+      method: "POST",
+      body: JSON.stringify({
+        phone_number: phone.value,
+        label: label.value,
+        provider: provider.value,
+      }),
+    });
+    state.bootstrap = await api("/api/bootstrap");
+    applyRuntimeSettings();
+    onSuccess?.();
+    renderBootstrap({ forceIdentities: true });
+    toast(t("identities.added"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    controls.forEach((control) => {
+      control.disabled = false;
+    });
+  }
+}
+
+async function addIdentity(event) {
+  event.preventDefault();
+  return createIdentityFromControls({
+    phone: els.identityAddPhone,
+    label: els.identityAddLabel,
+    provider: els.identityAddProvider,
+    controls: [...els.identityAddForm.querySelectorAll("input, select, button")],
+    onSuccess: () => setIdentityAddFormOpen(false),
+  });
+}
+
+async function addIdentityFromSettings(button) {
+  const section = button.closest("#settings-numbers");
+  const phone = section.querySelector(".settings-identity-phone");
+  const label = section.querySelector(".settings-identity-label");
+  const provider = section.querySelector(".settings-identity-provider");
+  await createIdentityFromControls({
+    phone,
+    label,
+    provider,
+    controls: [...section.querySelectorAll("input, select, button")],
+    onSuccess: () => {
+      phone.value = "";
+      label.value = "";
+    },
+  });
+}
+
 async function searchContacts() {
   const q = encodeURIComponent(els.contactSearch.value || "");
   try {
@@ -7114,6 +8287,16 @@ function bindEvents() {
     const voiceGreetingFile = event.target.closest(".setting-voice-greeting-file");
     if (voiceGreetingFile) uploadVoiceGreetingFile(voiceGreetingFile);
   });
+  els.settingsSections.addEventListener("click", (event) => {
+    const addButton = event.target.closest(".settings-add-identity");
+    if (addButton) addIdentityFromSettings(addButton);
+  });
+  els.settingsSections.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || !event.target.closest("#settings-numbers")) return;
+    event.preventDefault();
+    const addButton = els.settingsSections.querySelector(".settings-add-identity");
+    if (addButton && !addButton.disabled) addIdentityFromSettings(addButton);
+  });
   els.settingsForm.addEventListener("submit", saveSettings);
   els.databaseDownloadButton.addEventListener("click", downloadDatabase);
   els.logoutButton.addEventListener("click", signOut);
@@ -7145,17 +8328,15 @@ function bindEvents() {
       toggleConversationSelection(button.dataset.id);
       return;
     }
-    if (state.threadNavigationInFlight) return;
     const conversation = state.conversations.find((item) => Number(item.id) === Number(button.dataset.id));
     const searchMatch = conversation?.search_match?.type === "message" ? conversation.search_match : null;
-    state.threadNavigationInFlight = true;
     openConversation(button.dataset.id, {
       targetMessageId: searchMatch?.message_id,
       searchTerms: searchMatch?.terms || [],
+      focusConversation: true,
     })
-      .catch((error) => toast(error.message))
-      .finally(() => {
-        state.threadNavigationInFlight = false;
+      .catch((error) => {
+        if (error?.name !== "AbortError") toast(error.message);
       });
   });
   els.conversationList.addEventListener("pointerdown", beginConversationGesture);
@@ -7486,10 +8667,10 @@ function bindEvents() {
     event.returnValue = "";
   });
   window.addEventListener("popstate", handleNavigationPop);
-  window.addEventListener("resize", syncVisualViewportMetrics);
-  window.addEventListener("orientationchange", () => window.setTimeout(syncVisualViewportMetrics, 120));
-  window.visualViewport?.addEventListener("resize", syncVisualViewportMetrics);
-  window.visualViewport?.addEventListener("scroll", syncVisualViewportMetrics);
+  window.addEventListener("resize", scheduleVisualViewportMetricsSync);
+  window.addEventListener("orientationchange", scheduleVisualViewportMetricsSync);
+  window.visualViewport?.addEventListener("resize", scheduleVisualViewportMetricsSync);
+  window.visualViewport?.addEventListener("scroll", scheduleVisualViewportMetricsSync);
   els.toggleDetailsButton.addEventListener("click", toggleDetailsPanel);
   els.mobileDetailCloseButton?.addEventListener("click", () => {
     setDetailsOverlayOpen(false, { restoreFocus: true });
@@ -7513,6 +8694,12 @@ function bindEvents() {
       closeDetailsOverlay();
     }
   });
+  els.addIdentityButton?.addEventListener("click", () => {
+    if (!confirmDiscardIdentityChanges()) return;
+    setIdentityAddFormOpen(els.identityAddForm.classList.contains("hidden"));
+  });
+  els.identityAddCancel?.addEventListener("click", () => setIdentityAddFormOpen(false));
+  els.identityAddForm?.addEventListener("submit", addIdentity);
   els.detailRail.addEventListener("input", (event) => {
     const identityField = event.target.closest(".identity-card input, .identity-card textarea");
     if (identityField) updateIdentityDirtyState(identityField);
@@ -7570,13 +8757,14 @@ async function init() {
   updateConversationSearchClear();
   const savedCategory = localStorage.getItem("conversationCategory");
   state.conversationCategory = ["inbox", "unread", "hidden"].includes(savedCategory) ? savedCategory : "inbox";
-  state.bootstrap = await api("/api/bootstrap");
+  const [bootstrap] = await Promise.all([api("/api/bootstrap"), loadConversations()]);
+  state.bootstrap = bootstrap;
   applyRuntimeSettings();
   const savedDetailsState = localStorage.getItem("detailsCollapsedDefaultHidden");
   const detailsDefault = state.bootstrap.details_collapsed_default ?? true;
   setDetailsCollapsed(savedDetailsState === null ? Boolean(detailsDefault) : savedDetailsState === "1");
   renderBootstrap();
-  await loadConversations();
+  renderConversations();
   if (initialConversationId) {
     await openConversation(initialConversationId, { updateHistory: false });
     clearInitialConversationUrl(initialConversationId);

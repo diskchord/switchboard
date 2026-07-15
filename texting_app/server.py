@@ -5,15 +5,12 @@ import mimetypes
 import os
 import re
 import secrets
-import shutil
 import sqlite3
-import subprocess
 import tempfile
 import threading
 import time
 import base64
-import hashlib
-import urllib.request
+from contextlib import closing
 from datetime import datetime, timedelta
 from io import BytesIO
 from email.parser import BytesParser
@@ -26,6 +23,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import auth
 from . import config
+from .attachment_ingestion import start_attachment_worker
 from .autoreply import (
     DEFAULT_AUTOREPLY_COOLDOWN_HOURS,
     DEFAULT_AUTOREPLY_MESSAGE,
@@ -38,10 +36,19 @@ from .contacts import start_autosync, sync_contacts
 from .db import connect, conversation_key, ensure_conversation, from_json, init_db, self_numbers
 from .fastmail import FastmailError
 from .google_contacts import GoogleContactsError
-from .messaging import MessagingError, configured_messaging_providers
+from .http_utils import file_etag, maybe_gzip, parse_byte_range
+from .messaging import MessagingError, configured_messaging_providers, provider_for_number
 from .messaging import send_message as send_provider_message
 from .phone import display_phone, normalize_phone
-from .settings import SettingsError, configured_values, get_bool, get_int, get_value, update_values
+from .settings import (
+    SettingsError,
+    configured_values,
+    get_bool,
+    get_int,
+    get_value,
+    invalidate_settings_cache,
+    update_values,
+)
 from .telnyx import TelnyxError
 from .telnyx import handle_webhook as handle_telnyx_webhook
 from .telnyx import send_fax as send_telnyx_fax
@@ -63,8 +70,8 @@ STATIC_DIR = config.ROOT / "static"
 MESSAGE_PAGE_SIZE = 80
 UPLOAD_CONTENT_PREFIXES = ("image/", "video/", "audio/")
 UPLOAD_CONTENT_TYPES = {"application/pdf"}
-CONVERTIBLE_VIDEO_EXTENSIONS = {".3gp", ".3gpp"}
-CONVERTIBLE_VIDEO_TYPES = {"video/3gpp", "video/3gp"}
+DEFAULT_REQUEST_BODY_LIMIT = 16 * 1024 * 1024
+UPLOAD_REQUEST_OVERHEAD = 1024 * 1024
 SESSION_MAX_AGE_SECONDS = config.AUTH_SESSION_DAYS * 24 * 60 * 60
 LOGIN_FAILURE_LIMIT = 8
 LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
@@ -298,180 +305,13 @@ def _local_upload_path_for_remote_url(remote_url: str | None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _cache_remote_attachment(conn, attachment: dict) -> dict:
-    if not get_bool("uploads.cache_attachments", config.MEDIA_CACHE_ATTACHMENTS):
-        return attachment
-    remote_url = str(attachment.get("remote_url") or "").strip()
-    if not remote_url:
-        return attachment
-    parsed = urlparse(remote_url)
-    if parsed.scheme not in {"http", "https"}:
-        return attachment
-    config.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    original_name = Path(unquote(parsed.path)).name
-    extension = Path(original_name).suffix
-    try:
-        request = urllib.request.Request(remote_url, headers={"User-Agent": "switchboard/0.1"})
-        with urllib.request.urlopen(request, timeout=45) as response:
-            payload = response.read()
-            response_type = response.headers.get_content_type() or ""
-    except Exception:
-        return attachment
-    if not payload:
-        return attachment
-    sha = hashlib.sha256(payload).hexdigest()
-    content_type = str(attachment.get("content_type") or response_type or "").split(";", 1)[0].strip()
-    extension = extension or mimetypes.guess_extension(content_type) or ""
-    filename = f"{sha}{extension}"
-    target = config.MEDIA_DIR / filename
-    if not target.exists():
-        target.write_bytes(payload)
-    stored_path = _stored_local_path(target)
-    conn.execute(
-        """
-        UPDATE attachments
-        SET local_path = ?,
-            content_type = COALESCE(NULLIF(content_type, ''), ?),
-            size = ?,
-            sha256 = COALESCE(NULLIF(sha256, ''), ?),
-            filename = COALESCE(NULLIF(filename, ''), ?),
-            source = ?
-        WHERE id = ?
-        """,
-        (
-            stored_path,
-            content_type,
-            target.stat().st_size,
-            sha,
-            original_name or filename,
-            attachment.get("source") or "cache",
-            attachment["id"],
-        ),
-    )
-    conn.commit()
-    return {
-        **attachment,
-        "local_path": stored_path,
-        "content_type": attachment.get("content_type") or content_type,
-        "size": target.stat().st_size,
-        "sha256": attachment.get("sha256") or sha,
-        "filename": attachment.get("filename") or original_name or filename,
-    }
-
-
-def _attachment_local_path(attachment: dict) -> Path | None:
-    raw = str(attachment.get("local_path") or "").strip()
-    if not raw:
-        return None
-    path = Path(raw)
-    if path.is_absolute():
-        return path if path.is_file() else None
-    candidate = config.MEDIA_DIR / path.name
-    return candidate if candidate.is_file() else None
-
-
-def _stored_local_path(path: Path) -> str:
-    try:
-        if path.resolve().parent == config.MEDIA_DIR.resolve():
-            return f"media/{path.name}"
-    except OSError:
-        pass
-    return str(path)
-
-
-def _is_convertible_video_attachment(attachment: dict) -> bool:
-    content_type = str(attachment.get("content_type") or "").split(";", 1)[0].strip().lower()
-    names = [
-        str(attachment.get("filename") or ""),
-        str(attachment.get("local_path") or ""),
-        str(attachment.get("remote_url") or ""),
-    ]
-    return content_type in CONVERTIBLE_VIDEO_TYPES or any(Path(unquote(urlparse(name).path)).suffix.lower() in CONVERTIBLE_VIDEO_EXTENSIONS for name in names)
-
-
-def _convert_attachment_video(conn, attachment: dict) -> dict:
-    if not _is_convertible_video_attachment(attachment):
-        return attachment
-    source = _attachment_local_path(attachment)
-    ffmpeg = shutil.which("ffmpeg")
-    if not source or not ffmpeg:
-        return attachment
-    target = source.with_suffix(".mp4")
-    if not target.exists() or target.stat().st_size == 0:
-        temp = target.with_suffix(".tmp.mp4")
-        try:
-            subprocess.run(
-                [
-                    ffmpeg,
-                    "-y",
-                    "-i",
-                    str(source),
-                    "-map",
-                    "0:v:0?",
-                    "-map",
-                    "0:a:0?",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-preset",
-                    "veryfast",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "128k",
-                    "-movflags",
-                    "+faststart",
-                    str(temp),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=180,
-            )
-            temp.replace(target)
-        except (OSError, subprocess.SubprocessError):
-            try:
-                temp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return attachment
-
-    stored_path = _stored_local_path(target)
-    filename = target.name
-    size = target.stat().st_size
-    conn.execute(
-        """
-        UPDATE attachments
-        SET local_path = ?,
-            content_type = 'video/mp4',
-            size = ?,
-            filename = ?,
-            source = ?
-        WHERE id = ?
-        """,
-        (stored_path, size, filename, attachment.get("source") or "converted", attachment["id"]),
-    )
-    conn.commit()
-    return {
-        **attachment,
-        "local_path": stored_path,
-        "content_type": "video/mp4",
-        "size": size,
-        "filename": filename,
-    }
-
-
-def _attachment_dict(conn, row) -> dict:
+def _attachment_dict(row) -> dict:
     attachment = _row_dict(row)
     if not attachment.get("local_path"):
         local_path = _local_upload_path_for_remote_url(attachment.get("remote_url"))
         if local_path:
             attachment["local_path"] = str(local_path)
             attachment["source"] = "upload"
-    if not attachment.get("local_path"):
-        attachment = _cache_remote_attachment(conn, attachment)
-    attachment = _convert_attachment_video(conn, attachment)
     return attachment
 
 
@@ -515,6 +355,7 @@ def _scheduled_messages_for_conversation(conn, conversation_id: int) -> list[dic
         """,
         (conversation_id,),
     ).fetchall()
+    contact_names = _contact_names(conn, (row["from_number"] for row in rows))
     scheduled = []
     for row in rows:
         to_numbers = from_json(row["to_numbers"], [])
@@ -553,7 +394,7 @@ def _scheduled_messages_for_conversation(conn, conversation_id: int) -> list[dic
                 "raw_json": None,
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
-                "from_display": _contact_name(conn, row["from_number"]),
+                "from_display": contact_names.get(row["from_number"]) or display_phone(row["from_number"]),
                 "attachments": attachments,
             }
         )
@@ -696,81 +537,99 @@ def _decorate_message_status(message: dict) -> dict:
     return message
 
 
+def _contact_names(conn, phones) -> dict[str, str]:
+    unique_phones = list(dict.fromkeys(str(phone) for phone in phones if phone))
+    names: dict[str, str] = {}
+    for offset in range(0, len(unique_phones), 800):
+        chunk = unique_phones[offset : offset + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT cp.phone_number, c.display_name
+            FROM contact_phones cp
+            JOIN contacts c ON c.id = cp.contact_id
+            WHERE cp.phone_number IN ({placeholders})
+            ORDER BY cp.phone_number,
+              CASE c.source
+                WHEN 'fastmail' THEN 3
+                WHEN 'google' THEN 3
+                WHEN 'phone' THEN 2
+                ELSE 1
+              END DESC,
+              c.updated_at DESC
+            """,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            phone = row["phone_number"]
+            display_name = row["display_name"]
+            if phone not in names and display_name and display_name != phone:
+                names[phone] = display_name
+    return names
+
+
 def _contact_name(conn, phone: str) -> str:
-    row = conn.execute(
-        """
-        SELECT c.display_name
-	        FROM contact_phones cp
-	        JOIN contacts c ON c.id = cp.contact_id
-	        WHERE cp.phone_number = ?
-	        ORDER BY
-	          CASE c.source
-	            WHEN 'fastmail' THEN 3
-	            WHEN 'google' THEN 3
-	            WHEN 'phone' THEN 2
-	            ELSE 1
-	          END DESC,
-	          c.updated_at DESC
-	        LIMIT 1
-        """,
-        (phone,),
-    ).fetchone()
-    if row and row["display_name"] and row["display_name"] != phone:
-        return row["display_name"]
-    return display_phone(phone)
+    return _contact_names(conn, [phone]).get(phone) or display_phone(phone)
+
+
+def _participants_for_conversations(conn, conversation_ids) -> dict[int, list[dict]]:
+    ids = list(dict.fromkeys(int(conversation_id) for conversation_id in conversation_ids))
+    participants: dict[int, list[dict]] = {conversation_id: [] for conversation_id in ids}
+    if not ids:
+        return participants
+    rows = []
+    for offset in range(0, len(ids), 800):
+        chunk = ids[offset : offset + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT cp.conversation_id,
+                  cp.phone_number,
+                  cp.role,
+                  i.label AS identity_label,
+                  i.color
+                FROM conversation_participants cp
+                LEFT JOIN identities i ON i.phone_number = cp.phone_number
+                WHERE cp.conversation_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+        )
+    contact_names = _contact_names(conn, (row["phone_number"] for row in rows))
+    for row in rows:
+        phone = row["phone_number"]
+        participants[row["conversation_id"]].append(
+            {
+                "phone_number": phone,
+                "display": row["identity_label"] or contact_names.get(phone) or display_phone(phone),
+                "role": row["role"],
+                "color": row["color"],
+            }
+        )
+    for conversation_participants in participants.values():
+        conversation_participants.sort(
+            key=lambda participant: (
+                0 if participant["role"] == "self" else 1,
+                str(participant["display"]).casefold(),
+            )
+        )
+    return participants
 
 
 def _participants(conn, conversation_id: int) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT cp.phone_number,
-          cp.role,
-          (
-            SELECT best.display_name
-            FROM contact_phones best_phone
-	            JOIN contacts best ON best.id = best_phone.contact_id
-	            WHERE best_phone.phone_number = cp.phone_number
-	            ORDER BY
-	              CASE best.source
-	                WHEN 'fastmail' THEN 3
-	                WHEN 'google' THEN 3
-	                WHEN 'phone' THEN 2
-	                ELSE 1
-	              END DESC,
-	              best.updated_at DESC
-	            LIMIT 1
-          ) AS contact_display,
-          i.label AS identity_label,
-          i.color
-        FROM conversation_participants cp
-        LEFT JOIN identities i ON i.phone_number = cp.phone_number
-        WHERE cp.conversation_id = ?
-        ORDER BY cp.role DESC, COALESCE(contact_display, i.label, cp.phone_number)
-        """,
-        (conversation_id,),
-    ).fetchall()
-    return [
-        {
-            "phone_number": row["phone_number"],
-            "display": row["identity_label"]
-            or (row["contact_display"] if row["contact_display"] and row["contact_display"] != row["phone_number"] else None)
-            or display_phone(row["phone_number"]),
-            "role": row["role"],
-            "color": row["color"],
-        }
-        for row in rows
-    ]
+    return _participants_for_conversations(conn, [conversation_id]).get(conversation_id, [])
 
 
-def _conversation_title(conn, conversation_id: int, fallback: str | None = None) -> str:
-    names = [
-        p["display"]
-        for p in _participants(conn, conversation_id)
-        if p["role"] == "participant"
-    ]
+def _conversation_title_from_participants(participants: list[dict], fallback: str | None = None) -> str:
+    names = [participant["display"] for participant in participants if participant["role"] == "participant"]
     if names:
         return ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
     return fallback or "Unknown"
+
+
+def _conversation_title(conn, conversation_id: int, fallback: str | None = None) -> str:
+    return _conversation_title_from_participants(_participants(conn, conversation_id), fallback)
 
 
 def _search_terms(value: str) -> list[str]:
@@ -881,9 +740,43 @@ def _conversation_message_search_match(conn, conversation_id: int, terms: list[s
     }
 
 
-def list_conversations(query: dict[str, list[str]]) -> dict:
-    conn = connect()
-    init_db(conn)
+def _decorate_conversation_summary(row, participants: list[dict]) -> dict:
+    item = _row_dict(row)
+    item.pop("search_name_rank", None)
+    use_scheduled = bool(row["scheduled_id"]) and (
+        not row["last_occurred_at"] or row["scheduled_for"] >= row["last_occurred_at"]
+    )
+    if use_scheduled:
+        scheduled_to_numbers = from_json(row["scheduled_to_numbers"], [])
+        scheduled_media_urls = from_json(row["scheduled_media_urls"], [])
+        scheduled_failed = row["scheduled_status"] == "failed"
+        item["last_text"] = row["scheduled_text"]
+        item["last_message_type"] = "MMS" if scheduled_media_urls or len(scheduled_to_numbers) > 1 else "SMS"
+        item["last_direction"] = "outbound"
+        item["last_status"] = "failed" if scheduled_failed else "scheduled"
+        item["last_occurred_at"] = row["scheduled_for"]
+        item["last_raw_json"] = None
+    item["title"] = row["title"] or _conversation_title_from_participants(participants)
+    item["participants"] = participants
+    item["sort_at"] = row["list_sort_at"] or row["last_message_at"] or row["updated_at"]
+    item["needs_attention"] = _needs_attention(
+        item.get("last_direction"),
+        item.get("last_occurred_at"),
+        row["dealt_with_at"],
+        row["manual_unread_at"],
+    )
+    item["last_status_label"] = _status_label(item.get("last_status"))
+    item["last_status_kind"] = _status_kind(item.get("last_status"))
+    if use_scheduled:
+        item["last_status_detail"] = (
+            row["scheduled_failure"] if row["scheduled_status"] == "failed" else f"Scheduled for {row['scheduled_for']}"
+        )
+    else:
+        item["last_status_detail"] = _message_status_detail(row["last_status"], row["last_raw_json"])
+    return item
+
+
+def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
     search = (query.get("search") or [""])[0].strip()
     search_terms = _search_terms(search)
     hidden = (query.get("hidden") or ["0"])[0].lower() in {"1", "true", "yes"}
@@ -936,8 +829,7 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
           sm.status AS scheduled_status,
           sm.failure AS scheduled_failure,
           {CONVERSATION_SORT_EXPR} AS list_sort_at,
-          {search_rank_select},
-          (SELECT COUNT(*) FROM messages mm WHERE mm.conversation_id = c.id) AS message_count
+          {search_rank_select}
         FROM conversations c
         LEFT JOIN messages m ON m.id = (
           SELECT id FROM messages
@@ -970,43 +862,23 @@ def list_conversations(query: dict[str, list[str]]) -> dict:
     ).fetchall()
     has_more = len(rows) > limit
     rows = rows[:limit]
+    participants_by_conversation = _participants_for_conversations(conn, (row["id"] for row in rows))
     conversations = []
     for row in rows:
-        item = _row_dict(row)
         direct_search_match = bool(row["search_name_rank"]) if search_terms else False
-        item.pop("search_name_rank", None)
-        use_scheduled = bool(row["scheduled_id"]) and (
-            not row["last_occurred_at"] or row["scheduled_for"] >= row["last_occurred_at"]
+        item = _decorate_conversation_summary(
+            row,
+            participants_by_conversation.get(row["id"], []),
         )
-        if use_scheduled:
-            scheduled_to_numbers = from_json(row["scheduled_to_numbers"], [])
-            scheduled_media_urls = from_json(row["scheduled_media_urls"], [])
-            scheduled_failed = row["scheduled_status"] == "failed"
-            item["last_text"] = row["scheduled_text"]
-            item["last_message_type"] = "MMS" if scheduled_media_urls or len(scheduled_to_numbers) > 1 else "SMS"
-            item["last_direction"] = "outbound"
-            item["last_status"] = "failed" if scheduled_failed else "scheduled"
-            item["last_occurred_at"] = row["scheduled_for"]
-            item["last_raw_json"] = None
-        item["title"] = row["title"] or _conversation_title(conn, row["id"])
-        item["participants"] = _participants(conn, row["id"])
-        item["sort_at"] = row["list_sort_at"] or row["last_message_at"] or row["updated_at"]
-        item["needs_attention"] = _needs_attention(
-            item.get("last_direction"),
-            item.get("last_occurred_at"),
-            row["dealt_with_at"],
-            row["manual_unread_at"],
-        )
-        item["last_status_label"] = _status_label(item.get("last_status"))
-        item["last_status_kind"] = _status_kind(item.get("last_status"))
-        if use_scheduled:
-            item["last_status_detail"] = row["scheduled_failure"] if row["scheduled_status"] == "failed" else f"Scheduled for {row['scheduled_for']}"
-        else:
-            item["last_status_detail"] = _message_status_detail(row["last_status"], row["last_raw_json"])
         if search_terms and not direct_search_match:
             item["search_match"] = _conversation_message_search_match(conn, row["id"], search_terms)
         conversations.append(item)
     return {"conversations": conversations, "has_more": has_more}
+
+
+def list_conversations(query: dict[str, list[str]]) -> dict:
+    with closing(connect()) as conn:
+        return _list_conversations(conn, query)
 
 
 def _notification_key(row) -> str:
@@ -1022,9 +894,7 @@ def _parse_notification_key(value: str) -> tuple[str, int]:
     return occurred_at, int(message_id)
 
 
-def mobile_notifications(query: dict[str, list[str]]) -> dict:
-    conn = connect()
-    init_db(conn)
+def _mobile_notifications(conn, query: dict[str, list[str]]) -> dict:
     enabled = get_bool("notifications.native_enabled", config.NATIVE_NOTIFICATIONS_ENABLED)
     interval_minutes = max(get_int("notifications.native_interval_minutes", config.NATIVE_NOTIFICATION_INTERVAL_MINUTES), 15)
     limit = min(int((query.get("limit") or ["20"])[0]), 50)
@@ -1101,6 +971,11 @@ def mobile_notifications(query: dict[str, list[str]]) -> dict:
         "latest_key": _notification_key(latest),
         "notifications": notifications,
     }
+
+
+def mobile_notifications(query: dict[str, list[str]]) -> dict:
+    with closing(connect()) as conn:
+        return _mobile_notifications(conn, query)
 
 
 def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
@@ -1195,17 +1070,14 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
 def refresh_state(query: dict[str, list[str]]) -> dict:
     conversation_id_raw = (query.get("conversation_id") or ["0"])[0]
     conversation_id = int(conversation_id_raw) if conversation_id_raw.isdigit() else None
-    conn = connect()
-    init_db(conn)
-    return {
-        "server_time": now_est(),
-        "tokens": _refresh_tokens(conn, conversation_id),
-    }
+    with closing(connect()) as conn:
+        return {
+            "server_time": now_est(),
+            "tokens": _refresh_tokens(conn, conversation_id),
+        }
 
 
-def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
-    conn = connect()
-    init_db(conn)
+def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
     query = query or {}
     limit = min(int((query.get("limit") or [str(MESSAGE_PAGE_SIZE)])[0]), 250)
     before = (query.get("before") or [""])[0]
@@ -1228,16 +1100,29 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
         (*params, limit),
     ).fetchall()
     rows = list(reversed(rows_desc))
+    contact_names = _contact_names(
+        conn,
+        (row["from_number"] for row in rows if not row["identity_label"]),
+    )
+    attachments_by_message: dict[int, list[dict]] = {row["id"]: [] for row in rows}
+    message_ids = list(attachments_by_message)
+    if message_ids:
+        placeholders = ",".join("?" for _ in message_ids)
+        attachment_rows = conn.execute(
+            f"SELECT * FROM attachments WHERE message_id IN ({placeholders}) ORDER BY message_id, id",
+            message_ids,
+        ).fetchall()
+        for attachment_row in attachment_rows:
+            attachments_by_message[attachment_row["message_id"]].append(_attachment_dict(attachment_row))
     messages = []
     for row in rows:
         message = _row_dict(row)
         message["to_numbers"] = from_json(row["to_numbers"], [])
         message["cc_numbers"] = from_json(row["cc_numbers"], [])
-        message["from_display"] = row["identity_label"] or _contact_name(conn, row["from_number"])
-        message["attachments"] = [
-            _attachment_dict(conn, a)
-            for a in conn.execute("SELECT * FROM attachments WHERE message_id = ?", (row["id"],)).fetchall()
-        ]
+        message["from_display"] = (
+            row["identity_label"] or contact_names.get(row["from_number"]) or display_phone(row["from_number"])
+        )
+        message["attachments"] = attachments_by_message[row["id"]]
         messages.append(_decorate_message_status(message))
     if not before and not before_id:
         messages.extend(_scheduled_messages_for_conversation(conn, conversation_id))
@@ -1275,8 +1160,9 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
         conversation.get("dealt_with_at"),
         conversation.get("manual_unread_at"),
     )
-    conversation["title"] = _conversation_title(conn, conversation_id)
-    conversation["participants"] = _participants(conn, conversation_id)
+    participants = _participants(conn, conversation_id)
+    conversation["title"] = _conversation_title_from_participants(participants)
+    conversation["participants"] = participants
     return {
         "conversation": conversation,
         "messages": messages,
@@ -1285,9 +1171,12 @@ def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None
     }
 
 
-def bootstrap() -> dict:
-    conn = connect()
-    init_db(conn)
+def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
+    with closing(connect()) as conn:
+        return _get_messages(conn, conversation_id, query)
+
+
+def _bootstrap(conn) -> dict:
     server_time = now_est()
     identities = [
         _identity_dict(row)
@@ -1347,6 +1236,11 @@ def bootstrap() -> dict:
         "details_collapsed_default": get_bool("behavior.details_collapsed_default", True),
         "default_identity": default_identity,
     }
+
+
+def bootstrap() -> dict:
+    with closing(connect()) as conn:
+        return _bootstrap(conn)
 
 
 STATS_PERIOD_KEYS = {
@@ -1574,10 +1468,8 @@ def _stats_timeline(conn, period: dict[str, str | None], where_sql: str, params:
     return {"bucket": bucket, "points": points}
 
 
-def message_stats(query: dict[str, list[str]] | None = None) -> dict:
+def _message_stats(conn, query: dict[str, list[str]] | None = None) -> dict:
     period = _stats_period(query)
-    conn = connect()
-    init_db(conn)
     where_sql, params = _stats_message_where(period)
     where_m_sql, params_m = _stats_message_where(period, "m")
     has_period_filter = bool(period.get("start") or period.get("end"))
@@ -1750,9 +1642,12 @@ def message_stats(query: dict[str, list[str]] | None = None) -> dict:
     }
 
 
-def search_contacts(query: dict[str, list[str]]) -> dict:
-    conn = connect()
-    init_db(conn)
+def message_stats(query: dict[str, list[str]] | None = None) -> dict:
+    with closing(connect()) as conn:
+        return _message_stats(conn, query)
+
+
+def _search_contacts(conn, query: dict[str, list[str]]) -> dict:
     terms = _search_terms((query.get("q") or [""])[0])
     if not terms:
         rows = conn.execute(
@@ -1810,6 +1705,11 @@ def search_contacts(query: dict[str, list[str]]) -> dict:
     }
 
 
+def search_contacts(query: dict[str, list[str]]) -> dict:
+    with closing(connect()) as conn:
+        return _search_contacts(conn, query)
+
+
 def match_conversation(query: dict[str, list[str]]) -> dict:
     raw_recipients: list[str] = []
     for value in (query.get("recipient") or []) + (query.get("recipients") or []):
@@ -1818,9 +1718,8 @@ def match_conversation(query: dict[str, list[str]]) -> dict:
     if not recipients:
         return {"conversation": None}
     key = conversation_key(recipients)
-    conn = connect()
-    init_db(conn)
-    row = conn.execute("SELECT id FROM conversations WHERE conversation_key = ?", (key,)).fetchone()
+    with closing(connect()) as conn:
+        row = conn.execute("SELECT id FROM conversations WHERE conversation_key = ?", (key,)).fetchone()
     if not row:
         return {"conversation": None}
     return {"conversation_id": int(row["id"]), "conversation": get_messages(int(row["id"]))["conversation"]}
@@ -1834,6 +1733,77 @@ def save_contact_name(payload: dict) -> dict:
     if conversation_id:
         result["conversation"] = get_messages(int(conversation_id))["conversation"]
     return result
+
+
+def create_identity(payload: dict) -> dict:
+    raw_phone = str(payload.get("phone_number") or payload.get("phone") or "").strip()
+    phone_number = normalize_phone(raw_phone)
+    digits = re.sub(r"\D", "", phone_number)
+    if not phone_number or not phone_number.startswith("+") or not 7 <= len(digits) <= 15:
+        raise ValueError("Enter a valid phone number in E.164 format, such as +15551234567.")
+
+    label = str(payload.get("label") or "").strip() or display_phone(phone_number) or phone_number
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider and provider not in {"telnyx", "twilio"}:
+        raise ValueError("Provider must be Telnyx or Twilio.")
+
+    provider_mapping: dict[str, str] | None = None
+    if provider:
+        raw_mapping = get_value(
+            "messaging.provider_by_number",
+            json.dumps(config.MESSAGING_PROVIDER_BY_NUMBER, separators=(",", ":")),
+        )
+        try:
+            parsed_mapping = json.loads(raw_mapping or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("Provider by sender number must contain valid JSON before adding a number.") from exc
+        if not isinstance(parsed_mapping, dict):
+            raise ValueError("Provider by sender number must be a JSON object before adding a number.")
+        provider_mapping = {
+            normalize_phone(str(number)): str(mapped_provider).strip().lower()
+            for number, mapped_provider in parsed_mapping.items()
+            if normalize_phone(str(number))
+        }
+        provider_mapping[phone_number] = provider
+
+    conn = connect()
+    init_db(conn)
+    if conn.execute("SELECT 1 FROM identities WHERE phone_number = ?", (phone_number,)).fetchone():
+        conn.close()
+        raise ValueError("That sender number already exists.")
+
+    timestamp = now_est()
+    identity_count = int(conn.execute("SELECT COUNT(*) FROM identities").fetchone()[0])
+    color = config.IDENTITY_COLORS[identity_count % len(config.IDENTITY_COLORS)]
+    cursor = conn.execute(
+        """
+        INSERT INTO identities(phone_number, label, color, is_self, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, 1, 1, ?, ?)
+        """,
+        (phone_number, label, color, timestamp, timestamp),
+    )
+
+    if provider_mapping is not None:
+        conn.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            ("messaging.provider_by_number", json.dumps(provider_mapping, separators=(",", ":")), timestamp),
+        )
+
+    conn.commit()
+    if provider_mapping is not None:
+        invalidate_settings_cache()
+    identity = _identity_with_autoreply(conn, int(cursor.lastrowid))
+    default_identity = _default_identity_phone(
+        [_row_dict(row) for row in conn.execute("SELECT phone_number, is_active FROM identities ORDER BY id").fetchall()]
+    )
+    identity["is_default"] = identity.get("phone_number") == default_identity
+    conn.close()
+    identity["provider"] = provider_for_number(phone_number)
+    return {"identity": identity, "default_identity": default_identity}
 
 
 def update_identity(identity_id: int, payload: dict) -> dict:
@@ -1920,11 +1890,14 @@ def update_identity(identity_id: int, payload: dict) -> dict:
         ),
     )
     conn.commit()
+    if make_default and active:
+        invalidate_settings_cache()
     identity = _identity_with_autoreply(conn, identity_id)
     default_identity = _default_identity_phone(
         [_row_dict(row) for row in conn.execute("SELECT phone_number, is_active FROM identities ORDER BY id").fetchall()]
     )
     identity["is_default"] = identity.get("phone_number") == default_identity
+    conn.close()
     return {"identity": identity}
 
 
@@ -1947,25 +1920,85 @@ def set_conversation_archived(conversation_id: int, archived: bool) -> dict:
     return {"conversation": _row_dict(row)}
 
 
-def set_conversation_dealt(conversation_id: int, dealt: bool = True) -> dict:
-    conn = connect()
-    init_db(conn)
-    row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
-    if not row:
-        raise ValueError("Conversation not found.")
-    timestamp = now_est()
-    dealt_with_at = (row["last_message_at"] or timestamp) if dealt else None
-    manual_unread_at = None if dealt else (row["last_message_at"] or timestamp)
-    conn.execute(
-        """
-        UPDATE conversations
-        SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
-        WHERE id = ?
+def _conversation_summary(conn, conversation_id: int) -> dict:
+    row = conn.execute(
+        f"""
+        SELECT c.*,
+          m.text AS last_text,
+          m.id AS last_message_id,
+          m.message_type AS last_message_type,
+          m.direction AS last_direction,
+          m.status AS last_status,
+          m.occurred_at AS last_occurred_at,
+          m.raw_json AS last_raw_json,
+          sm.id AS scheduled_id,
+          sm.text AS scheduled_text,
+          sm.to_numbers AS scheduled_to_numbers,
+          sm.media_urls AS scheduled_media_urls,
+          sm.scheduled_for AS scheduled_for,
+          sm.status AS scheduled_status,
+          sm.failure AS scheduled_failure,
+          {CONVERSATION_SORT_EXPR} AS list_sort_at
+        FROM conversations c
+        LEFT JOIN messages m ON m.id = (
+          SELECT id FROM messages
+          WHERE conversation_id = c.id
+            AND COALESCE(source, '') != 'autoreply'
+            AND (
+              c.last_message_at IS NULL
+              OR occurred_at <= c.last_message_at
+              OR NOT EXISTS (
+                SELECT 1 FROM messages newer_bound
+                WHERE newer_bound.conversation_id = c.id
+                  AND newer_bound.occurred_at <= c.last_message_at
+              )
+            )
+          ORDER BY occurred_at DESC, id DESC
+          LIMIT 1
+        )
+        LEFT JOIN scheduled_messages sm ON sm.id = (
+          SELECT id FROM scheduled_messages
+          WHERE conversation_id = c.id
+            AND status IN ('queued', 'sending', 'failed')
+          ORDER BY scheduled_for DESC, id DESC
+          LIMIT 1
+        )
+        WHERE c.id = ?
         """,
-        (dealt_with_at, manual_unread_at, timestamp, conversation_id),
-    )
-    conn.commit()
-    return {"conversation": get_messages(conversation_id)["conversation"]}
+        (conversation_id,),
+    ).fetchone()
+    if not row:
+        return {}
+    return _decorate_conversation_summary(row, _participants(conn, conversation_id))
+
+
+def set_conversation_dealt(conversation_id: int, dealt: bool = True) -> dict:
+    with closing(connect()) as conn:
+        row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        if not row:
+            raise ValueError("Conversation not found.")
+        timestamp = now_est()
+        dealt_with_at = (row["last_message_at"] or timestamp) if dealt else None
+        manual_unread_at = None if dealt else (row["last_message_at"] or timestamp)
+        conn.execute(
+            """
+            UPDATE conversations
+            SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dealt_with_at, manual_unread_at, timestamp, conversation_id),
+        )
+        conn.commit()
+        conversation = _conversation_summary(conn, conversation_id)
+        unread_count = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM conversations c
+            WHERE COALESCE(c.is_archived, 0) = 0
+              AND {UNREAD_CONVERSATION_CLAUSE}
+            """
+        ).fetchone()[0]
+        return {"conversation": conversation, "unread_count": int(unread_count)}
 
 
 def bulk_update_conversations(payload: dict) -> dict:
@@ -2038,28 +2071,27 @@ def create_conversation(payload: dict) -> dict:
 
 
 def _mark_reply_message_read(message_id: int) -> dict | None:
-    conn = connect()
-    init_db(conn)
-    row = conn.execute(
-        "SELECT conversation_id, occurred_at FROM messages WHERE id = ?",
-        (message_id,),
-    ).fetchone()
-    if not row:
-        return None
-    conversation_id = int(row["conversation_id"])
-    marker = row["occurred_at"] or now_est()
-    conn.execute(
-        """
-        UPDATE conversations
-        SET dealt_with_at = ?,
-            manual_unread_at = NULL,
-            updated_at = ?
-        WHERE id = ?
-        """,
-        (marker, now_est(), conversation_id),
-    )
-    conn.commit()
-    return get_messages(conversation_id)["conversation"]
+    with closing(connect()) as conn:
+        row = conn.execute(
+            "SELECT conversation_id, occurred_at FROM messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
+        if not row:
+            return None
+        conversation_id = int(row["conversation_id"])
+        marker = row["occurred_at"] or now_est()
+        conn.execute(
+            """
+            UPDATE conversations
+            SET dealt_with_at = ?,
+                manual_unread_at = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (marker, now_est(), conversation_id),
+        )
+        conn.commit()
+        return _conversation_summary(conn, conversation_id)
 
 
 def send_api_message(payload: dict) -> dict:
@@ -2719,12 +2751,70 @@ def claim_backup_code(encoded: str) -> bool:
 
 class TextingHandler(BaseHTTPRequestHandler):
     server_version = "Switchboard/0.1"
+    protocol_version = "HTTP/1.1"
+    connection_timeout_seconds = 30
+
+    def setup(self) -> None:
+        self.request.settimeout(self.connection_timeout_seconds)
+        super().setup()
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)
 
     def log_upload(self, fmt: str, *args) -> None:
         self.log_message("upload " + fmt, *args)
+
+    def _begin_request(self, *, allow_body: bool) -> bool:
+        """Validate request framing before an HTTP/1.1 connection is reused."""
+
+        self._request_started_at = time.perf_counter()
+        self._request_body_length = 0
+        self._request_body_bytes_read = 0
+        self._request_body_framing_invalid = False
+
+        transfer_encoding = (self.headers.get("Transfer-Encoding") or "").strip()
+        content_lengths = self.headers.get_all("Content-Length", [])
+        error = ""
+        error_status = HTTPStatus.BAD_REQUEST
+        if transfer_encoding:
+            error = "Transfer-Encoding request bodies are not supported."
+        elif len(content_lengths) > 1:
+            error = "Multiple Content-Length headers are not allowed."
+        elif content_lengths:
+            raw_content_length = str(content_lengths[0]).strip()
+            if not re.fullmatch(r"[0-9]+", raw_content_length):
+                error = "Invalid Content-Length header."
+            else:
+                self._request_body_length = int(raw_content_length)
+        if not error and not allow_body and self._request_body_length:
+            error = "This request method does not accept a body."
+        if not error and allow_body:
+            path = urlparse(self.path).path
+            body_limit = (
+                _upload_max_bytes() + UPLOAD_REQUEST_OVERHEAD
+                if path == "/api/uploads"
+                else DEFAULT_REQUEST_BODY_LIMIT
+            )
+            if self._request_body_length > body_limit:
+                error = f"Request body exceeds the {body_limit // (1024 * 1024)} MB limit."
+                error_status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        if not error:
+            return True
+
+        self._request_body_framing_invalid = True
+        self.close_connection = True
+        self._send_json(
+            {"error": error},
+            error_status,
+            headers={"Connection": "close"},
+        )
+        return False
+
+    def _request_has_unread_body(self) -> bool:
+        return bool(
+            getattr(self, "_request_body_framing_invalid", False)
+            or getattr(self, "_request_body_bytes_read", 0) < getattr(self, "_request_body_length", 0)
+        )
 
     def _send_headers(
         self,
@@ -2734,11 +2824,18 @@ class TextingHandler(BaseHTTPRequestHandler):
         headers: dict[str, str] | None = None,
         cache_control: str | None = None,
     ) -> None:
+        response_headers = dict(headers or {})
+        if self._request_has_unread_body():
+            self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
-        self.send_header("X-Frame-Options", "DENY")
+        frame_options = next(
+            (value for key, value in response_headers.items() if key.lower() == "x-frame-options"),
+            "DENY",
+        )
+        self.send_header("X-Frame-Options", frame_options)
         no_store_types = (
             "application/json",
             "text/html",
@@ -2751,24 +2848,39 @@ class TextingHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache_control)
         if length is not None:
             self.send_header("Content-Length", str(length))
-        for key, value in (headers or {}).items():
+        if "Server-Timing" not in response_headers and getattr(self, "_request_started_at", None) is not None:
+            duration_ms = max(0.0, (time.perf_counter() - self._request_started_at) * 1000)
+            self.send_header("Server-Timing", f"app;dur={duration_ms:.2f}")
+        if self.close_connection and not any(key.lower() == "connection" for key in response_headers):
+            self.send_header("Connection", "close")
+        for key, value in response_headers.items():
+            if key.lower() == "x-frame-options":
+                continue
             self.send_header(key, value)
         self.end_headers()
 
     def _send_json(self, payload: dict, status: int = 200, headers: dict[str, str] | None = None) -> None:
-        body = json.dumps(payload, default=_json_default).encode("utf-8")
-        self._send_headers(status, "application/json; charset=utf-8", len(body), headers=headers, cache_control="no-store")
-        self.wfile.write(body)
+        body = json.dumps(
+            payload,
+            default=_json_default,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self._send_bytes(
+            body,
+            "application/json; charset=utf-8",
+            status,
+            headers=headers,
+            cache_control="no-store",
+        )
 
     def _send_xml(self, body: str, status: int = 200) -> None:
         data = body.encode("utf-8")
-        self._send_headers(status, "text/xml; charset=utf-8", len(data))
-        self.wfile.write(data)
+        self._send_bytes(data, "text/xml; charset=utf-8", status)
 
     def _send_html(self, body: str, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = body.encode("utf-8")
-        self._send_headers(status, "text/html; charset=utf-8", len(data), headers=headers, cache_control="no-store")
-        self.wfile.write(data)
+        self._send_bytes(data, "text/html; charset=utf-8", status, headers=headers, cache_control="no-store")
 
     def _send_bytes(
         self,
@@ -2778,21 +2890,33 @@ class TextingHandler(BaseHTTPRequestHandler):
         headers: dict[str, str] | None = None,
         cache_control: str | None = None,
     ) -> None:
-        self._send_headers(status, content_type, len(body), headers=headers, cache_control=cache_control)
-        self.wfile.write(body)
+        response_headers = dict(headers or {})
+        encoded_body, compressed = maybe_gzip(body, content_type, self.headers.get("Accept-Encoding"))
+        if compressed:
+            response_headers["Content-Encoding"] = "gzip"
+            vary = [part.strip() for part in response_headers.get("Vary", "").split(",") if part.strip()]
+            if "Accept-Encoding" not in vary:
+                vary.append("Accept-Encoding")
+            response_headers["Vary"] = ", ".join(vary)
+        self._send_headers(status, content_type, len(encoded_body), headers=response_headers, cache_control=cache_control)
+        self.wfile.write(encoded_body)
 
     def _send_redirect(self, location: str, status: int = HTTPStatus.FOUND, headers: dict[str, str] | None = None) -> None:
         merged = {"Location": location, **(headers or {})}
         self._send_headers(status, "text/plain; charset=utf-8", 0, headers=merged, cache_control="no-store")
 
     def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
+        raw = self._read_raw() or b"{}"
         return json.loads(raw.decode("utf-8") or "{}")
 
     def _read_raw(self) -> bytes:
-        length = int(self.headers.get("Content-Length", "0"))
-        return self.rfile.read(length) if length else b""
+        length = getattr(self, "_request_body_length", 0)
+        remaining = max(0, length - getattr(self, "_request_body_bytes_read", 0))
+        raw = self.rfile.read(remaining) if remaining else b""
+        self._request_body_bytes_read = getattr(self, "_request_body_bytes_read", 0) + len(raw)
+        if self._request_body_bytes_read < length:
+            self.close_connection = True
+        return raw
 
     def _request_url(self) -> str:
         proto = (self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
@@ -2876,17 +3000,94 @@ class TextingHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _serve_file(self, path: Path) -> None:
+    def _serve_file(
+        self,
+        path: Path,
+        *,
+        cache_control: str | None = None,
+        allow_ranges: bool = False,
+    ) -> None:
         if not path.exists() or not path.is_file():
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        data = path.read_bytes()
-        self._send_headers(200, content_type, len(data))
-        self.wfile.write(data)
+        stat = path.stat()
+        compressible_file = content_type.startswith(
+            ("application/javascript", "application/json", "image/svg+xml", "text/")
+        )
+        etag = file_etag(stat)
+        if compressible_file:
+            etag = f"W/{etag}"
+        headers = {"ETag": etag}
+        if content_type == "application/pdf":
+            headers["X-Frame-Options"] = "SAMEORIGIN"
+            headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+        if compressible_file:
+            headers["Vary"] = "Accept-Encoding"
+        if_none_match = {part.strip() for part in self.headers.get("If-None-Match", "").split(",")}
+        if "*" in if_none_match or etag in if_none_match:
+            self._send_headers(
+                HTTPStatus.NOT_MODIFIED,
+                content_type,
+                None,
+                headers=headers,
+                cache_control=cache_control,
+            )
+            return
+
+        byte_range = None
+        if allow_ranges:
+            headers["Accept-Ranges"] = "bytes"
+            range_header = self.headers.get("Range")
+            if_range = self.headers.get("If-Range")
+            if if_range and (etag.startswith("W/") or if_range.strip() != etag):
+                range_header = None
+            try:
+                byte_range = parse_byte_range(range_header, stat.st_size)
+            except ValueError:
+                headers["Content-Range"] = f"bytes */{stat.st_size}"
+                self._send_headers(
+                    HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
+                    content_type,
+                    0,
+                    headers=headers,
+                    cache_control=cache_control,
+                )
+                return
+
+        if byte_range is None and compressible_file:
+            self._send_bytes(
+                path.read_bytes(),
+                content_type,
+                headers=headers,
+                cache_control=cache_control,
+            )
+            return
+
+        start, end = byte_range or (0, stat.st_size - 1)
+        length = max(0, end - start + 1)
+        status = HTTPStatus.PARTIAL_CONTENT if byte_range is not None else HTTPStatus.OK
+        if byte_range is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{stat.st_size}"
+        self._send_headers(status, content_type, length, headers=headers, cache_control=cache_control)
+        if not length:
+            return
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True
+                    return
+                remaining -= len(chunk)
 
     def _serve_login(self) -> None:
-        self._serve_file(STATIC_DIR / "login.html")
+        self._serve_file(STATIC_DIR / "login.html", cache_control="no-store")
 
     def _read_login_payload(self) -> tuple[str, str, str, str, bool]:
         content_type = (self.headers.get("Content-Type") or "").lower()
@@ -2999,9 +3200,16 @@ class TextingHandler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:
+        if not self._begin_request(allow_body=False):
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        versioned_static_cache = (
+            "public, max-age=31536000, immutable"
+            if query.get("v")
+            else "public, max-age=300, must-revalidate"
+        )
         try:
             if not self._require_auth("GET", path):
                 return
@@ -3039,28 +3247,41 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_xml(voice_xml(provider, params, self._request_url()))
             elif path.startswith("/media/"):
                 name = Path(unquote(path.removeprefix("/media/"))).name
-                self._serve_file(config.MEDIA_DIR / name)
+                self._serve_file(
+                    config.MEDIA_DIR / name,
+                    cache_control="private, max-age=3600",
+                    allow_ranges=True,
+                )
             elif path.startswith("/uploads/"):
                 name = Path(unquote(path.removeprefix("/uploads/"))).name
-                self._serve_file(_configured_upload_dir() / name)
+                self._serve_file(
+                    _configured_upload_dir() / name,
+                    cache_control="public, max-age=3600",
+                    allow_ranges=True,
+                )
             elif path in {"/favicon.ico", "/favicon.svg", "/apple-touch-icon.png"}:
-                self._serve_file(STATIC_DIR / path.removeprefix("/"))
+                self._serve_file(
+                    STATIC_DIR / path.removeprefix("/"),
+                    cache_control=versioned_static_cache,
+                )
             elif path.startswith("/static/"):
                 rel = Path(unquote(path.removeprefix("/static/")))
-                self._serve_file(STATIC_DIR / rel.name)
+                self._serve_file(STATIC_DIR / rel.name, cache_control=versioned_static_cache)
             elif path == "/login":
                 if self._current_user() and auth.auth_configured():
                     self._send_redirect("/")
                 else:
                     self._serve_login()
             elif path in {"/", "/index.html"}:
-                self._serve_file(STATIC_DIR / "index.html")
+                self._serve_file(STATIC_DIR / "index.html", cache_control="no-store")
             else:
-                self._serve_file(STATIC_DIR / "index.html")
+                self._serve_file(STATIC_DIR / "index.html", cache_control="no-store")
         except Exception as exc:
             self._send_json({"error": str(exc)}, 500)
 
     def do_POST(self) -> None:
+        if not self._begin_request(allow_body=True):
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         try:
@@ -3113,6 +3334,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json({"synced": import_phone_contacts(self._read_json())})
             elif path == "/api/contacts/name":
                 self._send_json(save_contact_name(self._read_json()))
+            elif path == "/api/identities":
+                self._send_json(create_identity(self._read_json()), HTTPStatus.CREATED)
             elif path == "/api/settings":
                 self._send_json(update_values(self._read_json()))
             elif path == "/api/uploads":
@@ -3200,6 +3423,8 @@ class TextingHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, 500)
 
     def do_PUT(self) -> None:
+        if not self._begin_request(allow_body=True):
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         try:
@@ -3223,6 +3448,7 @@ def run(host: str | None = None, port: int | None = None) -> None:
     conn = connect()
     init_db(conn)
     conn.close()
+    start_attachment_worker()
     load_app_auth_config()
     start_autosync()
     start_scheduled_sender()
