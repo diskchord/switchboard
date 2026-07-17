@@ -1124,8 +1124,10 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
         )
         message["attachments"] = attachments_by_message[row["id"]]
         messages.append(_decorate_message_status(message))
+    scheduled_messages = []
     if not before and not before_id:
-        messages.extend(_scheduled_messages_for_conversation(conn, conversation_id))
+        scheduled_messages = _scheduled_messages_for_conversation(conn, conversation_id)
+        messages.extend(scheduled_messages)
         messages.sort(key=lambda item: (item.get("occurred_at") or "", str(item.get("id") or "")))
     older_count = 0
     if rows:
@@ -1154,6 +1156,17 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
     if last_message:
         conversation["last_direction"] = last_message["direction"]
         conversation["last_occurred_at"] = last_message["occurred_at"]
+    if scheduled_messages:
+        latest_scheduled = max(
+            scheduled_messages,
+            key=lambda item: (item.get("occurred_at") or "", str(item.get("id") or "")),
+        )
+        if (
+            not conversation.get("last_occurred_at")
+            or latest_scheduled["occurred_at"] >= conversation["last_occurred_at"]
+        ):
+            conversation["last_direction"] = "outbound"
+            conversation["last_occurred_at"] = latest_scheduled["occurred_at"]
     conversation["needs_attention"] = _needs_attention(
         conversation.get("last_direction"),
         conversation.get("last_occurred_at"),

@@ -1006,12 +1006,14 @@ select:focus {
   margin-top: 3px;
 }
 
-.conversation-draft-preview {
+.conversation-draft-preview,
+.conversation-queued-preview {
   font-style: italic;
   font-weight: 400;
 }
 
-.conversation-item.new-message .conversation-draft-preview {
+.conversation-item.new-message .conversation-draft-preview,
+.conversation-item.new-message .conversation-queued-preview {
   font-weight: 400;
 }
 

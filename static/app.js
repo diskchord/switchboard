@@ -4153,8 +4153,12 @@ function renderConversations() {
       const searchMatch = conversation.search_match?.type === "message" ? conversation.search_match : null;
       const draftPreview = composerDraftPreviewText(conversationDraftSnapshot(conversation));
       const showsDraftPreview = Boolean(draftPreview) && !searchMatch && !(isActiveConversation && composerHasFocusWithin());
+      const showsQueuedPreview = !showsDraftPreview && !searchMatch && conversation.last_status === "scheduled";
       const failedClass = conversation.last_status_kind === "failed" && !showsDraftPreview ? "failed-message" : "";
-      const previewPrefix = !showsDraftPreview && conversation.last_direction === "outbound" ? t("conversation.you") : "";
+      const previewPrefix =
+        !showsDraftPreview && (showsQueuedPreview || conversation.last_direction === "outbound")
+          ? t("conversation.you")
+          : "";
       const lastStatusLabel = localizedStatusLabel(conversation.last_status, conversation.last_status_label);
       const failedPreview =
         conversation.last_status_kind === "failed"
@@ -4171,7 +4175,9 @@ function renderConversations() {
           : escapeHtml(previewPrefix + preview);
       const previewClass = searchMatch
         ? "conversation-preview conversation-search-preview"
-        : `conversation-preview${showsDraftPreview ? " conversation-draft-preview" : ""}`;
+        : `conversation-preview${showsDraftPreview ? " conversation-draft-preview" : ""}${
+            showsQueuedPreview ? " conversation-queued-preview" : ""
+          }`;
       return `
         <button class="conversation-item ${active} ${openingClass} ${selectedClass} ${selectingClass} ${newMessageClass} ${failedClass}" data-id="${conversation.id}" aria-pressed="${selected ? "true" : "false"}" aria-busy="${isOpeningConversation ? "true" : "false"}">
           <span class="avatar conversation-selector" role="checkbox" aria-checked="${selected ? "true" : "false"}" title="${escapeHtml(t("selection.actions"))}">
