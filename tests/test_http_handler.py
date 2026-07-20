@@ -6,7 +6,9 @@ import socket
 import tempfile
 import threading
 import unittest
+import json
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import unquote, urlparse
 
 from texting_app.server import TextingHandler
@@ -34,6 +36,11 @@ class _FixtureHandler(TextingHandler):
             self._send_json({"received": self._read_json()})
             return
         self._send_json({"error": "Not found"}, 404)
+
+
+class _ApiHandler(TextingHandler):
+    def log_message(self, _format: str, *_args) -> None:
+        pass
 
 
 class HttpHandlerTests(unittest.TestCase):
@@ -213,6 +220,67 @@ class HttpHandlerTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(b"switchboard", body)
         self.assertIs(self.connection.sock, first_socket)
+
+
+class ProgrammaticApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.token_patch = patch("texting_app.server.config.API_TOKEN", "test-api-token")
+        self.token_patch.start()
+        self.receipt = {
+            "id": 42,
+            "conversation_id": 7,
+            "status": "queued",
+            "accepted": True,
+            "delivered": False,
+        }
+        self.send_patch = patch("texting_app.server.send_external_api_message", return_value=self.receipt)
+        self.get_patch = patch("texting_app.server.api_message_receipt", return_value=self.receipt)
+        self.send_mock = self.send_patch.start()
+        self.get_mock = self.get_patch.start()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _ApiHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.get_patch.stop()
+        self.send_patch.stop()
+        self.token_patch.stop()
+
+    def request(self, method: str, path: str, *, token: str = "", body: dict | None = None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        raw = json.dumps(body).encode() if body is not None else None
+        connection.request(method, path, body=raw, headers=headers)
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        connection.close()
+        return response, payload
+
+    def test_send_returns_receipt_and_status_url(self) -> None:
+        body = {"from_number": "+15551230001", "to_numbers": ["+15551230002"], "text": "hello"}
+        response, payload = self.request("POST", "/api/v1/messages", token="test-api-token", body=body)
+        self.assertEqual(response.status, 201)
+        self.assertEqual(payload["message"], self.receipt)
+        self.assertEqual(payload["status_url"], "/api/v1/messages/42")
+        self.send_mock.assert_called_once_with(body)
+
+    def test_status_returns_current_receipt(self) -> None:
+        response, payload = self.request("GET", "/api/v1/messages/42", token="test-api-token")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["message"], self.receipt)
+        self.get_mock.assert_called_once_with(42)
+
+    def test_api_rejects_missing_or_wrong_token(self) -> None:
+        for token in ("", "wrong-token"):
+            response, payload = self.request("GET", "/api/v1/messages/42", token=token)
+            self.assertEqual(response.status, 401)
+            self.assertIn("Bearer token", payload["error"])
+        self.get_mock.assert_not_called()
 
 
 if __name__ == "__main__":

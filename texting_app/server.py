@@ -2131,6 +2131,57 @@ def send_api_message(payload: dict) -> dict:
     return result
 
 
+def api_message_receipt(message_id: int) -> dict:
+    """Return the stable, non-UI representation of an outbound message."""
+    with closing(connect()) as conn:
+        init_db(conn)
+        row = conn.execute(
+            """
+            SELECT m.*, pmr.provider, pmr.provider_message_id
+            FROM messages m
+            LEFT JOIN provider_message_refs pmr ON pmr.message_id = m.id
+            WHERE m.id = ? AND m.direction = 'outbound'
+            ORDER BY pmr.provider
+            LIMIT 1
+            """,
+            (message_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("Message not found.")
+        status = str(row["status"] or "")
+        return {
+            "id": int(row["id"]),
+            "conversation_id": int(row["conversation_id"]),
+            "direction": row["direction"],
+            "from_number": row["from_number"],
+            "to_numbers": from_json(row["to_numbers"], []),
+            "text": row["text"],
+            "message_type": row["message_type"],
+            "status": status,
+            "status_label": _status_label(status),
+            "status_kind": _status_kind(status),
+            "accepted": status not in FAILURE_STATUSES,
+            "delivered": status == "delivered",
+            "provider": row["provider"] or row["source"],
+            "provider_message_id": row["provider_message_id"] or row["telnyx_id"],
+            "occurred_at": row["occurred_at"],
+            "updated_at": row["updated_at"],
+        }
+
+
+def send_external_api_message(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object.")
+    for field in ("to_numbers", "media_urls"):
+        if field in payload and not isinstance(payload[field], list):
+            raise ValueError(f"{field} must be a JSON array.")
+    result = send_api_message(payload)
+    message_id = result.get("message_id")
+    if not message_id:
+        raise MessagingError("The provider did not return a message confirmation.")
+    return api_message_receipt(int(message_id))
+
+
 def send_api_fax(payload: dict) -> dict:
     conversation_id = payload.get("conversation_id")
     media_url = str(payload.get("media_url") or "").strip()
@@ -2964,6 +3015,16 @@ class TextingHandler(BaseHTTPRequestHandler):
     def _current_user(self) -> str | None:
         return auth.verify_session_token(self._session_token())
 
+    def _has_api_token(self) -> bool:
+        authorization = (self.headers.get("Authorization") or "").strip()
+        scheme, separator, supplied = authorization.partition(" ")
+        return bool(
+            config.API_TOKEN
+            and separator
+            and scheme.lower() == "bearer"
+            and secrets.compare_digest(supplied.strip(), config.API_TOKEN)
+        )
+
     def _is_public_request(self, method: str, path: str) -> bool:
         if path.startswith("/static/") or path.startswith("/uploads/"):
             return True
@@ -2991,6 +3052,21 @@ class TextingHandler(BaseHTTPRequestHandler):
         self._send_redirect(f"/login?next={quote(next_path, safe='')}")
 
     def _require_auth(self, method: str, path: str) -> bool:
+        if path.startswith("/api/v1/"):
+            if not config.API_TOKEN:
+                self._send_json(
+                    {"error": "The programmatic API is not configured. Set TEXTING_API_TOKEN."},
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return False
+            if not self._has_api_token():
+                self._send_json(
+                    {"error": "A valid Bearer token is required."},
+                    HTTPStatus.UNAUTHORIZED,
+                    headers={"WWW-Authenticate": 'Bearer realm="Switchboard API"'},
+                )
+                return False
+            return True
         if auth.auth_disabled() or self._is_public_request(method, path):
             return True
         if not auth.auth_configured():
@@ -3246,6 +3322,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(upload_diagnostics(self._request_url()))
             elif path == "/api/conversations":
                 self._send_json(list_conversations(query))
+            elif match := re.fullmatch(r"/api/v1/messages/(\d+)", path):
+                self._send_json({"message": api_message_receipt(int(match.group(1)))})
             elif path == "/api/conversations/match":
                 self._send_json(match_conversation(query))
             elif match := re.fullmatch(r"/api/conversations/(\d+)/messages", path):
@@ -3287,8 +3365,12 @@ class TextingHandler(BaseHTTPRequestHandler):
                     self._serve_login()
             elif path in {"/", "/index.html"}:
                 self._serve_file(STATIC_DIR / "index.html", cache_control="no-store")
+            elif path.startswith("/api/"):
+                self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             else:
                 self._serve_file(STATIC_DIR / "index.html", cache_control="no-store")
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_json({"error": str(exc)}, 500)
 
@@ -3321,6 +3403,12 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(disable_two_factor(self._read_json()))
             elif path == "/api/messages":
                 self._send_json(send_api_message(self._read_json()))
+            elif path == "/api/v1/messages":
+                receipt = send_external_api_message(self._read_json())
+                self._send_json(
+                    {"message": receipt, "status_url": f"/api/v1/messages/{receipt['id']}"},
+                    HTTPStatus.CREATED,
+                )
             elif path == "/api/fax/send":
                 self._send_json(send_api_fax(self._read_json()))
             elif path == "/api/messages/schedule":
@@ -3412,6 +3500,7 @@ class TextingHandler(BaseHTTPRequestHandler):
             FastmailError,
             GoogleContactsError,
             ContactsError,
+            json.JSONDecodeError,
         ) as exc:
             if path == "/api/uploads":
                 diagnostics = upload_diagnostics(self._request_url())
@@ -3423,6 +3512,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                     exc,
                 )
             self._send_json({"error": str(exc)}, 400)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             if path == "/api/uploads":
                 diagnostics = upload_diagnostics(self._request_url())

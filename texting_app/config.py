@@ -131,6 +131,9 @@ ALLOW_UNSIGNED_PROVIDER_WEBHOOKS = _bool_env("TEXTING_ALLOW_UNSIGNED_PROVIDER_WE
 AUTH_TOTP_SECRET = os.environ.get("TEXTING_AUTH_TOTP_SECRET", "").replace(" ", "").strip().upper()
 AUTH_TOTP_ISSUER = os.environ.get("TEXTING_AUTH_TOTP_ISSUER", APP_NAME).strip() or APP_NAME
 AUTH_BACKUP_CODE_HASHES = _csv_env("TEXTING_AUTH_BACKUP_CODE_HASHES")
+# Separate credential for programs using the versioned messaging API. This is
+# intentionally not interchangeable with a browser session.
+API_TOKEN = os.environ.get("TEXTING_API_TOKEN", "").strip()
 
 EST_OFFSET = "-04:00"
 EST_TZ_NAME = "ET"
