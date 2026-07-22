@@ -70,7 +70,7 @@ public class MainActivity extends Activity {
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
     private static final int FILE_CHOOSER_REQUEST = 41;
     private static final int PHONE_CONTACTS_PERMISSION_REQUEST = 42;
-    private static final String APP_ASSET_VERSION = "39afb6c5";
+    private static final String APP_ASSET_VERSION = "9dc47f21";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
     private boolean promptedForServerAfterFailure = false;
@@ -143,7 +143,7 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setAllowContentAccess(true);
         settings.setAllowFileAccess(true);
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setMediaPlaybackRequiresUserGesture(false);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             settings.setAlgorithmicDarkeningAllowed(false);

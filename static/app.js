@@ -1842,7 +1842,7 @@ function resolveLanguage(value) {
 
 function applyStaticTranslations() {
   document.documentElement.lang = state.language;
-  document.title = t("app.title");
+  updateDocumentTitle();
   document.querySelectorAll("[data-i18n]").forEach((element) => {
     if (element.dataset.i18nDynamic === "true" || element === els.threadKind || element === els.threadTitle) return;
     element.textContent = t(element.dataset.i18n);
@@ -1858,6 +1858,12 @@ function applyStaticTranslations() {
   });
   if (els.newMessagesButton) updateNewMessagesAffordance();
   renderStatsPeriodOptions();
+}
+
+function updateDocumentTitle() {
+  const unreadCount = Number(state.bootstrap?.stats?.unread_conversations) || 0;
+  const prefix = unreadCount > 0 ? `(${unreadCount}) ` : "";
+  document.title = `${prefix}${t("app.title")}`;
 }
 
 function restoreThreadHeaderAfterStaticTranslations() {
@@ -3867,6 +3873,7 @@ function renderBootstrap({ forceIdentities = false } = {}) {
 function renderCategoryTabs() {
   const hiddenCount = state.bootstrap?.stats?.hidden_conversations ?? 0;
   const unreadCount = state.bootstrap?.stats?.unread_conversations ?? 0;
+  updateDocumentTitle();
   els.categoryTabs.forEach((tab) => {
     const active = tab.dataset.category === state.conversationCategory;
     tab.classList.toggle("active", active);
