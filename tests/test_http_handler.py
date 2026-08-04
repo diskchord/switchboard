@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import json
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import unquote, urlparse
@@ -281,6 +282,128 @@ class ProgrammaticApiTests(unittest.TestCase):
             self.assertEqual(response.status, 401)
             self.assertIn("Bearer token", payload["error"])
         self.get_mock.assert_not_called()
+
+
+class AssistantProgrammaticApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.stack = ExitStack()
+        self.stack.enter_context(patch("texting_app.server.config.API_TOKEN", "messaging-token"))
+        self.stack.enter_context(
+            patch("texting_app.server.config.ASSISTANT_API_TOKEN", "assistant-token")
+        )
+        self.list_mock = self.stack.enter_context(
+            patch(
+                "texting_app.server.list_assistant_unread_conversations",
+                return_value={"conversations": [], "has_more": False},
+            )
+        )
+        self.context_mock = self.stack.enter_context(
+            patch(
+                "texting_app.server.get_assistant_conversation_context",
+                return_value={"conversation": {"id": 7}, "messages": []},
+            )
+        )
+        self.unresolved_mock = self.stack.enter_context(
+            patch(
+                "texting_app.server.list_unresolved_action_reviews",
+                return_value={"action_reviews": []},
+            )
+        )
+        self.review_mock = self.stack.enter_context(
+            patch(
+                "texting_app.server.record_action_review",
+                return_value={"action_review": {"id": 9}},
+            )
+        )
+        self.send_mock = self.stack.enter_context(
+            patch("texting_app.server.send_external_api_message")
+        )
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _ApiHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.stack.close()
+
+    def request(self, method: str, path: str, *, token: str = "", body: dict | None = None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        raw = json.dumps(body).encode() if body is not None else None
+        connection.request(method, path, body=raw, headers=headers)
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        connection.close()
+        return response, payload
+
+    def test_assistant_routes_use_only_the_assistant_token(self) -> None:
+        response, payload = self.request(
+            "GET",
+            "/api/assistant/v1/unread-conversations?limit=10",
+            token="assistant-token",
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["conversations"], [])
+        self.list_mock.assert_called_once_with({"limit": ["10"]})
+
+        response, _ = self.request(
+            "GET",
+            "/api/assistant/v1/conversations/7/context?message_limit=5",
+            token="assistant-token",
+        )
+        self.assertEqual(response.status, 200)
+        self.context_mock.assert_called_once_with(7, {"message_limit": ["5"]})
+
+        for token in ("", "wrong-token", "messaging-token"):
+            response, payload = self.request(
+                "GET", "/api/assistant/v1/action-reviews/unresolved", token=token
+            )
+            self.assertEqual(response.status, 401)
+            self.assertIn("assistant Bearer token", payload["error"])
+        self.unresolved_mock.assert_not_called()
+
+    def test_review_route_is_the_only_assistant_write(self) -> None:
+        body = {
+            "conversation_id": 7,
+            "through_message_id": 42,
+            "state": "presented",
+        }
+        response, payload = self.request(
+            "POST",
+            "/api/assistant/v1/action-reviews",
+            token="assistant-token",
+            body=body,
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["action_review"]["id"], 9)
+        self.review_mock.assert_called_once_with(body)
+
+        response, _ = self.request(
+            "POST",
+            "/api/v1/messages",
+            token="assistant-token",
+            body={"text": "must not send"},
+        )
+        self.assertEqual(response.status, 401)
+        self.send_mock.assert_not_called()
+
+    def test_reusing_the_messaging_token_disables_both_programmatic_scopes(self) -> None:
+        with patch("texting_app.server.config.ASSISTANT_API_TOKEN", "messaging-token"):
+            response, payload = self.request(
+                "GET", "/api/assistant/v1/unread-conversations", token="messaging-token"
+            )
+            self.assertEqual(response.status, 503)
+            self.assertIn("must differ", payload["error"])
+
+            response, payload = self.request(
+                "POST", "/api/v1/messages", token="messaging-token", body={"text": "no"}
+            )
+            self.assertEqual(response.status, 503)
+            self.assertIn("must differ", payload["error"])
 
 
 if __name__ == "__main__":

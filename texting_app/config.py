@@ -134,6 +134,10 @@ AUTH_BACKUP_CODE_HASHES = _csv_env("TEXTING_AUTH_BACKUP_CODE_HASHES")
 # Separate credential for programs using the versioned messaging API. This is
 # intentionally not interchangeable with a browser session.
 API_TOKEN = os.environ.get("TEXTING_API_TOKEN", "").strip()
+# Read-mostly credential for the action-triage assistant API. It can read
+# unread thread context and maintain its own review state, but cannot call the
+# messaging API or authenticated browser routes.
+ASSISTANT_API_TOKEN = os.environ.get("SWITCHBOARD_ASSISTANT_API_TOKEN", "").strip()
 
 EST_OFFSET = "-04:00"
 EST_TZ_NAME = "ET"

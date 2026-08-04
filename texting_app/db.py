@@ -175,6 +175,19 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
   sent_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS assistant_action_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  through_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  first_presented_at TEXT NOT NULL,
+  last_presented_at TEXT NOT NULL,
+  review_state TEXT NOT NULL
+    CHECK(review_state IN ('presented', 'dismissed', 'deferred', 'resolved')),
+  defer_until TEXT,
+  analysis_version TEXT NOT NULL DEFAULT '1',
+  UNIQUE(conversation_id, through_message_id)
+);
+
 CREATE TABLE IF NOT EXISTS autoreply_rules (
   phone_number TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
@@ -237,6 +250,10 @@ CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_conversation_status_time
   ON scheduled_messages(conversation_id, status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_assistant_action_reviews_conversation_message
+  ON assistant_action_reviews(conversation_id, through_message_id DESC);
+CREATE INDEX IF NOT EXISTS idx_assistant_action_reviews_state_defer
+  ON assistant_action_reviews(review_state, defer_until);
 CREATE INDEX IF NOT EXISTS idx_attachment_ingestion_jobs_ready
   ON attachment_ingestion_jobs(status, available_at, id);
 CREATE INDEX IF NOT EXISTS idx_attachment_ingestion_jobs_locked
@@ -368,6 +385,34 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_scheduled_messages_conversation_status_time
         ON scheduled_messages(conversation_id, status, scheduled_for)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assistant_action_reviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          through_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          first_presented_at TEXT NOT NULL,
+          last_presented_at TEXT NOT NULL,
+          review_state TEXT NOT NULL
+            CHECK(review_state IN ('presented', 'dismissed', 'deferred', 'resolved')),
+          defer_until TEXT,
+          analysis_version TEXT NOT NULL DEFAULT '1',
+          UNIQUE(conversation_id, through_message_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assistant_action_reviews_conversation_message
+        ON assistant_action_reviews(conversation_id, through_message_id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assistant_action_reviews_state_defer
+        ON assistant_action_reviews(review_state, defer_until)
         """
     )
     conn.execute(

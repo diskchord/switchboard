@@ -1547,7 +1547,12 @@ select:focus {
   width: min(680px, 76%);
 }
 
-.message-row.audio-message .message-bubble {
+.message-row.attachment-message .message-stack {
+  width: min(680px, 76%);
+}
+
+.message-row.audio-message .message-bubble,
+.message-row.attachment-message .message-bubble {
   box-sizing: border-box;
   width: 100%;
 }
@@ -1837,6 +1842,7 @@ select:focus {
   display: grid;
   gap: 8px;
   margin-bottom: 8px;
+  width: 100%;
 }
 
 .attachment-ingestion-card {
@@ -3875,6 +3881,10 @@ select:focus {
   }
 
   .message-row.audio-message .message-stack {
+    width: 88%;
+  }
+
+  .message-row.attachment-message .message-stack {
     width: 88%;
   }
 

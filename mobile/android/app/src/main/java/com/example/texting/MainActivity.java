@@ -70,7 +70,7 @@ public class MainActivity extends Activity {
     private static final int NOTIFICATION_PERMISSION_REQUEST = 40;
     private static final int FILE_CHOOSER_REQUEST = 41;
     private static final int PHONE_CONTACTS_PERMISSION_REQUEST = 42;
-    private static final String APP_ASSET_VERSION = "9dc47f21";
+    private static final String APP_ASSET_VERSION = "4615be36";
     private boolean serverUrlDialogOpen = false;
     private boolean mainFrameLoadFailed = false;
     private boolean promptedForServerAfterFailure = false;

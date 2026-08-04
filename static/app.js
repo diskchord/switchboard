@@ -21,12 +21,11 @@ const state = {
   statusPollInFlight: 0,
   threadRefreshSeq: 0,
   autoRefreshTimer: null,
-  autoRefreshInFlight: false,
+  autoRefreshForceInFlight: false,
+  autoRefreshPromise: null,
   autoRefreshSeconds: 5,
   refreshTokens: null,
   foregroundRefreshInFlight: false,
-  lastListRefreshAt: 0,
-  lastThreadRefreshAt: 0,
   openConversationController: null,
   threadLoadedConversationId: null,
   threadCache: new Map(),
@@ -264,7 +263,6 @@ const THEME_FAMILIES = [
 const SCHEDULE_TIME_KEY = "textingScheduleTime";
 const STATS_PERIOD_KEY = "textingStatsPeriod";
 const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent", "finalized"]);
-const FOREGROUND_STALE_MS = 20_000;
 const MIN_AUTO_REFRESH_SECONDS = 5;
 const SEND_HOLD_MS = 550;
 const ATTACH_HOLD_MS = SEND_HOLD_MS;
@@ -1436,7 +1434,7 @@ window.textingOpenConversationFromNative = (id) => {
 };
 
 window.textingRefreshIfStaleFromNative = () => {
-  refreshForegroundData({ passive: true }).catch((error) => toast(error.message));
+  refreshForegroundData({ force: true, passive: true }).catch((error) => toast(error.message));
   return true;
 };
 
@@ -1864,6 +1862,15 @@ function updateDocumentTitle() {
   const unreadCount = Number(state.bootstrap?.stats?.unread_conversations) || 0;
   const prefix = unreadCount > 0 ? `(${unreadCount}) ` : "";
   document.title = `${prefix}${t("app.title")}`;
+}
+
+function syncUnreadConversationCount(value) {
+  if (value === null || value === undefined || value === "") return false;
+  const unreadCount = Number(value);
+  if (!Number.isFinite(unreadCount) || !state.bootstrap?.stats) return false;
+  state.bootstrap.stats.unread_conversations = Math.max(0, Math.trunc(unreadCount));
+  renderCategoryTabs();
+  return true;
 }
 
 function restoreThreadHeaderAfterStaticTranslations() {
@@ -3278,6 +3285,7 @@ async function sendCurrentFax(event) {
         filename: uploaded.original_filename || state.faxFile.name,
       }),
     });
+    syncUnreadConversationCount(payload.unread_count);
     closeFaxModal();
     await loadConversations({ preserveScroll: true });
     if (payload.conversation_id) {
@@ -3746,14 +3754,14 @@ function valueIsTruthy(value) {
 function conversationIsRead(conversation) {
   if (!conversation) return false;
   if (conversation.manual_unread_at) return false;
+  if (conversation.needs_attention !== undefined && conversation.needs_attention !== null && conversation.needs_attention !== "") {
+    return !valueIsTruthy(conversation.needs_attention);
+  }
   const lastDirection = String(conversation.last_direction || "").toLowerCase();
   if (lastDirection && lastDirection !== "inbound") return true;
   const last = conversation?.last_occurred_at || conversation?.last_message_at || conversation?.sort_at || "";
   const dealt = conversation?.dealt_with_at || "";
   if (last && dealt && dealt >= last) return true;
-  if (conversation.needs_attention !== undefined && conversation.needs_attention !== null && conversation.needs_attention !== "") {
-    return !valueIsTruthy(conversation.needs_attention);
-  }
   return false;
 }
 
@@ -4854,13 +4862,13 @@ function renderAttachment(attachment) {
   const contentType = attachment.content_type || "";
   const mediaKey = escapeHtml(normalizedMediaKey(url));
   if (isImageAttachment(attachment, url)) {
-    return `<a href="${escapeHtml(url)}" class="image-attachment" data-lightbox-src="${escapeHtml(url)}" target="_blank"><img src="${escapeHtml(url)}" alt="" loading="lazy" /></a>`;
+    return `<a href="${escapeHtml(url)}" class="image-attachment" data-lightbox-src="${escapeHtml(url)}" target="_blank"><img src="${escapeHtml(url)}" alt="" loading="lazy" decoding="async" /></a>`;
   }
   if (contentType.startsWith("video/")) {
-    return `<video src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="metadata"></video>`;
+    return `<video src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="none"></video>`;
   }
   if (isAudioAttachment(attachment, url)) {
-    return `<audio src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="metadata"></audio>`;
+    return `<audio src="${escapeHtml(url)}" data-media-key="${mediaKey}" controls preload="none"></audio>`;
   }
   if (isPdfAttachment(attachment, url)) {
     const filename = attachment.filename || t("attachment.pdf");
@@ -5137,6 +5145,7 @@ function restoreMediaCurrentTime(element, currentTime) {
     apply();
   } else {
     element.addEventListener("loadedmetadata", apply, { once: true });
+    element.load();
   }
 }
 
@@ -5152,6 +5161,7 @@ function resumeRestoredMedia(element, state) {
     resume();
   } else {
     element.addEventListener("loadedmetadata", resume, { once: true });
+    element.load();
   }
 }
 
@@ -5470,7 +5480,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
+        <article class="message-row ${message.direction} ${statusKind} ${messageAttachments.length ? "attachment-message" : ""} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
               ${messageTypeLabel}
@@ -5513,6 +5523,7 @@ function watchMessageMediaForScrollMode(
   const media = [...els.messages.querySelectorAll("img, video, audio, iframe")];
   if (!media.length) return;
   let expectedScrollTop = initialScrollTop;
+  let observedScrollHeight = els.messages.scrollHeight;
   let correctionFrame = null;
   const conversationId = state.currentConversationId;
   const renderGeneration = state.messageRenderGeneration;
@@ -5524,6 +5535,9 @@ function watchMessageMediaForScrollMode(
   const keepScrollPosition = () => {
     correctionFrame = null;
     if (!isCurrent()) return;
+    const nextScrollHeight = els.messages.scrollHeight;
+    if (Math.abs(nextScrollHeight - observedScrollHeight) < 1) return;
+    observedScrollHeight = nextScrollHeight;
     updateComposerOffset();
     if (shouldStick) {
       if (messageBottomStickIsActive(bottomStickToken)) {
@@ -5821,6 +5835,7 @@ async function sendReaction(action) {
       mergeConversationIntoLoadedState(payload.conversation);
       markLoadedConversationRead(conversationId);
     }
+    syncUnreadConversationCount(payload.unread_count);
     if (state.currentConversationId === conversationId) {
       renderThreadHeader();
     }
@@ -6303,51 +6318,65 @@ function trackInboundSoundKey(key, { play = false } = {}) {
   }
 }
 
-async function pollForChanges({ prime = false, force = false, passive = true } = {}) {
-  if (!state.bootstrap || state.autoRefreshInFlight || document.hidden) return;
-  state.autoRefreshInFlight = true;
-  try {
-    const conversationId = state.currentConversationId;
-    const payload = await api(`/api/refresh${refreshQuery()}`);
-    const previous = state.refreshTokens || {};
-    state.refreshTokens = payload.tokens || {};
-    if (prime || (!Object.keys(previous).length && !force)) return;
+async function performChangePoll({ prime = false, force = false, passive = true } = {}) {
+  const conversationId = state.currentConversationId;
+  const payload = await api(`/api/refresh${refreshQuery()}`);
+  const previous = state.refreshTokens || {};
+  state.refreshTokens = payload.tokens || {};
+  if (prime || (!Object.keys(previous).length && !force)) return;
 
-    const bootstrapChanged = force || previous.bootstrap !== state.refreshTokens.bootstrap;
-    const listChanged = force || previous.list !== state.refreshTokens.list;
-    const conversationChanged =
-      Boolean(conversationId) &&
-      state.currentConversationId === conversationId &&
-      (force || previous.conversation !== state.refreshTokens.conversation);
+  const bootstrapChanged = force || previous.bootstrap !== state.refreshTokens.bootstrap;
+  const listChanged = force || previous.list !== state.refreshTokens.list;
+  const conversationChanged =
+    Boolean(conversationId) &&
+    state.currentConversationId === conversationId &&
+    (force || previous.conversation !== state.refreshTokens.conversation);
 
-    const refreshes = [];
-    if (conversationChanged && state.currentConversationId === conversationId) {
-      refreshes.push(refreshCurrentConversationStatus({ knownChanged: true, force, passive }));
-    }
-    if (listChanged) {
-      refreshes.push(
-        loadConversations({
-          append: false,
-          preserveScroll: true,
-          limit: Math.max(80, state.conversations.length || 0),
-          soundForNew: true,
-        }),
-      );
-    }
-    if (bootstrapChanged) {
-      refreshes.push(
-        api("/api/bootstrap").then((bootstrap) => {
-          state.bootstrap = bootstrap;
-          applyRuntimeSettings();
-          renderBootstrap();
-        }),
-      );
-    }
-    await Promise.all(refreshes);
-  } finally {
-    state.autoRefreshInFlight = false;
-    scheduleAutoRefresh();
+  const refreshes = [];
+  if (conversationChanged && state.currentConversationId === conversationId) {
+    refreshes.push(refreshCurrentConversationStatus({ knownChanged: true, force, passive }));
   }
+  if (listChanged) {
+    refreshes.push(
+      loadConversations({
+        append: false,
+        preserveScroll: true,
+        limit: Math.max(80, state.conversations.length || 0),
+        soundForNew: true,
+      }),
+    );
+  }
+  if (bootstrapChanged) {
+    refreshes.push(
+      api("/api/bootstrap").then((bootstrap) => {
+        state.bootstrap = bootstrap;
+        applyRuntimeSettings();
+        renderBootstrap();
+      }),
+    );
+  }
+  await Promise.all(refreshes);
+}
+
+function pollForChanges(options = {}) {
+  const { force = false } = options;
+  if (!state.bootstrap || document.hidden) return Promise.resolve();
+  if (state.autoRefreshPromise) {
+    if (!force || state.autoRefreshForceInFlight) return state.autoRefreshPromise;
+    return state.autoRefreshPromise.catch(() => {}).then(() => pollForChanges(options));
+  }
+
+  clearAutoRefresh();
+  state.autoRefreshForceInFlight = force;
+  let request;
+  request = performChangePoll(options).finally(() => {
+    if (state.autoRefreshPromise !== request) return;
+    state.autoRefreshPromise = null;
+    state.autoRefreshForceInFlight = false;
+    scheduleAutoRefresh();
+  });
+  state.autoRefreshPromise = request;
+  return request;
 }
 
 async function refreshCurrentConversationStatus({ knownChanged = false, force = false, passive = false } = {}) {
@@ -6367,12 +6396,10 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
       const previous = state.refreshTokens || {};
       const next = refreshPayload.tokens || {};
       if (Object.keys(previous).length && previous.conversation === next.conversation) {
-        state.lastThreadRefreshAt = Date.now();
         return;
       }
       state.refreshTokens = next;
       if (!Object.keys(previous).length && !next.conversation) {
-        state.lastThreadRefreshAt = Date.now();
         return;
       }
     }
@@ -6382,11 +6409,9 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     const conversationChanged = !conversationPayloadMatchesState(payload);
     const messagesChanged = !messagePayloadMatchesState(payload);
     if (!conversationChanged && !messagesChanged) {
-      state.lastThreadRefreshAt = Date.now();
       return;
     }
     mergeConversationIntoLoadedState(payload.conversation);
-    state.lastThreadRefreshAt = Date.now();
     if (messagesChanged) {
       const newMessageCount = newMessageItemCount(state.messages, payload.messages);
       const hasNewMessages = newMessageCount > 0;
@@ -6529,11 +6554,6 @@ function syncNativePullRefreshEnabled() {
 
 async function refreshForegroundData({ force = false, passive = true } = {}) {
   if (!state.bootstrap || state.foregroundRefreshInFlight || document.hidden) return;
-  const now = Date.now();
-  const listIsStale = force || now - state.lastListRefreshAt > FOREGROUND_STALE_MS;
-  const threadIsStale =
-    Boolean(state.currentConversationId) && (force || now - state.lastThreadRefreshAt > FOREGROUND_STALE_MS);
-  if (!listIsStale && !threadIsStale) return;
   state.foregroundRefreshInFlight = true;
   try {
     await pollForChanges({ force, passive });
@@ -6765,7 +6785,6 @@ async function loadConversations({ append = false, preserveScroll = false, limit
     } else {
       state.conversations = payload.conversations;
       state.loadedConversationSearchQuery = rawSearchQuery;
-      state.lastListRefreshAt = Date.now();
       trackInboundSoundKey(latestInboundSoundKeyFromConversations(state.conversations), { play: soundForNew });
     }
     state.hasMoreConversations = payload.has_more;
@@ -7151,7 +7170,6 @@ async function openConversation(id, options = {}) {
     );
   }
   trackInboundSoundKey(latestInboundSoundKeyFromMessages(state.messages));
-  state.lastThreadRefreshAt = Date.now();
   selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
   restoreComposerDraftForRecipients();
   renderConversations();
@@ -7280,11 +7298,7 @@ async function setConversationRead(conversationId, dealt, { silent = false, allo
       state.conversationReadMutationResults.delete(state.conversationReadMutationResults.keys().next().value);
     }
     const isCurrent = mergeConversationReadPatchIntoLoadedState(conversationId, confirmedReadPatch);
-    const unreadCount = Number(payload.unread_count);
-    if (Number.isFinite(unreadCount) && state.bootstrap?.stats) {
-      state.bootstrap.stats.unread_conversations = unreadCount;
-      renderCategoryTabs();
-    } else {
+    if (!syncUnreadConversationCount(payload.unread_count)) {
       state.bootstrap = await api("/api/bootstrap");
       applyRuntimeSettings();
       renderBootstrap();
@@ -7805,6 +7819,7 @@ async function sendCurrentMessage() {
       mergeConversationIntoLoadedState(payload.conversation);
     }
     if (sentConversationId) markLoadedConversationRead(sentConversationId);
+    syncUnreadConversationCount(payload.unread_count);
     if (sentConversationId === Number(state.currentConversationId)) {
       renderThreadHeader();
     }
@@ -8664,14 +8679,14 @@ function bindEvents() {
     } else {
       scheduleStatusPoll();
       scheduleAutoRefresh();
-      refreshForegroundData().catch((error) => toast(error.message));
+      refreshForegroundData({ force: true }).catch((error) => toast(error.message));
     }
   });
   window.addEventListener("focus", () => {
-    refreshForegroundData().catch((error) => toast(error.message));
+    refreshForegroundData({ force: true }).catch((error) => toast(error.message));
   });
-  window.addEventListener("pageshow", (event) => {
-    refreshForegroundData({ force: Boolean(event.persisted) }).catch((error) => toast(error.message));
+  window.addEventListener("pageshow", () => {
+    refreshForegroundData({ force: true }).catch((error) => toast(error.message));
   });
   window.addEventListener("scroll", clampDocumentScroll, { passive: true });
   window.addEventListener("beforeunload", (event) => {

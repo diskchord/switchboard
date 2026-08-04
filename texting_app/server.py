@@ -23,6 +23,12 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import auth
 from . import config
+from .assistant_api import (
+    get_conversation_context as get_assistant_conversation_context,
+    list_unread_conversations as list_assistant_unread_conversations,
+    list_unresolved_action_reviews,
+    record_action_review,
+)
 from .attachment_ingestion import start_attachment_worker
 from .autoreply import (
     DEFAULT_AUTOREPLY_COOLDOWN_HOURS,
@@ -743,6 +749,12 @@ def _conversation_message_search_match(conn, conversation_id: int, terms: list[s
 def _decorate_conversation_summary(row, participants: list[dict]) -> dict:
     item = _row_dict(row)
     item.pop("search_name_rank", None)
+    needs_attention = _needs_attention(
+        row["last_direction"],
+        row["last_occurred_at"],
+        row["dealt_with_at"],
+        row["manual_unread_at"],
+    )
     use_scheduled = bool(row["scheduled_id"]) and (
         not row["last_occurred_at"] or row["scheduled_for"] >= row["last_occurred_at"]
     )
@@ -759,12 +771,7 @@ def _decorate_conversation_summary(row, participants: list[dict]) -> dict:
     item["title"] = row["title"] or _conversation_title_from_participants(participants)
     item["participants"] = participants
     item["sort_at"] = row["list_sort_at"] or row["last_message_at"] or row["updated_at"]
-    item["needs_attention"] = _needs_attention(
-        item.get("last_direction"),
-        item.get("last_occurred_at"),
-        row["dealt_with_at"],
-        row["manual_unread_at"],
-    )
+    item["needs_attention"] = needs_attention
     item["last_status_label"] = _status_label(item.get("last_status"))
     item["last_status_kind"] = _status_kind(item.get("last_status"))
     if use_scheduled:
@@ -1156,6 +1163,12 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
     if last_message:
         conversation["last_direction"] = last_message["direction"]
         conversation["last_occurred_at"] = last_message["occurred_at"]
+    conversation["needs_attention"] = _needs_attention(
+        conversation.get("last_direction"),
+        conversation.get("last_occurred_at"),
+        conversation.get("dealt_with_at"),
+        conversation.get("manual_unread_at"),
+    )
     if scheduled_messages:
         latest_scheduled = max(
             scheduled_messages,
@@ -1167,12 +1180,6 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
         ):
             conversation["last_direction"] = "outbound"
             conversation["last_occurred_at"] = latest_scheduled["occurred_at"]
-    conversation["needs_attention"] = _needs_attention(
-        conversation.get("last_direction"),
-        conversation.get("last_occurred_at"),
-        conversation.get("dealt_with_at"),
-        conversation.get("manual_unread_at"),
-    )
     participants = _participants(conn, conversation_id)
     conversation["title"] = _conversation_title_from_participants(participants)
     conversation["participants"] = participants
@@ -2003,15 +2010,7 @@ def set_conversation_dealt(conversation_id: int, dealt: bool = True) -> dict:
         )
         conn.commit()
         conversation = _conversation_summary(conn, conversation_id)
-        unread_count = conn.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM conversations c
-            WHERE COALESCE(c.is_archived, 0) = 0
-              AND {UNREAD_CONVERSATION_CLAUSE}
-            """
-        ).fetchone()[0]
-        return {"conversation": conversation, "unread_count": int(unread_count)}
+        return {"conversation": conversation, "unread_count": _unread_conversation_count(conn)}
 
 
 def bulk_update_conversations(payload: dict) -> dict:
@@ -2083,6 +2082,19 @@ def create_conversation(payload: dict) -> dict:
     return {"conversation_id": conversation_id, **get_messages(conversation_id)}
 
 
+def _unread_conversation_count(conn) -> int:
+    return int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM conversations c
+            WHERE COALESCE(c.is_archived, 0) = 0
+              AND {UNREAD_CONVERSATION_CLAUSE}
+            """
+        ).fetchone()[0]
+    )
+
+
 def _mark_reply_message_read(message_id: int) -> dict | None:
     with closing(connect()) as conn:
         row = conn.execute(
@@ -2104,7 +2116,10 @@ def _mark_reply_message_read(message_id: int) -> dict | None:
             (marker, now_est(), conversation_id),
         )
         conn.commit()
-        return _conversation_summary(conn, conversation_id)
+        return {
+            "conversation": _conversation_summary(conn, conversation_id),
+            "unread_count": _unread_conversation_count(conn),
+        }
 
 
 def send_api_message(payload: dict) -> dict:
@@ -2124,10 +2139,12 @@ def send_api_message(payload: dict) -> dict:
     if result.get("message_id"):
         message_id = int(result["message_id"])
         _mark_uploaded_attachments_local(message_id, media_urls)
-        conversation = _mark_reply_message_read(message_id)
-        if conversation:
+        read_state = _mark_reply_message_read(message_id)
+        if read_state:
+            conversation = read_state["conversation"]
             result["conversation_id"] = conversation["id"]
             result["conversation"] = conversation
+            result["unread_count"] = read_state["unread_count"]
     return result
 
 
@@ -2200,10 +2217,12 @@ def send_api_fax(payload: dict) -> dict:
     if result.get("message_id"):
         message_id = int(result["message_id"])
         _mark_uploaded_attachments_local(message_id, [media_url])
-        conversation = _mark_reply_message_read(message_id)
-        if conversation:
+        read_state = _mark_reply_message_read(message_id)
+        if read_state:
+            conversation = read_state["conversation"]
             result["conversation_id"] = conversation["id"]
             result["conversation"] = conversation
+            result["unread_count"] = read_state["unread_count"]
     return result
 
 
@@ -3016,13 +3035,26 @@ class TextingHandler(BaseHTTPRequestHandler):
         return auth.verify_session_token(self._session_token())
 
     def _has_api_token(self) -> bool:
+        return self._has_bearer_token(config.API_TOKEN)
+
+    def _has_assistant_api_token(self) -> bool:
+        return self._has_bearer_token(config.ASSISTANT_API_TOKEN)
+
+    def _has_bearer_token(self, expected: str) -> bool:
         authorization = (self.headers.get("Authorization") or "").strip()
         scheme, separator, supplied = authorization.partition(" ")
         return bool(
-            config.API_TOKEN
+            expected
             and separator
             and scheme.lower() == "bearer"
-            and secrets.compare_digest(supplied.strip(), config.API_TOKEN)
+            and secrets.compare_digest(supplied.strip(), expected)
+        )
+
+    def _api_tokens_are_distinct(self) -> bool:
+        return not (
+            config.API_TOKEN
+            and config.ASSISTANT_API_TOKEN
+            and secrets.compare_digest(config.API_TOKEN, config.ASSISTANT_API_TOKEN)
         )
 
     def _is_public_request(self, method: str, path: str) -> bool:
@@ -3052,10 +3084,46 @@ class TextingHandler(BaseHTTPRequestHandler):
         self._send_redirect(f"/login?next={quote(next_path, safe='')}")
 
     def _require_auth(self, method: str, path: str) -> bool:
+        if path.startswith("/api/assistant/v1/"):
+            if not config.ASSISTANT_API_TOKEN:
+                self._send_json(
+                    {
+                        "error": "The assistant API is not configured. "
+                        "Set SWITCHBOARD_ASSISTANT_API_TOKEN."
+                    },
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return False
+            if not self._api_tokens_are_distinct():
+                self._send_json(
+                    {
+                        "error": "SWITCHBOARD_ASSISTANT_API_TOKEN must differ "
+                        "from TEXTING_API_TOKEN."
+                    },
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return False
+            if not self._has_assistant_api_token():
+                self._send_json(
+                    {"error": "A valid assistant Bearer token is required."},
+                    HTTPStatus.UNAUTHORIZED,
+                    headers={"WWW-Authenticate": 'Bearer realm="Switchboard Assistant API"'},
+                )
+                return False
+            return True
         if path.startswith("/api/v1/"):
             if not config.API_TOKEN:
                 self._send_json(
                     {"error": "The programmatic API is not configured. Set TEXTING_API_TOKEN."},
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+                return False
+            if not self._api_tokens_are_distinct():
+                self._send_json(
+                    {
+                        "error": "TEXTING_API_TOKEN must differ from "
+                        "SWITCHBOARD_ASSISTANT_API_TOKEN."
+                    },
                     HTTPStatus.SERVICE_UNAVAILABLE,
                 )
                 return False
@@ -3322,6 +3390,14 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(upload_diagnostics(self._request_url()))
             elif path == "/api/conversations":
                 self._send_json(list_conversations(query))
+            elif path == "/api/assistant/v1/unread-conversations":
+                self._send_json(list_assistant_unread_conversations(query))
+            elif match := re.fullmatch(r"/api/assistant/v1/conversations/(\d+)/context", path):
+                self._send_json(
+                    get_assistant_conversation_context(int(match.group(1)), query)
+                )
+            elif path == "/api/assistant/v1/action-reviews/unresolved":
+                self._send_json(list_unresolved_action_reviews(query))
             elif match := re.fullmatch(r"/api/v1/messages/(\d+)", path):
                 self._send_json({"message": api_message_receipt(int(match.group(1)))})
             elif path == "/api/conversations/match":
@@ -3369,6 +3445,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             else:
                 self._serve_file(STATIC_DIR / "index.html", cache_control="no-store")
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except LookupError as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -3409,6 +3487,8 @@ class TextingHandler(BaseHTTPRequestHandler):
                     {"message": receipt, "status_url": f"/api/v1/messages/{receipt['id']}"},
                     HTTPStatus.CREATED,
                 )
+            elif path == "/api/assistant/v1/action-reviews":
+                self._send_json(record_action_review(self._read_json()))
             elif path == "/api/fax/send":
                 self._send_json(send_api_fax(self._read_json()))
             elif path == "/api/messages/schedule":
