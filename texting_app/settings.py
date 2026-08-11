@@ -20,6 +20,7 @@ SOUND_TONE_OPTIONS = (
     ("bell", "Bell"),
 )
 SOUND_TONE_VALUES = {value for value, _ in SOUND_TONE_OPTIONS}
+UI_THEME_FAMILY = "unicorn" if config.UI_THEME_FAMILY == "girly" else config.UI_THEME_FAMILY
 
 
 @dataclass(frozen=True)
@@ -50,12 +51,13 @@ SETTING_DEFS: tuple[SettingDef, ...] = (
         "Theme",
         "Interface",
         "select",
-        config.UI_THEME_FAMILY if config.UI_THEME_FAMILY in {"switchboard", "console", "midnight", "papyrus"} else "switchboard",
+        UI_THEME_FAMILY if UI_THEME_FAMILY in {"switchboard", "console", "midnight", "papyrus", "unicorn"} else "switchboard",
         options=(
             ("switchboard", "Switchboard"),
             ("console", "Console"),
             ("midnight", "Midnight Commander"),
             ("papyrus", "Papyrus"),
+            ("unicorn", "Unicorn"),
         ),
         help="Choose the theme family. Use the header light/dark button to switch that theme between light and dark.",
         env_names=("TEXTING_UI_THEME",),
@@ -522,6 +524,8 @@ def configured_values() -> dict[str, Any]:
     sections: dict[str, list[dict[str, Any]]] = {}
     for definition in SETTING_DEFS:
         value = stored.get(definition.key, definition.default)
+        if definition.key == "ui.theme_family" and value == "girly":
+            value = "unicorn"
         source = "saved" if definition.key in stored else (
             "env" if any(os.environ.get(name) is not None for name in definition.env_names) else "default"
         )

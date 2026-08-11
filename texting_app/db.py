@@ -40,6 +40,20 @@ CREATE TABLE IF NOT EXISTS identities (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS limited_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  password_hash TEXT NOT NULL,
+  identity_id INTEGER NOT NULL REFERENCES identities(id) ON DELETE RESTRICT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  theme_family TEXT NOT NULL DEFAULT 'switchboard',
+  theme_mode TEXT NOT NULL DEFAULT 'light',
+  session_version INTEGER NOT NULL DEFAULT 1,
+  last_login_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS contacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   display_name TEXT NOT NULL,
@@ -293,6 +307,23 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS app_settings (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS limited_users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          password_hash TEXT NOT NULL,
+          identity_id INTEGER NOT NULL REFERENCES identities(id) ON DELETE RESTRICT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          theme_family TEXT NOT NULL DEFAULT 'switchboard',
+          theme_mode TEXT NOT NULL DEFAULT 'light',
+          session_version INTEGER NOT NULL DEFAULT 1,
+          last_login_at TEXT,
+          created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         )
         """

@@ -119,6 +119,7 @@ const state = {
   twoFactor: null,
   twoFactorSetup: null,
   twoFactorBackupCodes: [],
+  limitedUsers: [],
   language: "en",
   hotkeysEnabled: true,
   hotkeys: {},
@@ -259,6 +260,12 @@ const THEME_FAMILIES = [
     light: { metaColor: "#ead9b3", nativeTheme: "light" },
     dark: { metaColor: "#231b13", nativeTheme: "dark" },
   },
+  {
+    id: "unicorn",
+    labelKey: "theme.unicorn_name",
+    light: { metaColor: "#f9dbea", nativeTheme: "light" },
+    dark: { metaColor: "#1c1019", nativeTheme: "dark" },
+  },
 ];
 const SCHEDULE_TIME_KEY = "textingScheduleTime";
 const STATS_PERIOD_KEY = "textingStatsPeriod";
@@ -266,6 +273,7 @@ const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent
 const MIN_AUTO_REFRESH_SECONDS = 5;
 const SEND_HOLD_MS = 550;
 const ATTACH_HOLD_MS = SEND_HOLD_MS;
+const MESSAGE_SPARKLE_MS = 1400;
 const SEND_NOW_SYMBOL = "➤";
 const SCHEDULE_SEND_SYMBOL = "◷";
 const STATS_PERIOD_OPTIONS = [
@@ -377,6 +385,27 @@ const I18N = {
     "security.disable_confirm": "Disable two-factor authentication?",
     "security.copy": "Copy",
     "security.copied": "Copied.",
+    "users.title": "Limited users",
+    "users.help": "Give each user access to exactly one sender number. Limited users cannot open global settings.",
+    "users.username": "Username",
+    "users.password": "Password",
+    "users.new_password": "New password (optional)",
+    "users.assigned_number": "Assigned number",
+    "users.active": "Active",
+    "users.add": "Add user",
+    "users.save": "Save user",
+    "users.remove": "Remove user",
+    "users.added": "Limited user added.",
+    "users.saved": "Limited user saved.",
+    "users.removed": "Limited user removed.",
+    "users.remove_confirm": "Remove this limited user?",
+    "preferences.title": "Preferences",
+    "preferences.description": "Adjust your appearance or sign out. Your account is limited to its assigned number.",
+    "preferences.appearance": "Appearance",
+    "preferences.theme_family": "Theme",
+    "preferences.theme_mode": "Mode",
+    "preferences.light": "Light",
+    "preferences.dark": "Dark",
     "common.save": "Save",
     "common.cancel": "Cancel",
     "common.remove": "Remove",
@@ -391,6 +420,7 @@ const I18N = {
     "theme.console_name": "Console",
     "theme.midnight_name": "Midnight Commander",
     "theme.papyrus_name": "Papyrus",
+    "theme.unicorn_name": "Unicorn",
     "search.placeholder": "Search",
     "search.clear": "Clear search",
     "category.aria": "Thread category",
@@ -661,6 +691,7 @@ const I18N = {
     "theme.console_name": "Consola",
     "theme.midnight_name": "Midnight Commander",
     "theme.papyrus_name": "Papiro",
+    "theme.unicorn_name": "Unicorn",
     "search.placeholder": "Buscar",
     "search.clear": "Borrar búsqueda",
     "category.aria": "Categoría de conversaciones",
@@ -931,6 +962,7 @@ const I18N = {
     "theme.console_name": "Console",
     "theme.midnight_name": "Midnight Commander",
     "theme.papyrus_name": "Papyrus",
+    "theme.unicorn_name": "Unicorn",
     "search.placeholder": "Rechercher",
     "search.clear": "Effacer la recherche",
     "category.aria": "Catégorie de fils",
@@ -1189,6 +1221,7 @@ function themeFamilyOption(family) {
 function normalizeThemeFamily(family) {
   const raw = String(family || "").trim().toLowerCase();
   if (raw === "light" || raw === "dark") return "switchboard";
+  if (raw === "girly") return "unicorn";
   return themeFamilyOption(raw).id;
 }
 
@@ -1205,8 +1238,8 @@ function parseThemeChoice(theme) {
   if (raw === "light" || raw === "dark") {
     return { family: "switchboard", mode: raw };
   }
-  if (["console", "midnight", "papyrus"].includes(raw)) {
-    return { family: raw, mode: null };
+  if (["console", "midnight", "papyrus", "unicorn", "girly"].includes(raw)) {
+    return { family: normalizeThemeFamily(raw), mode: null };
   }
   return { family: "switchboard", mode: null };
 }
@@ -2076,12 +2109,25 @@ function applyRuntimeSettings() {
   configureComposerDisplay();
   applyStaticTranslations();
   restoreThreadHeaderAfterStaticTranslations();
-  applyTheme(bootstrapSettingValue("ui.theme_family", currentThemeFamily()), {
-    mode: currentThemeMode(),
-    persistFamily: true,
-    persistMode: false,
-  });
+  if (isLimitedUser()) {
+    const preferences = state.bootstrap?.preferences || {};
+    applyTheme(preferences.theme_family || "switchboard", {
+      mode: preferences.theme_mode || "light",
+      persistFamily: true,
+      persistMode: true,
+    });
+  } else {
+    applyTheme(bootstrapSettingValue("ui.theme_family", currentThemeFamily()), {
+      mode: currentThemeMode(),
+      persistFamily: true,
+      persistMode: false,
+    });
+  }
   updateDetailsControls();
+}
+
+function isLimitedUser() {
+  return Boolean(state.bootstrap?.access?.limited);
 }
 
 function focusAndSelect(element) {
@@ -2130,6 +2176,7 @@ function renderSettingsNav(sections) {
   if (!els.settingsNav) return;
   const items = [
     { name: t("security.title"), anchor: "securitySettings" },
+    { name: t("users.title"), anchor: "settings-users" },
     { name: t("tabs.numbers"), anchor: "settings-numbers" },
   ].concat(
     sections.map((section) => ({ name: section.name, anchor: settingsAnchor(section.name) })),
@@ -2142,6 +2189,113 @@ function renderSettingsNav(sections) {
         </button>`,
     )
     .join("");
+}
+
+function limitedUserIdentityOptions(selectedId = "") {
+  return (state.bootstrap?.identities || [])
+    .filter((identity) => identity.is_active)
+    .map(
+      (identity) => `
+        <option value="${escapeHtml(identity.id)}" ${String(identity.id) === String(selectedId) ? "selected" : ""}>
+          ${escapeHtml(identity.label)} · ${escapeHtml(phoneDisplay(identity.phone_number))}
+        </option>`,
+    )
+    .join("");
+}
+
+function renderLimitedUsersSection() {
+  const users = state.limitedUsers || [];
+  const cards = users
+    .map(
+      (user) => `
+        <article class="setting-field limited-user-card" data-limited-user-id="${escapeHtml(user.id)}">
+          <div class="limited-user-grid">
+            <label>
+              <span>${escapeHtml(t("users.username"))}</span>
+              <input class="limited-user-username" type="text" autocomplete="off" value="${escapeHtml(user.username)}" />
+            </label>
+            <label>
+              <span>${escapeHtml(t("users.assigned_number"))}</span>
+              <select class="limited-user-identity">${limitedUserIdentityOptions(user.identity_id)}</select>
+            </label>
+            <label>
+              <span>${escapeHtml(t("users.new_password"))}</span>
+              <input class="limited-user-password" type="password" autocomplete="new-password" />
+            </label>
+            <label class="limited-user-active">
+              <input class="limited-user-enabled" type="checkbox" ${user.is_active ? "checked" : ""} />
+              <span>${escapeHtml(t("users.active"))}</span>
+            </label>
+          </div>
+          <div class="limited-user-actions">
+            <button class="small-button done-button" type="button" data-limited-user-action="save">${escapeHtml(t("users.save"))}</button>
+            <button class="small-button danger-button" type="button" data-limited-user-action="remove">${escapeHtml(t("users.remove"))}</button>
+          </div>
+        </article>`,
+    )
+    .join("");
+  return `
+    <section class="settings-section" id="settings-users">
+      <div class="settings-section-heading">
+        <h3>${escapeHtml(t("users.title"))}</h3>
+      </div>
+      <p class="setting-help">${escapeHtml(t("users.help"))}</p>
+      <div class="setting-field limited-user-card limited-user-create">
+        <div class="limited-user-grid">
+          <label>
+            <span>${escapeHtml(t("users.username"))}</span>
+            <input class="limited-user-username" type="text" autocomplete="off" />
+          </label>
+          <label>
+            <span>${escapeHtml(t("users.password"))}</span>
+            <input class="limited-user-password" type="password" autocomplete="new-password" />
+          </label>
+          <label>
+            <span>${escapeHtml(t("users.assigned_number"))}</span>
+            <select class="limited-user-identity">${limitedUserIdentityOptions()}</select>
+          </label>
+        </div>
+        <div class="limited-user-actions">
+          <button class="small-button done-button" type="button" data-limited-user-action="create">${escapeHtml(t("users.add"))}</button>
+        </div>
+      </div>
+      <div class="limited-user-list">${cards}</div>
+    </section>`;
+}
+
+function renderLimitedPreferences(preferences = state.bootstrap?.preferences || {}) {
+  const family = normalizeThemeFamily(preferences.theme_family || currentThemeFamily());
+  const mode = normalizeThemeMode(preferences.theme_mode || currentThemeMode());
+  els.securitySettings.hidden = true;
+  els.settingsNav.innerHTML = `
+    <button class="settings-nav-button active" type="button" data-settings-anchor="settings-appearance">
+      ${escapeHtml(t("preferences.appearance"))}
+    </button>`;
+  els.settingsSections.innerHTML = `
+    <section class="settings-section" id="settings-appearance">
+      <div class="settings-section-heading"><h3>${escapeHtml(t("preferences.appearance"))}</h3></div>
+      <div class="settings-fields">
+        <label class="setting-field">
+          <span><strong>${escapeHtml(t("preferences.theme_family"))}</strong></span>
+          <select data-preference-key="theme_family">
+            ${THEME_FAMILIES.map(
+              (option) => `<option value="${escapeHtml(option.id)}" ${option.id === family ? "selected" : ""}>${escapeHtml(t(option.labelKey))}</option>`,
+            ).join("")}
+          </select>
+        </label>
+        <label class="setting-field">
+          <span><strong>${escapeHtml(t("preferences.theme_mode"))}</strong></span>
+          <select data-preference-key="theme_mode">
+            <option value="light" ${mode === "light" ? "selected" : ""}>${escapeHtml(t("preferences.light"))}</option>
+            <option value="dark" ${mode === "dark" ? "selected" : ""}>${escapeHtml(t("preferences.dark"))}</option>
+          </select>
+        </label>
+      </div>
+    </section>`;
+  els.statsButton.hidden = true;
+  els.databaseDownloadButton.hidden = true;
+  els.settingsForm.querySelector(".settings-header h2").textContent = t("preferences.title");
+  els.settingsForm.querySelector(".settings-header p").textContent = t("preferences.description");
 }
 
 function backupCodeList(codes = []) {
@@ -2296,6 +2450,11 @@ function renderTwoFactorSettings(status = state.twoFactor) {
 
 function renderSettings(payload = state.bootstrap?.settings) {
   const sections = payload?.sections || [];
+  els.securitySettings.hidden = false;
+  els.statsButton.hidden = false;
+  els.databaseDownloadButton.hidden = false;
+  els.settingsForm.querySelector(".settings-header h2").textContent = t("settings.title");
+  els.settingsForm.querySelector(".settings-header p").textContent = t("settings.description");
   renderSettingsNav(sections);
   renderTwoFactorSettings();
   const defaultProvider = state.bootstrap?.messaging_provider || "telnyx";
@@ -2327,7 +2486,7 @@ function renderSettings(payload = state.bootstrap?.settings) {
         </div>
       </div>
     </section>`;
-  els.settingsSections.innerHTML = numbersSection + sections
+  els.settingsSections.innerHTML = renderLimitedUsersSection() + numbersSection + sections
     .map(
       (section) => `
         <section class="settings-section" id="${escapeHtml(settingsAnchor(section.name))}">
@@ -2454,11 +2613,25 @@ function renderSettingField(field) {
 
 async function openSettings() {
   try {
-    const [payload, twoFactor] = await Promise.all([api("/api/settings"), api("/api/auth/2fa")]);
+    if (isLimitedUser()) {
+      const preferences = await api("/api/preferences");
+      state.bootstrap.preferences = preferences;
+      renderLimitedPreferences(preferences);
+      els.settingsModal.classList.remove("hidden");
+      els.settingsModal.focus();
+      syncNativePullRefreshEnabled();
+      return;
+    }
+    const [payload, twoFactor, usersPayload] = await Promise.all([
+      api("/api/settings"),
+      api("/api/auth/2fa"),
+      api("/api/users"),
+    ]);
     if (state.bootstrap) {
       state.bootstrap.settings = payload;
     }
     state.twoFactor = twoFactor;
+    state.limitedUsers = usersPayload.users || [];
     state.twoFactorSetup = null;
     state.twoFactorBackupCodes = [];
     renderSettings(payload);
@@ -2475,6 +2648,70 @@ function closeSettings() {
   state.twoFactorSetup = null;
   state.twoFactorBackupCodes = [];
   syncNativePullRefreshEnabled();
+}
+
+function limitedUserPayload(card, { creating = false } = {}) {
+  return {
+    username: card.querySelector(".limited-user-username")?.value || "",
+    password: card.querySelector(".limited-user-password")?.value || "",
+    identity_id: Number(card.querySelector(".limited-user-identity")?.value || 0),
+    ...(creating
+      ? {}
+      : { is_active: Boolean(card.querySelector(".limited-user-enabled")?.checked) }),
+  };
+}
+
+async function refreshLimitedUsersSettings() {
+  const payload = await api("/api/users");
+  state.limitedUsers = payload.users || [];
+  renderSettings(state.bootstrap?.settings);
+}
+
+async function handleLimitedUserAction(button) {
+  const action = button.dataset.limitedUserAction;
+  const card = button.closest(".limited-user-card");
+  if (!card) return;
+  const userId = Number(card.dataset.limitedUserId || 0);
+  if (action === "remove" && !window.confirm(t("users.remove_confirm"))) return;
+  card.querySelectorAll("input, select, button").forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    if (action === "create") {
+      await api("/api/users", {
+        method: "POST",
+        body: JSON.stringify(limitedUserPayload(card, { creating: true })),
+      });
+      toast(t("users.added"));
+    } else if (action === "save") {
+      await api(`/api/users/${userId}`, {
+        method: "PUT",
+        body: JSON.stringify(limitedUserPayload(card)),
+      });
+      toast(t("users.saved"));
+    } else if (action === "remove") {
+      await api(`/api/users/${userId}/delete`, { method: "POST", body: "{}" });
+      toast(t("users.removed"));
+    }
+    await refreshLimitedUsersSettings();
+  } catch (error) {
+    toast(error.message);
+    card.querySelectorAll("input, select, button").forEach((control) => {
+      control.disabled = false;
+    });
+  }
+}
+
+async function saveLimitedPreferences() {
+  const themeFamily = els.settingsSections.querySelector('[data-preference-key="theme_family"]')?.value || "switchboard";
+  const themeMode = els.settingsSections.querySelector('[data-preference-key="theme_mode"]')?.value || "light";
+  const preferences = await api("/api/preferences", {
+    method: "POST",
+    body: JSON.stringify({ theme_family: themeFamily, theme_mode: themeMode }),
+  });
+  state.bootstrap.preferences = preferences;
+  applyTheme(preferences.theme_family, { mode: preferences.theme_mode });
+  return preferences;
 }
 
 function downloadDatabase() {
@@ -2996,6 +3233,24 @@ function closeStats() {
 
 async function saveSettings(event) {
   event.preventDefault();
+  if (isLimitedUser()) {
+    const controls = els.settingsForm.querySelectorAll("input, select, button");
+    controls.forEach((control) => {
+      control.disabled = true;
+    });
+    try {
+      await saveLimitedPreferences();
+      closeSettings();
+      toast(t("settings.saved"));
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      controls.forEach((control) => {
+        control.disabled = false;
+      });
+    }
+    return;
+  }
   const settings = {};
   const clear = [];
   els.settingsSections.querySelectorAll("[data-clear-setting]:checked").forEach((input) => {
@@ -3843,7 +4098,13 @@ function preferredReplyIdentity(conversation = state.currentConversation, messag
 function renderBootstrap({ forceIdentities = false } = {}) {
   const stats = state.bootstrap.stats || {};
   const previousFromNumber = els.fromNumber.value;
-  const showSummaryStats = settingBool("behavior.show_summary_stats", true);
+  const showSummaryStats = !isLimitedUser() && settingBool("behavior.show_summary_stats", true);
+  document.body.classList.toggle("limited-user", isLimitedUser());
+  if (els.addIdentityButton) els.addIdentityButton.hidden = isLimitedUser();
+  if (els.syncContactsButton) els.syncContactsButton.hidden = isLimitedUser();
+  if (els.syncPhoneContactsButton && isLimitedUser()) els.syncPhoneContactsButton.hidden = true;
+  els.settingsButton.title = isLimitedUser() ? t("preferences.title") : t("settings.title");
+  els.settingsButton.setAttribute("aria-label", els.settingsButton.title);
   els.statStrip.hidden = !showSummaryStats;
   els.statStrip.innerHTML = showSummaryStats
     ? [
@@ -4003,6 +4264,19 @@ function confirmDiscardIdentityChanges() {
 }
 
 function renderIdentities() {
+  if (isLimitedUser()) {
+    els.identityList.innerHTML = (state.bootstrap.identities || [])
+      .map(
+        (identity) => `
+          <article class="identity-card limited-identity-card">
+            <span class="swatch" style="background:${escapeHtml(identity.color)}"></span>
+            <div class="identity-main"><strong>${escapeHtml(identity.label)}</strong></div>
+            <div class="identity-meta"><div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div></div>
+          </article>`,
+      )
+      .join("");
+    return;
+  }
   els.identityList.innerHTML = (state.bootstrap.identities || [])
     .map(
       (identity) => {
@@ -5468,6 +5742,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
       const canReact = messageCanBeReactedTo(message);
       const messageId = message.id !== undefined && message.id !== null ? String(message.id) : "";
       const isSearchTarget = Boolean(messageId && messageId === state.searchTargetMessageId);
+      const isSparkling = Number(message._sparkleUntil || 0) > Date.now();
       const messageTextHtml = isSearchTarget
         ? renderHighlightedText(message.text || "", state.searchTargetTerms)
         : escapeHtml(message.text);
@@ -5480,7 +5755,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind} ${messageAttachments.length ? "attachment-message" : ""} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
+        <article class="message-row ${message.direction} ${statusKind} ${messageAttachments.length ? "attachment-message" : ""} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""} ${isSparkling ? "message-sparkling" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
               ${messageTypeLabel}
@@ -6257,7 +6532,12 @@ function messageChronologyKey(message) {
 
 function mergeRefreshedMessageTail(previousMessages = [], nextMessages = []) {
   if (!previousMessages.length || !nextMessages.length) return nextMessages;
-  const nextKeys = new Set(nextMessages.map(messageIdentityKey).filter(Boolean));
+  const previousByKey = new Map(previousMessages.map((message) => [messageIdentityKey(message), message]));
+  const refreshedMessages = nextMessages.map((message) => {
+    const previous = previousByKey.get(messageIdentityKey(message));
+    return previous?._sparkleUntil ? { ...message, _sparkleUntil: previous._sparkleUntil } : message;
+  });
+  const nextKeys = new Set(refreshedMessages.map(messageIdentityKey).filter(Boolean));
   const unresolvedOptimisticMessages = previousMessages.filter(
     (message) =>
       message.source === "optimistic" &&
@@ -6268,10 +6548,10 @@ function mergeRefreshedMessageTail(previousMessages = [], nextMessages = []) {
   const prefix =
     overlapIndex >= 0
       ? previousMessages.slice(0, overlapIndex)
-      : previousMessages.filter((message) => messageChronologyKey(message) < messageChronologyKey(nextMessages[0]));
+      : previousMessages.filter((message) => messageChronologyKey(message) < messageChronologyKey(refreshedMessages[0]));
   const merged = [
     ...prefix.filter((message) => !nextKeys.has(messageIdentityKey(message))),
-    ...nextMessages,
+    ...refreshedMessages,
   ];
   const mergedKeys = new Set(merged.map(messageIdentityKey).filter(Boolean));
   unresolvedOptimisticMessages.forEach((message) => {
@@ -6302,6 +6582,16 @@ function newMessageItemCount(previousMessages = [], nextMessages = []) {
     const key = messageIdentityKey(message);
     return count + (key && !previousKeys.has(key) ? 1 : 0);
   }, 0);
+}
+
+function sparkleNewInboundMessages(previousMessages = [], nextMessages = []) {
+  const previousKeys = new Set(previousMessages.map(messageIdentityKey).filter(Boolean));
+  const sparkleUntil = Date.now() + MESSAGE_SPARKLE_MS;
+  return nextMessages.map((message) => {
+    const key = messageIdentityKey(message);
+    if (message.direction !== "inbound" || !key || previousKeys.has(key)) return message;
+    return { ...message, _sparkleUntil: sparkleUntil };
+  });
 }
 
 function trackInboundSoundKey(key, { play = false } = {}) {
@@ -6415,6 +6705,7 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     if (messagesChanged) {
       const newMessageCount = newMessageItemCount(state.messages, payload.messages);
       const hasNewMessages = newMessageCount > 0;
+      payload.messages = sparkleNewInboundMessages(state.messages, payload.messages);
       messageScrollMode = shouldStickToBottom ? "bottom" : "preserve";
       if (hasNewMessages && !wasNearBottom) {
         showNewMessagesAffordance(newMessageCount, conversationId);
@@ -7696,6 +7987,7 @@ function applyOptimisticOutgoingMessage(draft, snapshot, { scrollMode = "bottom"
     status_detail: "",
     identity_label: identity?.label || "",
     identity_color: identity?.color || "",
+    _sparkleUntil: Date.now() + MESSAGE_SPARKLE_MS,
   };
   state.messages = [...state.messages, message];
   renderMessages(state.messages, scrollMode);
@@ -8279,7 +8571,18 @@ function bindEvents() {
     closeMobileThread();
   });
   els.themeToggle.addEventListener("click", () => {
-    applyTheme(currentThemeFamily(), { mode: currentThemeMode() === "dark" ? "light" : "dark" });
+    const nextMode = currentThemeMode() === "dark" ? "light" : "dark";
+    applyTheme(currentThemeFamily(), { mode: nextMode });
+    if (isLimitedUser()) {
+      api("/api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ theme_family: currentThemeFamily(), theme_mode: nextMode }),
+      })
+        .then((preferences) => {
+          state.bootstrap.preferences = preferences;
+        })
+        .catch((error) => toast(error.message));
+    }
   });
   els.settingsButton.addEventListener("click", () => {
     if (confirmDiscardIdentityChanges()) openSettings();
@@ -8316,6 +8619,11 @@ function bindEvents() {
     if (voiceGreetingFile) uploadVoiceGreetingFile(voiceGreetingFile);
   });
   els.settingsSections.addEventListener("click", (event) => {
+    const userButton = event.target.closest("[data-limited-user-action]");
+    if (userButton) {
+      handleLimitedUserAction(userButton);
+      return;
+    }
     const addButton = event.target.closest(".settings-add-identity");
     if (addButton) addIdentityFromSettings(addButton);
   });

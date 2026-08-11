@@ -122,6 +122,35 @@ PUBLIC_POST_PATHS = {
     "/api/twilio/webhook",
 }
 
+LIMITED_USER_ADMIN_GET_PATHS = {
+    "/api/auth/2fa",
+    "/api/database/download",
+    "/api/settings",
+    "/api/stats",
+    "/api/uploads/diagnostics",
+    "/api/users",
+}
+LIMITED_USER_ADMIN_POST_PATHS = {
+    "/api/auth/2fa/backup-codes",
+    "/api/auth/2fa/disable",
+    "/api/auth/2fa/enable",
+    "/api/auth/2fa/setup",
+    "/api/auth/account",
+    "/api/contacts/phone",
+    "/api/contacts/sync",
+    "/api/identities",
+    "/api/settings",
+    "/api/users",
+}
+THEME_FAMILIES = {"switchboard", "console", "midnight", "papyrus", "unicorn"}
+THEME_FAMILY_ALIASES = {"girly": "unicorn"}
+THEME_MODES = {"light", "dark"}
+
+
+def canonical_theme_family(value: object) -> str:
+    theme_family = str(value or "").strip().lower()
+    return THEME_FAMILY_ALIASES.get(theme_family, theme_family)
+
 
 def _json_default(value):
     return str(value)
@@ -137,6 +166,249 @@ def _identity_dict(row) -> dict:
         identity.update(identity_autoreply_fields(identity))
         identity.update(voice_rule_fields(identity))
     return identity
+
+
+def _limited_user_dict(row) -> dict:
+    user = _row_dict(row)
+    if not user:
+        return {}
+    user.pop("password_hash", None)
+    user["is_active"] = bool(user.get("is_active"))
+    user["theme_family"] = canonical_theme_family(user.get("theme_family"))
+    user["role"] = "limited"
+    return user
+
+
+def _validate_limited_username(value: object) -> str:
+    username = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", username):
+        raise ValueError("Username must be 1-64 letters, numbers, or . _ @ - characters.")
+    if config.AUTH_USERNAME and username.casefold() == config.AUTH_USERNAME.casefold():
+        raise ValueError("That username is already used by the administrator.")
+    return username
+
+
+def _validate_limited_password(value: object, *, required: bool) -> str:
+    password = str(value or "")
+    if not password and not required:
+        return ""
+    if len(password) < 8:
+        raise ValueError("Password must be at least 8 characters.")
+    return password
+
+
+def _limited_identity(conn, identity_id: object):
+    try:
+        parsed_id = int(identity_id or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Choose a sender number.") from exc
+    row = conn.execute(
+        "SELECT id, phone_number, label FROM identities WHERE id = ? AND is_self = 1 AND is_active = 1",
+        (parsed_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("Choose an active sender number.")
+    return row
+
+
+def list_limited_users() -> dict:
+    with closing(connect()) as conn:
+        init_db(conn)
+        rows = conn.execute(
+            """
+            SELECT u.id, u.username, u.identity_id, u.is_active, u.theme_family, u.theme_mode,
+              u.session_version, u.last_login_at, u.created_at, u.updated_at,
+              i.phone_number, i.label AS identity_label
+            FROM limited_users u
+            JOIN identities i ON i.id = u.identity_id
+            ORDER BY lower(u.username), u.id
+            """
+        ).fetchall()
+        return {"users": [_limited_user_dict(row) for row in rows]}
+
+
+def create_limited_user(payload: dict) -> dict:
+    username = _validate_limited_username(payload.get("username"))
+    password = _validate_limited_password(payload.get("password"), required=True)
+    with closing(connect()) as conn:
+        init_db(conn)
+        identity = _limited_identity(conn, payload.get("identity_id"))
+        timestamp = now_est()
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO limited_users(
+                  username, password_hash, identity_id, is_active,
+                  theme_family, theme_mode, session_version, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 1, 'switchboard', 'light', 1, ?, ?)
+                """,
+                (username, auth.hash_password(password), identity["id"], timestamp, timestamp),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("That username already exists.") from exc
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT u.id, u.username, u.identity_id, u.is_active, u.theme_family, u.theme_mode,
+              u.session_version, u.last_login_at, u.created_at, u.updated_at,
+              i.phone_number, i.label AS identity_label
+            FROM limited_users u JOIN identities i ON i.id = u.identity_id
+            WHERE u.id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+        return {"user": _limited_user_dict(row)}
+
+
+def update_limited_user(user_id: int, payload: dict) -> dict:
+    with closing(connect()) as conn:
+        init_db(conn)
+        existing = conn.execute("SELECT * FROM limited_users WHERE id = ?", (user_id,)).fetchone()
+        if not existing:
+            raise LookupError("Limited user not found.")
+        username = _validate_limited_username(payload.get("username", existing["username"]))
+        password = _validate_limited_password(payload.get("password"), required=False)
+        identity = _limited_identity(conn, payload.get("identity_id", existing["identity_id"]))
+        is_active = 1 if payload.get("is_active", bool(existing["is_active"])) else 0
+        session_version = int(existing["session_version"]) + (
+            1
+            if password
+            or username != existing["username"]
+            or int(identity["id"]) != int(existing["identity_id"])
+            or is_active != int(existing["is_active"])
+            else 0
+        )
+        assignments: list[object] = [username, identity["id"], is_active, session_version, now_est()]
+        password_sql = ""
+        if password:
+            password_sql = ", password_hash = ?"
+            assignments.append(auth.hash_password(password))
+        assignments.append(user_id)
+        try:
+            conn.execute(
+                f"""
+                UPDATE limited_users
+                SET username = ?, identity_id = ?, is_active = ?, session_version = ?, updated_at = ?
+                  {password_sql}
+                WHERE id = ?
+                """,
+                assignments,
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("That username already exists.") from exc
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT u.id, u.username, u.identity_id, u.is_active, u.theme_family, u.theme_mode,
+              u.session_version, u.last_login_at, u.created_at, u.updated_at,
+              i.phone_number, i.label AS identity_label
+            FROM limited_users u JOIN identities i ON i.id = u.identity_id
+            WHERE u.id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        return {"user": _limited_user_dict(row)}
+
+
+def delete_limited_user(user_id: int) -> dict:
+    with closing(connect()) as conn:
+        init_db(conn)
+        row = conn.execute("SELECT username FROM limited_users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise LookupError("Limited user not found.")
+        conn.execute("DELETE FROM limited_users WHERE id = ?", (user_id,))
+        conn.commit()
+        return {"deleted": True, "id": user_id, "username": row["username"]}
+
+
+def limited_user_for_login(username: str):
+    with closing(connect()) as conn:
+        init_db(conn)
+        return conn.execute(
+            """
+            SELECT u.*, i.phone_number, i.label AS identity_label
+            FROM limited_users u
+            JOIN identities i ON i.id = u.identity_id
+            WHERE u.username = ? COLLATE NOCASE AND u.is_active = 1 AND i.is_active = 1
+            """,
+            (str(username or "").strip(),),
+        ).fetchone()
+
+
+def principal_from_session(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    if payload.get("r") != "limited":
+        return {
+            "username": str(payload.get("u") or config.AUTH_USERNAME or "local"),
+            "role": "admin",
+            "user_id": None,
+            "identity_id": None,
+            "phone_number": None,
+        }
+    with closing(connect()) as conn:
+        row = conn.execute(
+            """
+            SELECT u.*, i.phone_number, i.label AS identity_label
+            FROM limited_users u
+            JOIN identities i ON i.id = u.identity_id
+            WHERE u.id = ? AND u.is_active = 1 AND i.is_active = 1
+            """,
+            (int(payload.get("uid") or 0),),
+        ).fetchone()
+    if (
+        not row
+        or row["username"] != payload.get("u")
+        or int(row["session_version"]) != int(payload.get("sv") or 0)
+    ):
+        return None
+    return {
+        "username": row["username"],
+        "role": "limited",
+        "user_id": int(row["id"]),
+        "identity_id": int(row["identity_id"]),
+        "phone_number": row["phone_number"],
+        "identity_label": row["identity_label"],
+        "theme_family": canonical_theme_family(row["theme_family"]),
+        "theme_mode": row["theme_mode"],
+    }
+
+
+def limited_user_preferences(user_id: int) -> dict:
+    with closing(connect()) as conn:
+        row = conn.execute(
+            "SELECT theme_family, theme_mode FROM limited_users WHERE id = ? AND is_active = 1",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise LookupError("Limited user not found.")
+        return {
+            "theme_family": canonical_theme_family(row["theme_family"]),
+            "theme_mode": row["theme_mode"],
+        }
+
+
+def update_limited_user_preferences(user_id: int, payload: dict) -> dict:
+    theme_family = canonical_theme_family(payload.get("theme_family"))
+    theme_mode = str(payload.get("theme_mode") or "").strip().lower()
+    if theme_family not in THEME_FAMILIES:
+        raise ValueError("Choose a valid theme.")
+    if theme_mode not in THEME_MODES:
+        raise ValueError("Choose light or dark mode.")
+    with closing(connect()) as conn:
+        result = conn.execute(
+            """
+            UPDATE limited_users
+            SET theme_family = ?, theme_mode = ?, updated_at = ?
+            WHERE id = ? AND is_active = 1
+            """,
+            (theme_family, theme_mode, now_est(), user_id),
+        )
+        if not result.rowcount:
+            raise LookupError("Limited user not found.")
+        conn.commit()
+    return {"theme_family": theme_family, "theme_mode": theme_mode}
 
 
 def _identity_with_autoreply(conn, identity_id: int) -> dict:
@@ -350,16 +622,70 @@ def _mark_uploaded_attachments_local(message_id: int, media_urls: list[str]) -> 
         conn.close()
 
 
-def _scheduled_messages_for_conversation(conn, conversation_id: int) -> list[dict]:
+def _media_accessible_to_phone(filename: str, phone_number: str | None) -> bool:
+    if not phone_number:
+        return True
+    with closing(connect()) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT a.local_path
+            FROM attachments a
+            JOIN messages m ON m.id = a.message_id
+            WHERE {_message_access_sql('m')}
+            """,
+            (phone_number, phone_number),
+        ).fetchall()
+    return any(Path(str(row["local_path"] or "")).name == filename for row in rows)
+
+
+def _message_access_sql(alias: str) -> str:
+    return f"""
+    (
+      {alias}.from_number = ?
+      OR EXISTS (SELECT 1 FROM json_each({alias}.to_numbers) access_to WHERE access_to.value = ?)
+    )
+    """
+
+
+def _conversation_accessible(conn, conversation_id: int, phone_number: str | None) -> bool:
+    if not phone_number:
+        return True
+    return bool(
+        conn.execute(
+            """
+            SELECT 1
+            FROM conversation_participants
+            WHERE conversation_id = ? AND role = 'self' AND phone_number = ?
+            """,
+            (conversation_id, phone_number),
+        ).fetchone()
+    )
+
+
+def _require_conversation_access(conn, conversation_id: int, phone_number: str | None) -> None:
+    if not _conversation_accessible(conn, conversation_id, phone_number):
+        raise LookupError("Conversation not found.")
+
+
+def _scheduled_messages_for_conversation(
+    conn,
+    conversation_id: int,
+    assigned_phone: str | None = None,
+) -> list[dict]:
+    access_sql = " AND from_number = ?" if assigned_phone else ""
+    params: list[object] = [conversation_id]
+    if assigned_phone:
+        params.append(assigned_phone)
     rows = conn.execute(
-        """
+        f"""
         SELECT *
         FROM scheduled_messages
         WHERE conversation_id = ?
           AND status IN ('queued', 'sending', 'failed')
+          {access_sql}
         ORDER BY scheduled_for, id
         """,
-        (conversation_id,),
+        params,
     ).fetchall()
     contact_names = _contact_names(conn, (row["from_number"] for row in rows))
     scheduled = []
@@ -578,7 +904,11 @@ def _contact_name(conn, phone: str) -> str:
     return _contact_names(conn, [phone]).get(phone) or display_phone(phone)
 
 
-def _participants_for_conversations(conn, conversation_ids) -> dict[int, list[dict]]:
+def _participants_for_conversations(
+    conn,
+    conversation_ids,
+    assigned_phone: str | None = None,
+) -> dict[int, list[dict]]:
     ids = list(dict.fromkeys(int(conversation_id) for conversation_id in conversation_ids))
     participants: dict[int, list[dict]] = {conversation_id: [] for conversation_id in ids}
     if not ids:
@@ -605,6 +935,8 @@ def _participants_for_conversations(conn, conversation_ids) -> dict[int, list[di
     contact_names = _contact_names(conn, (row["phone_number"] for row in rows))
     for row in rows:
         phone = row["phone_number"]
+        if assigned_phone and row["role"] == "self" and phone != assigned_phone:
+            continue
         participants[row["conversation_id"]].append(
             {
                 "phone_number": phone,
@@ -623,8 +955,8 @@ def _participants_for_conversations(conn, conversation_ids) -> dict[int, list[di
     return participants
 
 
-def _participants(conn, conversation_id: int) -> list[dict]:
-    return _participants_for_conversations(conn, [conversation_id]).get(conversation_id, [])
+def _participants(conn, conversation_id: int, assigned_phone: str | None = None) -> list[dict]:
+    return _participants_for_conversations(conn, [conversation_id], assigned_phone).get(conversation_id, [])
 
 
 def _conversation_title_from_participants(participants: list[dict], fallback: str | None = None) -> str:
@@ -669,30 +1001,50 @@ def _conversation_direct_search_expr(terms: list[str]) -> tuple[str, list[str]]:
     return " AND ".join(clauses) if clauses else "0", params
 
 
-def _conversation_text_search_expr(table: str, alias: str, terms: list[str]) -> tuple[str, list[str]]:
+def _conversation_text_search_expr(
+    table: str,
+    alias: str,
+    terms: list[str],
+    assigned_phone: str | None = None,
+) -> tuple[str, list[str]]:
     clauses: list[str] = []
     params: list[str] = []
     for term in terms:
         clauses.append(f"lower(COALESCE({alias}.text, '')) LIKE ?")
         params.append(f"%{term}%")
     where_sql = " AND ".join(clauses) if clauses else "0"
+    access_sql = ""
+    access_params: list[str] = []
+    if assigned_phone:
+        if table == "messages":
+            access_sql = f"AND {_message_access_sql(alias)}"
+            access_params = [assigned_phone, assigned_phone]
+        else:
+            access_sql = f"AND {alias}.from_number = ?"
+            access_params = [assigned_phone]
     return (
         f"""
         EXISTS (
           SELECT 1
           FROM {table} {alias}
           WHERE {alias}.conversation_id = c.id
+            {access_sql}
             AND {where_sql}
         )
         """,
-        params,
+        [*access_params, *params],
     )
 
 
-def _conversation_search_clause(terms: list[str]) -> tuple[str, list[str]]:
+def _conversation_search_clause(
+    terms: list[str],
+    assigned_phone: str | None = None,
+) -> tuple[str, list[str]]:
     direct_sql, direct_params = _conversation_direct_search_expr(terms)
-    message_sql, message_params = _conversation_text_search_expr("messages", "search_m", terms)
-    scheduled_sql, scheduled_params = _conversation_text_search_expr("scheduled_messages", "search_sm", terms)
+    message_sql, message_params = _conversation_text_search_expr("messages", "search_m", terms, assigned_phone)
+    scheduled_sql, scheduled_params = _conversation_text_search_expr(
+        "scheduled_messages", "search_sm", terms, assigned_phone
+    )
     return (
         f"({direct_sql}) OR ({message_sql}) OR ({scheduled_sql})",
         [*direct_params, *message_params, *scheduled_params],
@@ -719,21 +1071,29 @@ def _search_snippet(text: str, terms: list[str], max_length: int = 160, context:
     return snippet
 
 
-def _conversation_message_search_match(conn, conversation_id: int, terms: list[str]) -> dict | None:
+def _conversation_message_search_match(
+    conn,
+    conversation_id: int,
+    terms: list[str],
+    assigned_phone: str | None = None,
+) -> dict | None:
     if not terms:
         return None
     where_sql = " AND ".join(["lower(COALESCE(text, '')) LIKE ?"] * len(terms))
     params = [f"%{term}%" for term in terms]
+    access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+    access_params = [assigned_phone, assigned_phone] if assigned_phone else []
     row = conn.execute(
         f"""
         SELECT id, text, occurred_at
         FROM messages
         WHERE conversation_id = ?
+          {access_sql}
           AND {where_sql}
         ORDER BY occurred_at DESC, id DESC
         LIMIT 1
         """,
-        (conversation_id, *params),
+        (conversation_id, *access_params, *params),
     ).fetchone()
     if not row:
         return None
@@ -783,7 +1143,11 @@ def _decorate_conversation_summary(row, participants: list[dict]) -> dict:
     return item
 
 
-def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
+def _list_conversations(
+    conn,
+    query: dict[str, list[str]],
+    assigned_phone: str | None = None,
+) -> dict:
     search = (query.get("search") or [""])[0].strip()
     search_terms = _search_terms(search)
     hidden = (query.get("hidden") or ["0"])[0].lower() in {"1", "true", "yes"}
@@ -795,6 +1159,18 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
     clauses: list[str] = []
     clauses.append("COALESCE(c.is_archived, 0) = ?")
     params: list = [1 if hidden else 0]
+    if assigned_phone:
+        clauses.append(
+            """
+            EXISTS (
+              SELECT 1 FROM conversation_participants access_cp
+              WHERE access_cp.conversation_id = c.id
+                AND access_cp.role = 'self'
+                AND access_cp.phone_number = ?
+            )
+            """
+        )
+        params.append(assigned_phone)
     search_select_params: list[str] = []
     search_rank_select = "0 AS search_name_rank"
     if unread:
@@ -803,7 +1179,7 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
         direct_search_sql, direct_search_params = _conversation_direct_search_expr(search_terms)
         search_rank_select = f"CASE WHEN {direct_search_sql} THEN 1 ELSE 0 END AS search_name_rank"
         search_select_params.extend(direct_search_params)
-        search_clause, search_params = _conversation_search_clause(search_terms)
+        search_clause, search_params = _conversation_search_clause(search_terms, assigned_phone)
         if search_clause:
             clauses.append(f"({search_clause})")
             params.extend(search_params)
@@ -818,6 +1194,11 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
         )
         params.extend([before, before, before_id])
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    message_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+    scheduled_access_sql = "AND from_number = ?" if assigned_phone else ""
+    access_select_params: list[str] = []
+    if assigned_phone:
+        access_select_params.extend([assigned_phone, assigned_phone, assigned_phone])
     rows = conn.execute(
         f"""
         SELECT c.*,
@@ -842,6 +1223,7 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
           SELECT id FROM messages
           WHERE conversation_id = c.id
             AND COALESCE(source, '') != 'autoreply'
+            {message_access_sql}
             AND (
               c.last_message_at IS NULL
               OR occurred_at <= c.last_message_at
@@ -858,6 +1240,7 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
           SELECT id FROM scheduled_messages
           WHERE conversation_id = c.id
             AND status IN ('queued', 'sending', 'failed')
+            {scheduled_access_sql}
           ORDER BY scheduled_for DESC, id DESC
           LIMIT 1
         )
@@ -865,11 +1248,13 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
         ORDER BY search_name_rank DESC, list_sort_at DESC, c.id DESC
         LIMIT ?
         """,
-        (*search_select_params, *params, limit + 1),
+        (*search_select_params, *access_select_params, *params, limit + 1),
     ).fetchall()
     has_more = len(rows) > limit
     rows = rows[:limit]
-    participants_by_conversation = _participants_for_conversations(conn, (row["id"] for row in rows))
+    participants_by_conversation = _participants_for_conversations(
+        conn, (row["id"] for row in rows), assigned_phone
+    )
     conversations = []
     for row in rows:
         direct_search_match = bool(row["search_name_rank"]) if search_terms else False
@@ -878,14 +1263,16 @@ def _list_conversations(conn, query: dict[str, list[str]]) -> dict:
             participants_by_conversation.get(row["id"], []),
         )
         if search_terms and not direct_search_match:
-            item["search_match"] = _conversation_message_search_match(conn, row["id"], search_terms)
+            item["search_match"] = _conversation_message_search_match(
+                conn, row["id"], search_terms, assigned_phone
+            )
         conversations.append(item)
     return {"conversations": conversations, "has_more": has_more}
 
 
-def list_conversations(query: dict[str, list[str]]) -> dict:
+def list_conversations(query: dict[str, list[str]], assigned_phone: str | None = None) -> dict:
     with closing(connect()) as conn:
-        return _list_conversations(conn, query)
+        return _list_conversations(conn, query, assigned_phone)
 
 
 def _notification_key(row) -> str:
@@ -901,12 +1288,18 @@ def _parse_notification_key(value: str) -> tuple[str, int]:
     return occurred_at, int(message_id)
 
 
-def _mobile_notifications(conn, query: dict[str, list[str]]) -> dict:
+def _mobile_notifications(
+    conn,
+    query: dict[str, list[str]],
+    assigned_phone: str | None = None,
+) -> dict:
     enabled = get_bool("notifications.native_enabled", config.NATIVE_NOTIFICATIONS_ENABLED)
     interval_minutes = max(get_int("notifications.native_interval_minutes", config.NATIVE_NOTIFICATION_INTERVAL_MINUTES), 15)
     limit = min(int((query.get("limit") or ["20"])[0]), 50)
     since_at, since_id = _parse_notification_key((query.get("since") or [""])[0])
     rows = []
+    access_sql = f"AND {_message_access_sql('m')}" if assigned_phone else ""
+    access_params = [assigned_phone, assigned_phone] if assigned_phone else []
     if enabled and since_at:
         rows = conn.execute(
             f"""
@@ -926,6 +1319,7 @@ def _mobile_notifications(conn, query: dict[str, list[str]]) -> dict:
             FROM messages m
             JOIN conversations c ON c.id = m.conversation_id
             WHERE m.direction = 'inbound'
+              {access_sql}
               AND COALESCE(c.is_archived, 0) = 0
               AND (m.occurred_at > ? OR (m.occurred_at = ? AND m.id > ?))
               AND (
@@ -936,18 +1330,20 @@ def _mobile_notifications(conn, query: dict[str, list[str]]) -> dict:
             ORDER BY m.occurred_at ASC, m.id ASC
             LIMIT ?
             """,
-            (since_at, since_at, since_id, limit),
+            (*access_params, since_at, since_at, since_id, limit),
         ).fetchall()
     latest = rows[-1] if rows else conn.execute(
-        """
+        f"""
         SELECT m.id, m.occurred_at
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         WHERE m.direction = 'inbound'
+          {access_sql}
           AND COALESCE(c.is_archived, 0) = 0
         ORDER BY m.occurred_at DESC, m.id DESC
         LIMIT 1
-        """
+        """,
+        access_params,
     ).fetchone()
     notifications = []
     for row in rows:
@@ -980,18 +1376,71 @@ def _mobile_notifications(conn, query: dict[str, list[str]]) -> dict:
     }
 
 
-def mobile_notifications(query: dict[str, list[str]]) -> dict:
+def mobile_notifications(
+    query: dict[str, list[str]],
+    assigned_phone: str | None = None,
+) -> dict:
     with closing(connect()) as conn:
-        return _mobile_notifications(conn, query)
+        return _mobile_notifications(conn, query, assigned_phone)
 
 
-def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
+def _refresh_tokens(
+    conn,
+    conversation_id: int | None = None,
+    assigned_phone: str | None = None,
+) -> dict[str, str]:
     def token_part(row, key: str) -> str:
         value = row[key]
         return "" if value is None else str(value)
 
-    list_row = conn.execute(
-        f"""
+    if assigned_phone:
+        list_row = conn.execute(
+            f"""
+            WITH accessible_conversations AS (
+              SELECT DISTINCT conversation_id AS id
+              FROM conversation_participants
+              WHERE role = 'self' AND phone_number = ?
+            ),
+            accessible_messages AS (
+              SELECT m.* FROM messages m
+              JOIN accessible_conversations ac ON ac.id = m.conversation_id
+              WHERE {_message_access_sql('m')}
+            ),
+            accessible_scheduled AS (
+              SELECT sm.* FROM scheduled_messages sm
+              JOIN accessible_conversations ac ON ac.id = sm.conversation_id
+              WHERE sm.from_number = ?
+            )
+            SELECT
+              (SELECT COUNT(*) FROM accessible_conversations) AS conversation_count,
+              (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 1) AS hidden_count,
+              (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_count,
+              (SELECT COALESCE(MAX(c.updated_at), '') FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id) AS conversations_updated_at,
+              (SELECT COUNT(*) FROM accessible_messages) AS message_count,
+              (SELECT COALESCE(MAX(updated_at), '') FROM accessible_messages) AS messages_updated_at,
+              (SELECT COUNT(*) FROM accessible_scheduled) AS scheduled_count,
+              (SELECT COALESCE(MAX(updated_at), '') FROM accessible_scheduled) AS scheduled_updated_at,
+              1 AS identity_count,
+              (SELECT COALESCE(updated_at, '') FROM identities WHERE phone_number = ?) AS identities_updated_at,
+              (
+                SELECT COUNT(DISTINCT cp.phone_number)
+                FROM conversation_participants cp
+                JOIN accessible_conversations ac ON ac.id = cp.conversation_id
+                WHERE cp.role = 'participant'
+              ) AS contact_count,
+              (
+                SELECT COALESCE(MAX(c.updated_at), '')
+                FROM contacts c
+                JOIN contact_phones cp ON cp.contact_id = c.id
+                JOIN conversation_participants participant ON participant.phone_number = cp.phone_number
+                JOIN accessible_conversations ac ON ac.id = participant.conversation_id
+              ) AS contacts_updated_at
+            """,
+            (assigned_phone, assigned_phone, assigned_phone, assigned_phone, assigned_phone),
+        ).fetchone()
+    else:
+        list_row = conn.execute(
+            f"""
         SELECT
           (SELECT COUNT(*) FROM conversations) AS conversation_count,
           (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 1) AS hidden_count,
@@ -1005,8 +1454,8 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
           (SELECT COALESCE(MAX(updated_at), '') FROM identities) AS identities_updated_at,
           (SELECT COUNT(*) FROM contacts) AS contact_count,
           (SELECT COALESCE(MAX(updated_at), '') FROM contacts) AS contacts_updated_at
-        """
-    ).fetchone()
+            """
+        ).fetchone()
     tokens = {
         "list": "|".join(
             token_part(list_row, key)
@@ -1035,8 +1484,35 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
         "conversation": "",
     }
     if conversation_id:
-        row = conn.execute(
-            """
+        _require_conversation_access(conn, conversation_id, assigned_phone)
+        if assigned_phone:
+            row = conn.execute(
+                f"""
+                SELECT
+                  c.updated_at AS conversation_updated_at,
+                  COALESCE(c.dealt_with_at, '') AS dealt_with_at,
+                  COALESCE(c.manual_unread_at, '') AS manual_unread_at,
+                  COALESCE(c.last_message_at, '') AS last_message_at,
+                  (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND {_message_access_sql('m')}) AS message_count,
+                  (SELECT COALESCE(MAX(m.updated_at), '') FROM messages m WHERE m.conversation_id = c.id AND {_message_access_sql('m')}) AS messages_updated_at,
+                  (SELECT COALESCE(MAX(m.occurred_at), '') FROM messages m WHERE m.conversation_id = c.id AND {_message_access_sql('m')}) AS messages_occurred_at,
+                  (SELECT COUNT(*) FROM scheduled_messages sm WHERE sm.conversation_id = c.id AND sm.from_number = ?) AS scheduled_count,
+                  (SELECT COALESCE(MAX(sm.updated_at), '') FROM scheduled_messages sm WHERE sm.conversation_id = c.id AND sm.from_number = ?) AS scheduled_updated_at,
+                  (SELECT COALESCE(MAX(sm.scheduled_for), '') FROM scheduled_messages sm WHERE sm.conversation_id = c.id AND sm.from_number = ? AND sm.status IN ('queued', 'sending', 'failed')) AS scheduled_for
+                FROM conversations c
+                WHERE c.id = ?
+                """,
+                (
+                    assigned_phone, assigned_phone,
+                    assigned_phone, assigned_phone,
+                    assigned_phone, assigned_phone,
+                    assigned_phone, assigned_phone, assigned_phone,
+                    conversation_id,
+                ),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
             SELECT
               c.updated_at AS conversation_updated_at,
               COALESCE(c.dealt_with_at, '') AS dealt_with_at,
@@ -1053,8 +1529,8 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
             WHERE c.id = ?
             GROUP BY c.id
             """,
-            (conversation_id,),
-        ).fetchone()
+                (conversation_id,),
+            ).fetchone()
         if row:
             tokens["conversation"] = "|".join(
                 token_part(row, key)
@@ -1074,24 +1550,36 @@ def _refresh_tokens(conn, conversation_id: int | None = None) -> dict[str, str]:
     return tokens
 
 
-def refresh_state(query: dict[str, list[str]]) -> dict:
+def refresh_state(
+    query: dict[str, list[str]],
+    assigned_phone: str | None = None,
+) -> dict:
     conversation_id_raw = (query.get("conversation_id") or ["0"])[0]
     conversation_id = int(conversation_id_raw) if conversation_id_raw.isdigit() else None
     with closing(connect()) as conn:
         return {
             "server_time": now_est(),
-            "tokens": _refresh_tokens(conn, conversation_id),
+            "tokens": _refresh_tokens(conn, conversation_id, assigned_phone),
         }
 
 
-def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
+def _get_messages(
+    conn,
+    conversation_id: int,
+    query: dict[str, list[str]] | None = None,
+    assigned_phone: str | None = None,
+) -> dict:
     query = query or {}
+    _require_conversation_access(conn, conversation_id, assigned_phone)
     limit = min(int((query.get("limit") or [str(MESSAGE_PAGE_SIZE)])[0]), 250)
     before = (query.get("before") or [""])[0]
     before_id_raw = (query.get("before_id") or ["0"])[0]
     before_id = int(before_id_raw) if before_id_raw.isdigit() else 0
     where = "WHERE m.conversation_id = ?"
     params: list = [conversation_id]
+    if assigned_phone:
+        where += f" AND {_message_access_sql('m')}"
+        params.extend([assigned_phone, assigned_phone])
     if before and before_id:
         where += " AND (m.occurred_at < ? OR (m.occurred_at = ? AND m.id < ?))"
         params.extend([before, before, before_id])
@@ -1133,32 +1621,44 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
         messages.append(_decorate_message_status(message))
     scheduled_messages = []
     if not before and not before_id:
-        scheduled_messages = _scheduled_messages_for_conversation(conn, conversation_id)
+        scheduled_messages = _scheduled_messages_for_conversation(conn, conversation_id, assigned_phone)
         messages.extend(scheduled_messages)
         messages.sort(key=lambda item: (item.get("occurred_at") or "", str(item.get("id") or "")))
     older_count = 0
     if rows:
         oldest = rows[0]
+        older_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+        older_access_params = [assigned_phone, assigned_phone] if assigned_phone else []
         older_count = conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS count
             FROM messages
             WHERE conversation_id = ?
+              {older_access_sql}
               AND (occurred_at < ? OR (occurred_at = ? AND id < ?))
             """,
-            (conversation_id, oldest["occurred_at"], oldest["occurred_at"], oldest["id"]),
+            (
+                conversation_id,
+                *older_access_params,
+                oldest["occurred_at"],
+                oldest["occurred_at"],
+                oldest["id"],
+            ),
         ).fetchone()["count"]
     conversation = _row_dict(conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone())
+    last_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+    last_access_params = [assigned_phone, assigned_phone] if assigned_phone else []
     last_message = conn.execute(
-        """
+        f"""
         SELECT direction, occurred_at
         FROM messages
         WHERE conversation_id = ?
           AND COALESCE(source, '') != 'autoreply'
+          {last_access_sql}
         ORDER BY occurred_at DESC, id DESC
         LIMIT 1
         """,
-        (conversation_id,),
+        (conversation_id, *last_access_params),
     ).fetchone()
     if last_message:
         conversation["last_direction"] = last_message["direction"]
@@ -1180,7 +1680,7 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
         ):
             conversation["last_direction"] = "outbound"
             conversation["last_occurred_at"] = latest_scheduled["occurred_at"]
-    participants = _participants(conn, conversation_id)
+    participants = _participants(conn, conversation_id, assigned_phone)
     conversation["title"] = _conversation_title_from_participants(participants)
     conversation["participants"] = participants
     return {
@@ -1191,17 +1691,26 @@ def _get_messages(conn, conversation_id: int, query: dict[str, list[str]] | None
     }
 
 
-def get_messages(conversation_id: int, query: dict[str, list[str]] | None = None) -> dict:
+def get_messages(
+    conversation_id: int,
+    query: dict[str, list[str]] | None = None,
+    assigned_phone: str | None = None,
+) -> dict:
     with closing(connect()) as conn:
-        return _get_messages(conn, conversation_id, query)
+        return _get_messages(conn, conversation_id, query, assigned_phone)
 
 
-def _bootstrap(conn) -> dict:
+def _bootstrap(conn, principal: dict | None = None) -> dict:
     server_time = now_est()
+    assigned_phone = str((principal or {}).get("phone_number") or "") or None
+    identity_where = "WHERE i.phone_number = ?" if assigned_phone else ""
+    identity_params: list[object] = [DEFAULT_AUTOREPLY_COOLDOWN_HOURS]
+    if assigned_phone:
+        identity_params.append(assigned_phone)
     identities = [
         _identity_dict(row)
         for row in conn.execute(
-            """
+            f"""
             SELECT i.*,
               COALESCE(ar.enabled, 0) AS autoreply_enabled,
               COALESCE(ar.message, '') AS autoreply_message,
@@ -1216,15 +1725,49 @@ def _bootstrap(conn) -> dict:
             FROM identities i
             LEFT JOIN autoreply_rules ar ON ar.phone_number = i.phone_number
             LEFT JOIN voice_rules vr ON vr.phone_number = i.phone_number
+            {identity_where}
             ORDER BY i.id
             """,
-            (DEFAULT_AUTOREPLY_COOLDOWN_HOURS,),
+            identity_params,
         ).fetchall()
     ]
     default_identity = _apply_default_identity(identities)
-    stats = _row_dict(
-        conn.execute(
-            f"""
+    if assigned_phone:
+        stats = _row_dict(
+            conn.execute(
+                f"""
+                WITH accessible_conversations AS (
+                  SELECT DISTINCT conversation_id AS id
+                  FROM conversation_participants
+                  WHERE role = 'self' AND phone_number = ?
+                ),
+                accessible_messages AS (
+                  SELECT m.id
+                  FROM messages m
+                  JOIN accessible_conversations ac ON ac.id = m.conversation_id
+                  WHERE {_message_access_sql('m')}
+                )
+                SELECT
+                  (SELECT COUNT(*) FROM accessible_conversations) AS conversations,
+                  (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0) AS inbox_conversations,
+                  (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 1) AS hidden_conversations,
+                  (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_conversations,
+                  (SELECT COUNT(*) FROM accessible_messages) AS messages,
+                  (SELECT COUNT(*) FROM attachments a JOIN accessible_messages am ON am.id = a.message_id) AS attachments,
+                  (
+                    SELECT COUNT(DISTINCT cp.phone_number)
+                    FROM conversation_participants cp
+                    JOIN accessible_conversations ac ON ac.id = cp.conversation_id
+                    WHERE cp.role = 'participant'
+                  ) AS contacts
+                """,
+                (assigned_phone, assigned_phone, assigned_phone),
+            ).fetchone()
+        )
+    else:
+        stats = _row_dict(
+            conn.execute(
+                f"""
             SELECT
               (SELECT COUNT(*) FROM conversations) AS conversations,
               (SELECT COUNT(*) FROM conversations WHERE COALESCE(is_archived, 0) = 0) AS inbox_conversations,
@@ -1233,9 +1776,9 @@ def _bootstrap(conn) -> dict:
               (SELECT COUNT(*) FROM messages) AS messages,
               (SELECT COUNT(*) FROM attachments) AS attachments,
               (SELECT COUNT(*) FROM contacts) AS contacts
-            """
-        ).fetchone()
-    )
+                """
+            ).fetchone()
+        )
     providers = configured_providers()
     messaging_providers = configured_messaging_providers()
     return {
@@ -1251,16 +1794,32 @@ def _bootstrap(conn) -> dict:
         "google_contacts_configured": providers.get("google", False),
         "contacts_provider": active_provider(),
         "contact_providers": providers,
-        "settings": configured_values(),
+        "settings": configured_values() if not assigned_phone else {"sections": []},
         "mark_read_on_open": get_bool("behavior.mark_read_on_open", False),
         "details_collapsed_default": get_bool("behavior.details_collapsed_default", True),
         "default_identity": default_identity,
+        "access": {
+            "role": (principal or {}).get("role") or "admin",
+            "username": (principal or {}).get("username") or config.AUTH_USERNAME or "local",
+            "limited": bool(assigned_phone),
+            "phone_number": assigned_phone or "",
+        },
+        "preferences": (
+            {
+                "theme_family": canonical_theme_family(
+                    (principal or {}).get("theme_family") or "switchboard"
+                ),
+                "theme_mode": (principal or {}).get("theme_mode") or "light",
+            }
+            if assigned_phone
+            else {}
+        ),
     }
 
 
-def bootstrap() -> dict:
+def bootstrap(principal: dict | None = None) -> dict:
     with closing(connect()) as conn:
-        return _bootstrap(conn)
+        return _bootstrap(conn, principal)
 
 
 STATS_PERIOD_KEYS = {
@@ -1730,7 +2289,10 @@ def search_contacts(query: dict[str, list[str]]) -> dict:
         return _search_contacts(conn, query)
 
 
-def match_conversation(query: dict[str, list[str]]) -> dict:
+def match_conversation(
+    query: dict[str, list[str]],
+    assigned_phone: str | None = None,
+) -> dict:
     raw_recipients: list[str] = []
     for value in (query.get("recipient") or []) + (query.get("recipients") or []):
         raw_recipients.extend(part.strip() for part in value.split(",") if part.strip())
@@ -1740,18 +2302,24 @@ def match_conversation(query: dict[str, list[str]]) -> dict:
     key = conversation_key(recipients)
     with closing(connect()) as conn:
         row = conn.execute("SELECT id FROM conversations WHERE conversation_key = ?", (key,)).fetchone()
-    if not row:
+        accessible = bool(row and _conversation_accessible(conn, int(row["id"]), assigned_phone))
+    if not row or not accessible:
         return {"conversation": None}
-    return {"conversation_id": int(row["id"]), "conversation": get_messages(int(row["id"]))["conversation"]}
+    return {
+        "conversation_id": int(row["id"]),
+        "conversation": get_messages(int(row["id"]), assigned_phone=assigned_phone)["conversation"],
+    }
 
 
-def save_contact_name(payload: dict) -> dict:
+def save_contact_name(payload: dict, assigned_phone: str | None = None) -> dict:
     phone = payload.get("phone_number") or payload.get("phone") or ""
     display_name = str(payload.get("display_name") or payload.get("name") or "").strip()
     result = save_synced_contact_name(phone, display_name)
     conversation_id = payload.get("conversation_id")
     if conversation_id:
-        result["conversation"] = get_messages(int(conversation_id))["conversation"]
+        result["conversation"] = get_messages(
+            int(conversation_id), assigned_phone=assigned_phone
+        )["conversation"]
     return result
 
 
@@ -1921,9 +2489,14 @@ def update_identity(identity_id: int, payload: dict) -> dict:
     return {"identity": identity}
 
 
-def set_conversation_archived(conversation_id: int, archived: bool) -> dict:
+def set_conversation_archived(
+    conversation_id: int,
+    archived: bool,
+    assigned_phone: str | None = None,
+) -> dict:
     conn = connect()
     init_db(conn)
+    _require_conversation_access(conn, conversation_id, assigned_phone)
     timestamp = now_est()
     conn.execute(
         """
@@ -1992,8 +2565,13 @@ def _conversation_summary(conn, conversation_id: int) -> dict:
     return _decorate_conversation_summary(row, _participants(conn, conversation_id))
 
 
-def set_conversation_dealt(conversation_id: int, dealt: bool = True) -> dict:
+def set_conversation_dealt(
+    conversation_id: int,
+    dealt: bool = True,
+    assigned_phone: str | None = None,
+) -> dict:
     with closing(connect()) as conn:
+        _require_conversation_access(conn, conversation_id, assigned_phone)
         row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
         if not row:
             raise ValueError("Conversation not found.")
@@ -2013,7 +2591,7 @@ def set_conversation_dealt(conversation_id: int, dealt: bool = True) -> dict:
         return {"conversation": conversation, "unread_count": _unread_conversation_count(conn)}
 
 
-def bulk_update_conversations(payload: dict) -> dict:
+def bulk_update_conversations(payload: dict, assigned_phone: str | None = None) -> dict:
     ids = []
     for value in payload.get("conversation_ids") or payload.get("ids") or []:
         try:
@@ -2029,6 +2607,15 @@ def bulk_update_conversations(payload: dict) -> dict:
         raise ValueError("Bulk action must be read, unread, hide, or unhide.")
     conn = connect()
     init_db(conn)
+    if assigned_phone:
+        inaccessible = [
+            conversation_id
+            for conversation_id in ids
+            if not _conversation_accessible(conn, conversation_id, assigned_phone)
+        ]
+        if inaccessible:
+            conn.close()
+            raise LookupError("One or more conversations were not found.")
     timestamp = now_est()
     placeholders = ",".join("?" for _ in ids)
     if action in {"hide", "unhide"}:
@@ -2065,11 +2652,15 @@ def bulk_update_conversations(payload: dict) -> dict:
     return {"updated": len(ids), "action": action, "conversation_ids": ids}
 
 
-def create_conversation(payload: dict) -> dict:
+def create_conversation(payload: dict, assigned_phone: str | None = None) -> dict:
     recipients = [normalize_phone(x) for x in payload.get("recipients", []) if normalize_phone(x)]
     if not recipients:
         raise ValueError("At least one recipient is required.")
     from_number = normalize_phone(payload.get("from_number") or "")
+    if assigned_phone:
+        if from_number and from_number != assigned_phone:
+            raise ValueError("You can only send from your assigned number.")
+        from_number = assigned_phone
     conn = connect()
     init_db(conn)
     conversation_id = ensure_conversation(
@@ -2079,7 +2670,10 @@ def create_conversation(payload: dict) -> dict:
         payload.get("title"),
     )
     conn.commit()
-    return {"conversation_id": conversation_id, **get_messages(conversation_id)}
+    return {
+        "conversation_id": conversation_id,
+        **get_messages(conversation_id, assigned_phone=assigned_phone),
+    }
 
 
 def _unread_conversation_count(conn) -> int:
@@ -2122,15 +2716,23 @@ def _mark_reply_message_read(message_id: int) -> dict | None:
         }
 
 
-def send_api_message(payload: dict) -> dict:
+def send_api_message(payload: dict, assigned_phone: str | None = None) -> dict:
     conversation_id = payload.get("conversation_id")
     to_numbers = [normalize_phone(x) for x in payload.get("to_numbers", []) if normalize_phone(x)]
     text = str(payload.get("text") or "")
     media_urls = [str(x).strip() for x in payload.get("media_urls", []) if str(x).strip()]
     if not text and not media_urls:
         raise ValueError("Message text or media URL is required.")
+    from_number = normalize_phone(payload.get("from_number") or "")
+    if assigned_phone:
+        if from_number and from_number != assigned_phone:
+            raise ValueError("You can only send from your assigned number.")
+        from_number = assigned_phone
+        if conversation_id:
+            with closing(connect()) as conn:
+                _require_conversation_access(conn, int(conversation_id), assigned_phone)
     result = send_provider_message(
-        from_number=payload.get("from_number"),
+        from_number=from_number or payload.get("from_number"),
         to_numbers=to_numbers,
         text=text,
         media_urls=media_urls,
@@ -2199,7 +2801,7 @@ def send_external_api_message(payload: dict) -> dict:
     return api_message_receipt(int(message_id))
 
 
-def send_api_fax(payload: dict) -> dict:
+def send_api_fax(payload: dict, assigned_phone: str | None = None) -> dict:
     conversation_id = payload.get("conversation_id")
     media_url = str(payload.get("media_url") or "").strip()
     to_number = normalize_phone(payload.get("to_number"))
@@ -2207,8 +2809,16 @@ def send_api_fax(payload: dict) -> dict:
         raise ValueError("Choose a fax document.")
     if not to_number:
         raise ValueError("Enter a fax recipient.")
+    from_number = normalize_phone(payload.get("from_number") or "")
+    if assigned_phone:
+        if from_number and from_number != assigned_phone:
+            raise ValueError("You can only send from your assigned number.")
+        from_number = assigned_phone
+        if conversation_id:
+            with closing(connect()) as conn:
+                _require_conversation_access(conn, int(conversation_id), assigned_phone)
     result = send_telnyx_fax(
-        from_number=payload.get("from_number"),
+        from_number=from_number or payload.get("from_number"),
         to_number=to_number,
         media_url=media_url,
         filename=str(payload.get("filename") or ""),
@@ -2250,7 +2860,7 @@ def _scheduled_message_dict(row) -> dict:
     return message
 
 
-def schedule_api_message(payload: dict) -> dict:
+def schedule_api_message(payload: dict, assigned_phone: str | None = None) -> dict:
     conversation_id = payload.get("conversation_id")
     to_numbers = [normalize_phone(x) for x in payload.get("to_numbers", []) if normalize_phone(x)]
     text = str(payload.get("text") or "")
@@ -2264,8 +2874,13 @@ def schedule_api_message(payload: dict) -> dict:
     conn = connect()
     init_db(conn)
     from_number = normalize_phone(payload.get("from_number") or "")
+    if assigned_phone:
+        if from_number and from_number != assigned_phone:
+            raise ValueError("You can only send from your assigned number.")
+        from_number = assigned_phone
     if conversation_id:
         conversation_id = int(conversation_id)
+        _require_conversation_access(conn, conversation_id, assigned_phone)
     else:
         known_self = self_numbers(conn)
         remote_numbers = sorted(n for n in to_numbers if n not in known_self)
@@ -2294,12 +2909,14 @@ def schedule_api_message(payload: dict) -> dict:
     return {"conversation_id": conversation_id, "scheduled_message": _scheduled_message_dict(row)}
 
 
-def cancel_scheduled_message(scheduled_id: int) -> dict:
+def cancel_scheduled_message(scheduled_id: int, assigned_phone: str | None = None) -> dict:
     conn = connect()
     init_db(conn)
     row = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
     if not row:
         raise ValueError("Scheduled message not found.")
+    if assigned_phone and row["from_number"] != assigned_phone:
+        raise LookupError("Scheduled message not found.")
     status = str(row["status"] or "")
     if status != "queued":
         raise ValueError("Only queued scheduled messages can be canceled.")
@@ -2325,12 +2942,14 @@ def cancel_scheduled_message(scheduled_id: int) -> dict:
     }
 
 
-def send_scheduled_message_now(scheduled_id: int) -> dict:
+def send_scheduled_message_now(scheduled_id: int, assigned_phone: str | None = None) -> dict:
     conn = connect()
     init_db(conn)
     row = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
     if not row:
         raise ValueError("Scheduled message not found.")
+    if assigned_phone and row["from_number"] != assigned_phone:
+        raise LookupError("Scheduled message not found.")
     status = str(row["status"] or "")
     if status != "queued":
         raise ValueError("Only queued scheduled messages can be sent now.")
@@ -2633,6 +3252,16 @@ def _validate_account_password(password: str) -> None:
         raise ValueError("Password must be at least 8 characters.")
 
 
+def _ensure_admin_username_available(username: str) -> None:
+    with closing(connect()) as conn:
+        init_db(conn)
+        if conn.execute(
+            "SELECT 1 FROM limited_users WHERE username = ? COLLATE NOCASE",
+            (username,),
+        ).fetchone():
+            raise ValueError("That username is already used by a limited user.")
+
+
 def setup_auth_account(payload: dict) -> dict:
     if auth.auth_configured() and not auth.auth_disabled():
         raise ValueError("Sign-in is already configured.")
@@ -2641,6 +3270,7 @@ def setup_auth_account(payload: dict) -> dict:
     confirm = str(payload.get("confirm_password") or payload.get("confirm") or "")
     if not username:
         raise ValueError("Enter a username.")
+    _ensure_admin_username_available(username)
     _validate_account_password(password)
     if password != confirm:
         raise ValueError("Passwords do not match.")
@@ -2663,6 +3293,7 @@ def update_auth_account(payload: dict) -> dict:
     confirm = str(payload.get("confirm_password") or "")
     if not username:
         raise ValueError("Enter a username.")
+    _ensure_admin_username_available(username)
     password_hash = config.AUTH_PASSWORD_HASH
     if new_password:
         _validate_account_password(new_password)
@@ -2854,6 +3485,8 @@ class TextingHandler(BaseHTTPRequestHandler):
         self._request_body_length = 0
         self._request_body_bytes_read = 0
         self._request_body_framing_invalid = False
+        self._principal_token = object()
+        self._principal = None
 
         transfer_encoding = (self.headers.get("Transfer-Encoding") or "").strip()
         content_lengths = self.headers.get_all("Content-Length", [])
@@ -3032,7 +3665,39 @@ class TextingHandler(BaseHTTPRequestHandler):
         return morsel.value if morsel else None
 
     def _current_user(self) -> str | None:
-        return auth.verify_session_token(self._session_token())
+        principal = self._current_principal()
+        return str(principal.get("username") or "") if principal else None
+
+    def _current_principal(self) -> dict | None:
+        token = self._session_token()
+        cached_token = getattr(self, "_principal_token", object())
+        if cached_token == token:
+            return getattr(self, "_principal", None)
+        principal = principal_from_session(auth.verify_session_payload(token))
+        self._principal_token = token
+        self._principal = principal
+        return principal
+
+    def _assigned_phone(self) -> str | None:
+        principal = self._current_principal()
+        phone = str((principal or {}).get("phone_number") or "")
+        return phone or None
+
+    def _limited_request_forbidden(self, method: str, path: str) -> bool:
+        principal = self._current_principal()
+        if not principal or principal.get("role") != "limited":
+            return False
+        if method == "GET":
+            return path in LIMITED_USER_ADMIN_GET_PATHS
+        if method == "POST":
+            return path in LIMITED_USER_ADMIN_POST_PATHS or bool(
+                re.fullmatch(r"/api/users/\d+/delete", path)
+            )
+        if method == "PUT":
+            return bool(re.fullmatch(r"/api/(?:identities|users)/\d+", path))
+        if method == "DELETE":
+            return True
+        return False
 
     def _has_api_token(self) -> bool:
         return self._has_bearer_token(config.API_TOKEN)
@@ -3154,6 +3819,12 @@ class TextingHandler(BaseHTTPRequestHandler):
             return False
         if method in {"POST", "PUT", "DELETE"} and not self._same_origin_request():
             self._send_json({"error": "Cross-origin request blocked."}, HTTPStatus.FORBIDDEN)
+            return False
+        if self._limited_request_forbidden(method, path):
+            self._send_json(
+                {"error": "Administrator access is required."},
+                HTTPStatus.FORBIDDEN,
+            )
             return False
         return True
 
@@ -3292,10 +3963,16 @@ class TextingHandler(BaseHTTPRequestHandler):
         if login_limited(client_key):
             self._send_json({"error": "Too many sign-in attempts. Try again in a few minutes."}, HTTPStatus.TOO_MANY_REQUESTS)
             return
-        valid = auth.auth_disabled() or (
-            secrets.compare_digest(username, config.AUTH_USERNAME) and auth.verify_password(password, config.AUTH_PASSWORD_HASH)
+        admin_valid = auth.auth_disabled() or (
+            secrets.compare_digest(username, config.AUTH_USERNAME)
+            and auth.verify_password(password, config.AUTH_PASSWORD_HASH)
         )
-        if not valid:
+        limited_user = None if admin_valid or auth.auth_disabled() else limited_user_for_login(username)
+        limited_valid = bool(
+            limited_user
+            and auth.verify_password(password, str(limited_user["password_hash"] or ""))
+        )
+        if not admin_valid and not limited_valid:
             record_login_failure(client_key)
             if wants_json:
                 self._send_json({"error": "Invalid username or password."}, HTTPStatus.UNAUTHORIZED)
@@ -3303,7 +3980,7 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_redirect(f"/login?error=1&next={login_next}", HTTPStatus.SEE_OTHER)
             return
         material = two_factor_material()
-        if not auth.auth_disabled() and material["enabled"]:
+        if admin_valid and not auth.auth_disabled() and material["enabled"]:
             if not second_factor.strip():
                 if wants_json:
                     self._send_json(
@@ -3330,10 +4007,28 @@ class TextingHandler(BaseHTTPRequestHandler):
                     self._send_redirect(f"/login?2fa=1&error=1&next={login_next}", HTTPStatus.SEE_OTHER)
                 return
         clear_login_failures(client_key)
-        token = auth.create_session_token(config.AUTH_USERNAME or username or "local", SESSION_MAX_AGE_SECONDS)
+        if limited_valid:
+            canonical_username = str(limited_user["username"])
+            token = auth.create_session_token(
+                canonical_username,
+                SESSION_MAX_AGE_SECONDS,
+                role="limited",
+                user_id=int(limited_user["id"]),
+                session_version=int(limited_user["session_version"]),
+            )
+            with closing(connect()) as conn:
+                conn.execute(
+                    "UPDATE limited_users SET last_login_at = ? WHERE id = ?",
+                    (now_est(), int(limited_user["id"])),
+                )
+                conn.commit()
+            signed_in_user = canonical_username
+        else:
+            signed_in_user = config.AUTH_USERNAME or username or "local"
+            token = auth.create_session_token(signed_in_user, SESSION_MAX_AGE_SECONDS)
         cookie = auth.session_cookie(token, self._request_is_secure(), SESSION_MAX_AGE_SECONDS)
         if wants_json:
-            self._send_json({"ok": True, "user": config.AUTH_USERNAME or username}, headers={"Set-Cookie": cookie})
+            self._send_json({"ok": True, "user": signed_in_user}, headers={"Set-Cookie": cookie})
         else:
             self._send_redirect(next_path, HTTPStatus.SEE_OTHER, headers={"Set-Cookie": cookie})
 
@@ -3373,23 +4068,47 @@ class TextingHandler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 self._send_json({"ok": True, "app": config.APP_SLUG})
             elif path == "/api/auth/session":
-                self._send_json({"authenticated": bool(self._current_user()), "auth": auth_status_payload()})
+                principal = self._current_principal()
+                self._send_json(
+                    {
+                        "authenticated": bool(principal),
+                        "auth": auth_status_payload(),
+                        "access": (
+                            {
+                                "role": principal["role"],
+                                "username": principal["username"],
+                                "limited": principal["role"] == "limited",
+                                "phone_number": principal.get("phone_number") or "",
+                            }
+                            if principal
+                            else None
+                        ),
+                    }
+                )
             elif path == "/api/auth/2fa":
                 self._send_json(two_factor_status_payload())
             elif path == "/api/bootstrap":
-                self._send_json(bootstrap())
+                self._send_json(bootstrap(self._current_principal()))
+            elif path == "/api/preferences":
+                principal = self._current_principal() or {}
+                if principal.get("role") != "limited":
+                    self._send_json({"theme_family": "", "theme_mode": ""})
+                else:
+                    self._send_json(limited_user_preferences(int(principal["user_id"])))
+            elif path == "/api/users":
+                self._send_json(list_limited_users())
             elif path == "/api/settings":
                 self._send_json(configured_values())
             elif path == "/api/stats":
                 self._send_json(message_stats(query))
             elif path == "/api/mobile/notifications":
-                self._send_json(mobile_notifications(query))
+                self._send_json(mobile_notifications(query, self._assigned_phone()))
             elif path == "/api/refresh":
-                self._send_json(refresh_state(query))
+                self._send_json(refresh_state(query, self._assigned_phone()))
             elif path == "/api/uploads/diagnostics":
                 self._send_json(upload_diagnostics(self._request_url()))
             elif path == "/api/conversations":
-                self._send_json(list_conversations(query))
+                self._send_json(list_conversations(query, self._assigned_phone()))
             elif path == "/api/assistant/v1/unread-conversations":
                 self._send_json(list_assistant_unread_conversations(query))
             elif match := re.fullmatch(r"/api/assistant/v1/conversations/(\d+)/context", path):
@@ -3401,9 +4120,11 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif match := re.fullmatch(r"/api/v1/messages/(\d+)", path):
                 self._send_json({"message": api_message_receipt(int(match.group(1)))})
             elif path == "/api/conversations/match":
-                self._send_json(match_conversation(query))
+                self._send_json(match_conversation(query, self._assigned_phone()))
             elif match := re.fullmatch(r"/api/conversations/(\d+)/messages", path):
-                self._send_json(get_messages(int(match.group(1)), query))
+                self._send_json(
+                    get_messages(int(match.group(1)), query, self._assigned_phone())
+                )
             elif path == "/api/contacts":
                 self._send_json(search_contacts(query))
             elif path == "/api/database/download":
@@ -3414,11 +4135,14 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_xml(voice_xml(provider, params, self._request_url()))
             elif path.startswith("/media/"):
                 name = Path(unquote(path.removeprefix("/media/"))).name
-                self._serve_file(
-                    config.MEDIA_DIR / name,
-                    cache_control="private, max-age=3600",
-                    allow_ranges=True,
-                )
+                if not _media_accessible_to_phone(name, self._assigned_phone()):
+                    self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self._serve_file(
+                        config.MEDIA_DIR / name,
+                        cache_control="private, max-age=3600",
+                        allow_ranges=True,
+                    )
             elif path.startswith("/uploads/"):
                 name = Path(unquote(path.removeprefix("/uploads/"))).name
                 self._serve_file(
@@ -3479,8 +4203,27 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(regenerate_backup_codes(self._read_json()))
             elif path == "/api/auth/2fa/disable":
                 self._send_json(disable_two_factor(self._read_json()))
+            elif path == "/api/users":
+                self._send_json(create_limited_user(self._read_json()), HTTPStatus.CREATED)
+            elif path == "/api/preferences":
+                principal = self._current_principal() or {}
+                if principal.get("role") != "limited":
+                    self._send_json(
+                        {"error": "Preferences are stored locally for the administrator."},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                else:
+                    self._send_json(
+                        update_limited_user_preferences(
+                            int(principal["user_id"]), self._read_json()
+                        )
+                    )
+            elif match := re.fullmatch(r"/api/users/(\d+)/delete", path):
+                self._send_json(delete_limited_user(int(match.group(1))))
             elif path == "/api/messages":
-                self._send_json(send_api_message(self._read_json()))
+                self._send_json(
+                    send_api_message(self._read_json(), self._assigned_phone())
+                )
             elif path == "/api/v1/messages":
                 receipt = send_external_api_message(self._read_json())
                 self._send_json(
@@ -3490,31 +4233,51 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path == "/api/assistant/v1/action-reviews":
                 self._send_json(record_action_review(self._read_json()))
             elif path == "/api/fax/send":
-                self._send_json(send_api_fax(self._read_json()))
+                self._send_json(send_api_fax(self._read_json(), self._assigned_phone()))
             elif path == "/api/messages/schedule":
-                self._send_json(schedule_api_message(self._read_json()))
+                self._send_json(
+                    schedule_api_message(self._read_json(), self._assigned_phone())
+                )
             elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/cancel", path):
-                self._send_json(cancel_scheduled_message(int(match.group(1))))
+                self._send_json(
+                    cancel_scheduled_message(int(match.group(1)), self._assigned_phone())
+                )
             elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/send-now", path):
-                self._send_json(send_scheduled_message_now(int(match.group(1))))
+                self._send_json(
+                    send_scheduled_message_now(int(match.group(1)), self._assigned_phone())
+                )
             elif path == "/api/conversations":
-                self._send_json(create_conversation(self._read_json()))
+                self._send_json(
+                    create_conversation(self._read_json(), self._assigned_phone())
+                )
             elif match := re.fullmatch(r"/api/conversations/(\d+)/archive", path):
                 payload = self._read_json()
                 archived = bool(payload.get("archived", True))
-                self._send_json(set_conversation_archived(int(match.group(1)), archived))
+                self._send_json(
+                    set_conversation_archived(
+                        int(match.group(1)), archived, self._assigned_phone()
+                    )
+                )
             elif match := re.fullmatch(r"/api/conversations/(\d+)/dealt", path):
                 payload = self._read_json()
                 dealt = bool(payload.get("dealt", True))
-                self._send_json(set_conversation_dealt(int(match.group(1)), dealt))
+                self._send_json(
+                    set_conversation_dealt(
+                        int(match.group(1)), dealt, self._assigned_phone()
+                    )
+                )
             elif path == "/api/conversations/bulk":
-                self._send_json(bulk_update_conversations(self._read_json()))
+                self._send_json(
+                    bulk_update_conversations(self._read_json(), self._assigned_phone())
+                )
             elif path == "/api/contacts/sync":
                 self._send_json({"synced": sync_contacts()})
             elif path == "/api/contacts/phone":
                 self._send_json({"synced": import_phone_contacts(self._read_json())})
             elif path == "/api/contacts/name":
-                self._send_json(save_contact_name(self._read_json()))
+                self._send_json(
+                    save_contact_name(self._read_json(), self._assigned_phone())
+                )
             elif path == "/api/identities":
                 self._send_json(create_identity(self._read_json()), HTTPStatus.CREATED)
             elif path == "/api/settings":
@@ -3616,10 +4379,14 @@ class TextingHandler(BaseHTTPRequestHandler):
                 return
             if match := re.fullmatch(r"/api/identities/(\d+)", path):
                 self._send_json(update_identity(int(match.group(1)), self._read_json()))
+            elif match := re.fullmatch(r"/api/users/(\d+)", path):
+                self._send_json(update_limited_user(int(match.group(1)), self._read_json()))
             else:
                 self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, 400)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_json({"error": str(exc)}, 500)
 

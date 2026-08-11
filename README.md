@@ -30,6 +30,7 @@ Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 - Voicemail storage as conversation messages with audio attachments, phone-provider transcription support, and optional Rev.ai transcription callbacks.
 - Fastmail CardDAV, legacy Fastmail JMAP, and Google People API contact sync, plus local contact-name edits and Fastmail CardDAV writeback when configured.
 - Settings UI for behavior, language, notifications, sounds, uploads, messaging providers, calls, transcription, contacts, provider credentials, hotkeys, security, 2FA, and database download.
+- Administrator-managed limited users, each restricted to one sender number with their own persisted theme preferences and no access to global settings.
 - Statistics view with totals, inbox/hidden/unread counts, inbound/outbound/voicemail/failed/pending/media/contact counts, breakdowns by status/source/type/direction, and an activity timeline by hour, day, or month.
 - Notifications through ntfy, browser/app sounds, Android-native polling notifications, and lightweight browser refresh polling based on change tokens.
 - Versioned bearer-token API for sending messages and polling provider delivery confirmation.
@@ -245,6 +246,8 @@ python -m texting_app.auth secret-key
 
 Account name, password, and optional app-based 2FA can be managed from `Settings` > `Security` after signing in. Those in-app changes are stored in Switchboard's SQLite metadata rather than written back to `.env`. The in-app 2FA setup shows a QR code, the manual authenticator secret, and one-time backup codes, then enables 2FA after a valid authenticator code is entered.
 
+Administrators can add limited accounts from `Settings` > `Limited users`. Each account is assigned one active sender number and can see and send only messages involving that number, including when a remote contact also has conversations with another Switchboard number. Limited accounts cannot open global settings, security, statistics, database downloads, contact sync, or number-management routes. Their Settings button opens a preferences-only view for choosing a theme family and light/dark mode. Changing an account's username, password, assigned number, or active state invalidates its existing sessions.
+
 For env-managed installs, generate authenticator values from the command line:
 
 ```bash
@@ -286,7 +289,7 @@ Important settings:
 - `REVAI_ACCESS_TOKEN`: Rev.ai access token for voicemail transcription.
 - `REVAI_API_BASE`: Rev.ai API base URL; normally leave the default.
 - `TEXTING_UI_LANGUAGE`: `auto`, `en`, `es`, or `fr`.
-- `TEXTING_UI_THEME`: `switchboard`, `console`, `midnight`, or `papyrus`.
+- `TEXTING_UI_THEME`: `switchboard`, `console`, `midnight`, `papyrus`, or `unicorn`.
 - `TEXTING_AUTO_REFRESH_SECONDS`: browser refresh check interval. Set to `0` to disable.
 - `TEXTING_SHOW_SUMMARY_STATS`: show or hide statistic bubbles above the conversation list.
 - `TEXTING_SHOW_COMPOSER_COUNTER`: show or hide the SMS segment counter in the composer.
@@ -424,7 +427,7 @@ Delivery status is updated from provider callbacks where available. Telnyx outbo
 
 ### Interface and Hotkeys
 
-The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings. Choose the Switchboard, Console, Midnight Commander, or Papyrus theme family in Settings; the header light/dark button switches only the selected theme family between light and dark mode.
+The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings. Choose the Switchboard, Console, Midnight Commander, Papyrus, or Unicorn theme family in Settings; the header light/dark button switches only the selected theme family between light and dark mode.
 
 The browser checks `/api/refresh` on the configured auto-refresh interval. That endpoint returns lightweight change tokens first; the app only reloads the conversation list or open thread when those tokens change. Use `TEXTING_AUTO_REFRESH_SECONDS=0`, or set Auto-refresh seconds to `0` in Settings, to disable browser polling.
 

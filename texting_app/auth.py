@@ -219,22 +219,33 @@ def verify_signed_payload(token: str | None, purpose: str) -> dict[str, Any] | N
     return payload
 
 
-def create_session_token(username: str, max_age_seconds: int) -> str:
+def create_session_token(
+    username: str,
+    max_age_seconds: int,
+    *,
+    role: str = "admin",
+    user_id: int | None = None,
+    session_version: int = 0,
+) -> str:
     now = int(time.time())
     payload = {
         "u": username,
+        "r": role,
         "iat": now,
         "exp": now + max_age_seconds,
         "n": secrets.token_urlsafe(18),
     }
+    if user_id is not None:
+        payload["uid"] = int(user_id)
+        payload["sv"] = int(session_version)
     body = _b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     signature = _b64encode(hmac.new(_session_key(), body.encode("ascii"), hashlib.sha256).digest())
     return f"{body}.{signature}"
 
 
-def verify_session_token(token: str | None) -> str | None:
+def verify_session_payload(token: str | None) -> dict[str, Any] | None:
     if auth_disabled():
-        return config.AUTH_USERNAME or "local"
+        return {"u": config.AUTH_USERNAME or "local", "r": "admin", "uid": None, "sv": 0}
     if not auth_configured() or not token or "." not in token:
         return None
     body, signature = token.rsplit(".", 1)
@@ -247,9 +258,26 @@ def verify_session_token(token: str | None) -> str | None:
         return None
     username = str(payload.get("u") or "")
     expires_at = int(payload.get("exp") or 0)
-    if username != config.AUTH_USERNAME or expires_at < int(time.time()):
+    role = str(payload.get("r") or "admin")
+    if expires_at < int(time.time()):
         return None
-    return username
+    if role == "limited":
+        try:
+            user_id = int(payload.get("uid") or 0)
+            session_version = int(payload.get("sv") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not username or user_id <= 0 or session_version <= 0:
+            return None
+        return {**payload, "u": username, "r": role, "uid": user_id, "sv": session_version}
+    if role != "admin" or username != config.AUTH_USERNAME:
+        return None
+    return {**payload, "u": username, "r": "admin", "uid": None, "sv": 0}
+
+
+def verify_session_token(token: str | None) -> str | None:
+    payload = verify_session_payload(token)
+    return str(payload.get("u") or "") if payload else None
 
 
 def session_cookie(token: str, secure: bool, max_age_seconds: int) -> str:

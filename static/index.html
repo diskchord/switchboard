@@ -11,16 +11,18 @@
     <link rel="manifest" href="/static/manifest.webmanifest?v=a2385ee2" />
     <script>
       (() => {
-        const families = ["switchboard", "console", "midnight", "papyrus"];
+        const families = ["switchboard", "console", "midnight", "papyrus", "unicorn"];
         const modes = ["light", "dark"];
         const legacy = localStorage.getItem("textingTheme");
         const savedFamily = localStorage.getItem("textingThemeFamily");
         const savedMode = localStorage.getItem("textingThemeMode");
         const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-        const legacyFamily = families.includes(legacy) ? legacy : "switchboard";
+        const normalizedLegacy = legacy === "girly" ? "unicorn" : legacy;
+        const normalizedSavedFamily = savedFamily === "girly" ? "unicorn" : savedFamily;
+        const legacyFamily = families.includes(normalizedLegacy) ? normalizedLegacy : "switchboard";
         const legacyMode =
           modes.includes(legacy) ? legacy : legacy === "console" || legacy === "midnight" ? "dark" : legacy === "papyrus" ? "light" : "";
-        const family = families.includes(savedFamily) ? savedFamily : legacyFamily;
+        const family = families.includes(normalizedSavedFamily) ? normalizedSavedFamily : legacyFamily;
         const mode = modes.includes(savedMode) ? savedMode : legacyMode || (prefersDark ? "dark" : "light");
         document.documentElement.dataset.themeFamily = family;
         document.documentElement.dataset.themeMode = mode;
@@ -30,7 +32,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=4615be36" />
+    <link rel="stylesheet" href="/static/styles.css?v=unicorn-sparkle-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -350,6 +352,6 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=4615be36" type="module"></script>
+    <script src="/static/app.js?v=unicorn-sparkle-1" type="module"></script>
   </body>
 </html>
