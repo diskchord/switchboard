@@ -32,7 +32,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=unicorn-sparkle-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=group-members-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -93,11 +93,18 @@
             <div class="participant-row">
               <div class="participant-line" id="participantLine"></div>
               <button class="name-contact-button" id="contactNameToggle" type="button" hidden data-i18n="contact.name">Name</button>
+              <button class="name-contact-button" id="groupNameToggle" type="button" hidden data-i18n="group.name">Name group</button>
             </div>
             <form class="contact-name-form hidden" id="contactNameForm">
               <input id="contactNameInput" type="text" placeholder="Contact name" autocomplete="off" data-i18n-placeholder="contact.name_placeholder" />
               <button class="small-button" type="submit" data-i18n="common.save">Save</button>
               <button class="small-button" id="contactNameCancel" type="button" data-i18n="common.cancel">Cancel</button>
+            </form>
+            <form class="contact-name-form group-name-form hidden" id="groupNameForm">
+              <input id="groupNameInput" type="text" maxlength="120" placeholder="Group name" autocomplete="off" data-i18n-placeholder="group.name_placeholder" />
+              <button class="small-button" type="submit" data-i18n="common.save">Save</button>
+              <button class="small-button danger-button" id="groupNameClear" type="button" data-i18n="common.remove">Remove</button>
+              <button class="small-button" id="groupNameCancel" type="button" data-i18n="common.cancel">Cancel</button>
             </form>
           </div>
           <div class="thread-actions">
@@ -257,6 +264,21 @@
         </footer>
       </form>
     </div>
+    <div class="contact-name-modal group-members-modal hidden" id="groupMembersModal" role="dialog" aria-modal="true" aria-labelledby="groupMembersTitle" tabindex="-1">
+      <section class="contact-name-card group-members-card">
+        <header class="contact-name-header">
+          <h2 id="groupMembersTitle" data-i18n="group.members_title">Group members</h2>
+          <button class="icon-button" id="groupMembersClose" type="button" aria-label="Close" data-i18n-aria-label="group.close">×</button>
+        </header>
+        <div class="group-members-body">
+          <p class="group-members-summary" id="groupMembersSummary"></p>
+          <div class="group-members-list" id="groupMembersList" role="list"></div>
+        </div>
+        <footer class="contact-name-footer group-members-footer">
+          <button class="small-button done-button" id="groupMembersDone" type="button" data-i18n="group.close">Close</button>
+        </footer>
+      </section>
+    </div>
     <div class="schedule-modal hidden" id="scheduleModal" role="dialog" aria-modal="true" aria-label="Schedule send" tabindex="-1" data-i18n-aria-label="schedule.title">
       <form class="schedule-card" id="scheduleForm">
         <header class="schedule-header">
@@ -352,6 +374,6 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=unicorn-sparkle-1" type="module"></script>
+    <script src="/static/app.js?v=group-members-1" type="module"></script>
   </body>
 </html>

@@ -12,6 +12,7 @@ from .timeutil import now_est
 
 DEALT_WITH_CUTOFF_EST = "2026-06-11T00:00:00-04:00"
 DEALT_WITH_CUTOFF_KEY = "dealt_with_cutoff_2026_06_11"
+LIMITED_USER_SCOPES_KEY = "limited_user_scopes_v1"
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -80,6 +81,16 @@ CREATE TABLE IF NOT EXISTS contact_emails (
   UNIQUE(contact_id, email)
 );
 
+CREATE TABLE IF NOT EXISTS limited_user_contacts (
+  limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+  phone_number TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('snapshot', 'user')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(limited_user_id, phone_number)
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   conversation_key TEXT NOT NULL UNIQUE,
@@ -100,6 +111,24 @@ CREATE TABLE IF NOT EXISTS conversation_participants (
   role TEXT NOT NULL CHECK(role IN ('self', 'participant')),
   contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
   PRIMARY KEY(conversation_id, phone_number)
+);
+
+CREATE TABLE IF NOT EXISTS limited_user_conversation_states (
+  limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  dealt_with_at TEXT,
+  manual_unread_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(limited_user_id, conversation_id)
+);
+
+CREATE TABLE IF NOT EXISTS limited_user_conversation_titles (
+  limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(limited_user_id, conversation_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -175,6 +204,7 @@ CREATE TABLE IF NOT EXISTS provider_message_refs (
 CREATE TABLE IF NOT EXISTS scheduled_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+  limited_user_id INTEGER REFERENCES limited_users(id) ON DELETE SET NULL,
   from_number TEXT NOT NULL DEFAULT '',
   to_numbers TEXT NOT NULL DEFAULT '[]',
   text TEXT NOT NULL DEFAULT '',
@@ -259,7 +289,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_time ON messages(conversati
 CREATE INDEX IF NOT EXISTS idx_messages_telnyx_id ON messages(telnyx_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_contact_phones_phone ON contact_phones(phone_number);
+CREATE INDEX IF NOT EXISTS idx_limited_user_contacts_phone ON limited_user_contacts(phone_number);
 CREATE INDEX IF NOT EXISTS idx_conversations_last ON conversations(last_message_at DESC);
+CREATE INDEX IF NOT EXISTS idx_limited_user_conversation_states_user
+  ON limited_user_conversation_states(limited_user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_limited_user_conversation_titles_conversation
+  ON limited_user_conversation_titles(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_provider_message_refs_message ON provider_message_refs(message_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_conversation_status_time
@@ -330,6 +365,52 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS limited_user_contacts (
+          limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+          phone_number TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          source TEXT NOT NULL CHECK(source IN ('snapshot', 'user')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(limited_user_id, phone_number)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS limited_user_conversation_states (
+          limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+          conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          dealt_with_at TEXT,
+          manual_unread_at TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(limited_user_id, conversation_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS limited_user_conversation_titles (
+          limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+          conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(limited_user_id, conversation_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_limited_user_contacts_phone ON limited_user_contacts(phone_number)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_limited_user_conversation_states_user "
+        "ON limited_user_conversation_states(limited_user_id, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_limited_user_conversation_titles_conversation "
+        "ON limited_user_conversation_titles(conversation_id)"
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS provider_message_refs (
           provider TEXT NOT NULL,
           provider_message_id TEXT NOT NULL,
@@ -387,6 +468,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS scheduled_messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+          limited_user_id INTEGER REFERENCES limited_users(id) ON DELETE SET NULL,
           from_number TEXT NOT NULL DEFAULT '',
           to_numbers TEXT NOT NULL DEFAULT '[]',
           text TEXT NOT NULL DEFAULT '',
@@ -408,6 +490,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "message_id": "INTEGER REFERENCES messages(id) ON DELETE SET NULL",
         "failure": "TEXT NOT NULL DEFAULT ''",
         "sent_at": "TEXT",
+        "limited_user_id": "INTEGER REFERENCES limited_users(id) ON DELETE SET NULL",
     }.items():
         if name not in scheduled_columns:
             conn.execute(f"ALTER TABLE scheduled_messages ADD COLUMN {name} {definition}")
@@ -540,6 +623,7 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     if "manual_unread_at" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN manual_unread_at TEXT")
     apply_dealt_with_cutoff(conn)
+    backfill_limited_user_scopes(conn)
 
 
 def apply_dealt_with_cutoff(conn: sqlite3.Connection) -> None:
@@ -560,6 +644,66 @@ def apply_dealt_with_cutoff(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT INTO app_metadata(key, value, updated_at) VALUES (?, ?, ?)",
         (DEALT_WITH_CUTOFF_KEY, DEALT_WITH_CUTOFF_EST, timestamp),
+    )
+
+
+def backfill_limited_user_scopes(conn: sqlite3.Connection) -> None:
+    if conn.execute(
+        "SELECT 1 FROM app_metadata WHERE key = ?",
+        (LIMITED_USER_SCOPES_KEY,),
+    ).fetchone():
+        return
+    timestamp = now_est()
+    conn.execute(
+        """
+        WITH ranked_names AS (
+          SELECT
+            contact_phone.phone_number,
+            contact.display_name,
+            ROW_NUMBER() OVER (
+              PARTITION BY contact_phone.phone_number
+              ORDER BY
+                CASE contact.source
+                  WHEN 'fastmail' THEN 3
+                  WHEN 'google' THEN 3
+                  WHEN 'phone' THEN 2
+                  ELSE 1
+                END DESC,
+                contact.updated_at DESC,
+                contact.id DESC
+            ) AS name_rank
+          FROM contact_phones contact_phone
+          JOIN contacts contact ON contact.id = contact_phone.contact_id
+          WHERE contact.display_name <> ''
+            AND contact.display_name <> contact_phone.phone_number
+        )
+        INSERT OR IGNORE INTO limited_user_contacts(
+          limited_user_id, phone_number, display_name, source, created_at, updated_at
+        )
+        SELECT DISTINCT
+          limited_user.id,
+          participant.phone_number,
+          ranked_name.display_name,
+          'snapshot',
+          ?,
+          ?
+        FROM limited_users limited_user
+        JOIN identities identity ON identity.id = limited_user.identity_id
+        JOIN conversation_participants self_cp
+          ON self_cp.role = 'self'
+         AND self_cp.phone_number = identity.phone_number
+        JOIN conversation_participants participant
+          ON participant.conversation_id = self_cp.conversation_id
+         AND participant.role = 'participant'
+        JOIN ranked_names ranked_name
+          ON ranked_name.phone_number = participant.phone_number
+         AND ranked_name.name_rank = 1
+        """,
+        (timestamp, timestamp),
+    )
+    conn.execute(
+        "INSERT INTO app_metadata(key, value, updated_at) VALUES (?, 'complete', ?)",
+        (LIMITED_USER_SCOPES_KEY, timestamp),
     )
 
 

@@ -11,17 +11,32 @@ from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 from texting_app import auth, config
-from texting_app.db import connect, ensure_conversation, init_db, upsert_message
+from texting_app.db import (
+    LIMITED_USER_SCOPES_KEY,
+    backfill_limited_user_scopes,
+    connect,
+    ensure_contact_for_phone,
+    ensure_conversation,
+    init_db,
+    upsert_message,
+)
 from texting_app.server import (
     _bootstrap,
+    _contact_names,
     _get_messages,
     _list_conversations,
+    _mark_reply_message_read,
+    _search_contacts,
+    _unread_conversation_count,
     create_limited_user,
     limited_user_preferences,
     list_limited_users,
     principal_from_session,
     refresh_state,
+    save_contact_name,
     send_api_message,
+    set_conversation_dealt,
+    set_conversation_title,
     update_limited_user,
     update_limited_user_preferences,
     TextingHandler,
@@ -115,6 +130,14 @@ class LimitedUserTests(unittest.TestCase):
         self.conn.commit()
         return conversation_id, first_message
 
+    def _name_contact(self, phone_number: str, display_name: str) -> None:
+        contact_id = ensure_contact_for_phone(self.conn, phone_number)
+        self.conn.execute(
+            "UPDATE contacts SET display_name = ?, updated_at = ? WHERE id = ?",
+            (display_name, "2026-08-01T09:00:00-04:00", contact_id),
+        )
+        self.conn.commit()
+
     def test_reads_are_scoped_to_assigned_number_even_in_a_shared_thread(self) -> None:
         conversation_id, first_message = self._seed_shared_conversation()
 
@@ -126,6 +149,8 @@ class LimitedUserTests(unittest.TestCase):
         )
 
         self.assertEqual([item["id"] for item in conversations], [conversation_id])
+        self.assertEqual(conversations[0]["last_from_number"], "+12075551234")
+        self.assertEqual(conversations[0]["last_to_numbers"], [self.first_number])
         self.assertEqual([item["id"] for item in thread["messages"]], [first_message])
         self.assertEqual(thread["messages"][0]["text"], "Message for first line")
         self.assertNotIn(
@@ -133,10 +158,451 @@ class LimitedUserTests(unittest.TestCase):
             [participant["phone_number"] for participant in thread["conversation"]["participants"]],
         )
 
+    def test_group_names_are_editable_and_private_for_limited_users(self) -> None:
+        group_id = ensure_conversation(
+            self.conn,
+            ["+12075551111", "+12075552222"],
+            [self.first_number],
+        )
+        direct_id = ensure_conversation(
+            self.conn,
+            ["+12075553333"],
+            [self.first_number],
+        )
+        self.conn.commit()
+        first_user = create_limited_user(
+            {
+                "username": "group-namer",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        second_user = create_limited_user(
+            {
+                "username": "other-group-namer",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+
+        admin_result = set_conversation_title(group_id, "Family updates")
+        limited_result = set_conversation_title(
+            group_id,
+            "My shift group",
+            self.first_number,
+            first_user["id"],
+        )
+
+        self.assertEqual(admin_result["conversation"]["custom_title"], "Family updates")
+        self.assertEqual(limited_result["conversation"]["custom_title"], "My shift group")
+        self.assertEqual(
+            _get_messages(
+                self.conn,
+                group_id,
+                assigned_phone=self.first_number,
+                limited_user_id=first_user["id"],
+            )["conversation"]["title"],
+            "My shift group",
+        )
+        other_list = _list_conversations(
+            self.conn,
+            {},
+            assigned_phone=self.first_number,
+            limited_user_id=second_user["id"],
+        )["conversations"]
+        other_group = next(item for item in other_list if item["id"] == group_id)
+        self.assertEqual(other_group["custom_title"], "")
+        self.assertNotEqual(other_group["title"], "Family updates")
+        self.assertEqual(
+            [
+                item["id"]
+                for item in _list_conversations(
+                    self.conn,
+                    {"search": ["My shift group"]},
+                    assigned_phone=self.first_number,
+                    limited_user_id=first_user["id"],
+                )["conversations"]
+            ],
+            [group_id],
+        )
+        self.assertEqual(
+            _list_conversations(
+                self.conn,
+                {"search": ["My shift group"]},
+                assigned_phone=self.first_number,
+                limited_user_id=second_user["id"],
+            )["conversations"],
+            [],
+        )
+
+        cleared = set_conversation_title(
+            group_id,
+            "",
+            self.first_number,
+            first_user["id"],
+        )["conversation"]
+        self.assertEqual(cleared["custom_title"], "")
+        self.assertNotEqual(cleared["title"], "My shift group")
+        with self.assertRaisesRegex(ValueError, "Only group"):
+            set_conversation_title(direct_id, "Not allowed")
+        with self.assertRaisesRegex(ValueError, "120 characters"):
+            set_conversation_title(group_id, "x" * 121)
+
+    def test_unread_state_is_isolated_per_user_and_from_primary(self) -> None:
+        conversation_id, first_message = self._seed_shared_conversation()
+        first_user = create_limited_user(
+            {
+                "username": "first-reader",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        second_user = create_limited_user(
+            {
+                "username": "second-reader",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        first_principal = {
+            "role": "limited",
+            "user_id": first_user["id"],
+            "phone_number": self.first_number,
+        }
+        second_principal = {
+            "role": "limited",
+            "user_id": second_user["id"],
+            "phone_number": self.first_number,
+        }
+
+        _mark_reply_message_read(first_message)
+        limited_state_count = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM limited_user_conversation_states
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()[0]
+        self.assertEqual(limited_state_count, 0)
+        self.assertEqual(_bootstrap(self.conn, first_principal)["stats"]["unread_conversations"], 1)
+        self.assertEqual(_bootstrap(self.conn, second_principal)["stats"]["unread_conversations"], 1)
+
+        set_conversation_dealt(
+            conversation_id,
+            True,
+            self.first_number,
+            first_user["id"],
+        )
+        first_unread = _list_conversations(
+            self.conn,
+            {"unread": ["true"]},
+            assigned_phone=self.first_number,
+            limited_user_id=first_user["id"],
+        )["conversations"]
+        second_unread = _list_conversations(
+            self.conn,
+            {"unread": ["true"]},
+            assigned_phone=self.first_number,
+            limited_user_id=second_user["id"],
+        )["conversations"]
+        first_thread = _get_messages(
+            self.conn,
+            conversation_id,
+            assigned_phone=self.first_number,
+            limited_user_id=first_user["id"],
+        )
+        global_state = self.conn.execute(
+            "SELECT dealt_with_at, manual_unread_at FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+
+        self.assertEqual(first_unread, [])
+        self.assertEqual([item["id"] for item in second_unread], [conversation_id])
+        self.assertEqual(
+            _unread_conversation_count(self.conn, self.first_number, first_user["id"]),
+            0,
+        )
+        self.assertEqual(
+            _unread_conversation_count(self.conn, self.first_number, second_user["id"]),
+            1,
+        )
+        self.assertFalse(first_thread["conversation"]["needs_attention"])
+        self.assertIsNotNone(global_state["dealt_with_at"])
+        self.assertIsNone(global_state["manual_unread_at"])
+        self.assertNotEqual(
+            refresh_state({}, self.first_number, first_user["id"])["tokens"]["list"],
+            refresh_state({}, self.first_number, second_user["id"])["tokens"]["list"],
+        )
+
+        set_conversation_dealt(conversation_id, False)
+        first_unread = _list_conversations(
+            self.conn,
+            {"unread": ["true"]},
+            assigned_phone=self.first_number,
+            limited_user_id=first_user["id"],
+        )["conversations"]
+        self.assertEqual(first_unread, [])
+
+    def test_global_manual_unread_does_not_leak_into_new_limited_scope(self) -> None:
+        conversation_id, _ = self._seed_shared_conversation()
+        self.conn.execute(
+            """
+            UPDATE conversations
+            SET dealt_with_at = ?, manual_unread_at = ?
+            WHERE id = ?
+            """,
+            (
+                "2026-08-01T10:05:00-04:00",
+                "2026-08-01T10:05:00-04:00",
+                conversation_id,
+            ),
+        )
+        self.conn.commit()
+        user = create_limited_user(
+            {
+                "username": "manual-unread-reader",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+
+        unread = _list_conversations(
+            self.conn,
+            {"unread": ["true"]},
+            assigned_phone=self.first_number,
+            limited_user_id=user["id"],
+        )["conversations"]
+        thread = _get_messages(
+            self.conn,
+            conversation_id,
+            assigned_phone=self.first_number,
+            limited_user_id=user["id"],
+        )
+        self.assertEqual([item["id"] for item in unread], [conversation_id])
+        self.assertIsNone(thread["conversation"]["manual_unread_at"])
+
+    def test_limited_contacts_are_snapshotted_and_then_owned_by_each_user(self) -> None:
+        conversation_id, _ = self._seed_shared_conversation()
+        shared_remote = "+12075551234"
+        second_only_remote = "+12075559876"
+        self._name_contact(shared_remote, "Original Shared Name")
+        self._name_contact(second_only_remote, "Second Line Secret")
+
+        first_user = create_limited_user(
+            {
+                "username": "first-operator",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        self._name_contact(shared_remote, "Later Admin Rename")
+
+        late_remote = "+12075557777"
+        late_conversation = ensure_conversation(
+            self.conn,
+            [late_remote],
+            [self.first_number],
+        )
+        upsert_message(
+            self.conn,
+            conversation_id=late_conversation,
+            direction="inbound",
+            from_number=late_remote,
+            to_numbers=[self.first_number],
+            cc_numbers=[],
+            text="Created after the account",
+            occurred_at="2026-08-01T11:00:00-04:00",
+        )
+        self.conn.commit()
+        self._name_contact(late_remote, "Late Admin Contact")
+
+        contacts = _search_contacts(self.conn, {}, first_user["id"])["contacts"]
+        scoped_thread = _get_messages(
+            self.conn,
+            conversation_id,
+            assigned_phone=self.first_number,
+            limited_user_id=first_user["id"],
+        )
+
+        self.assertEqual(
+            [(item["phone_number"], item["display_name"]) for item in contacts],
+            [(shared_remote, "Original Shared Name")],
+        )
+        self.assertEqual(
+            [
+                participant["display"]
+                for participant in scoped_thread["conversation"]["participants"]
+                if participant["role"] == "participant"
+            ],
+            ["Original Shared Name"],
+        )
+        self.assertNotIn(second_only_remote, [item["phone_number"] for item in contacts])
+        self.assertNotIn(late_remote, [item["phone_number"] for item in contacts])
+        self.assertEqual(
+            [
+                item["id"]
+                for item in _list_conversations(
+                    self.conn,
+                    {"search": ["Original Shared"]},
+                    assigned_phone=self.first_number,
+                    limited_user_id=first_user["id"],
+                )["conversations"]
+            ],
+            [conversation_id],
+        )
+        self.assertEqual(
+            _list_conversations(
+                self.conn,
+                {"search": ["Later Admin Rename"]},
+                assigned_phone=self.first_number,
+                limited_user_id=first_user["id"],
+            )["conversations"],
+            [],
+        )
+
+        save_contact_name(
+            {
+                "phone_number": shared_remote,
+                "display_name": "My Shared Name",
+                "conversation_id": conversation_id,
+            },
+            self.first_number,
+            first_user["id"],
+        )
+        save_contact_name(
+            {
+                "phone_number": late_remote,
+                "display_name": "My New Contact",
+                "conversation_id": late_conversation,
+            },
+            self.first_number,
+            first_user["id"],
+        )
+
+        renamed_contacts = _search_contacts(self.conn, {}, first_user["id"])["contacts"]
+        self.assertEqual(
+            {
+                item["phone_number"]: item["display_name"]
+                for item in renamed_contacts
+            },
+            {
+                shared_remote: "My Shared Name",
+                late_remote: "My New Contact",
+            },
+        )
+        self.assertEqual(
+            _contact_names(self.conn, [shared_remote])[shared_remote],
+            "Later Admin Rename",
+        )
+        with self.assertRaisesRegex(LookupError, "Contact not found"):
+            save_contact_name(
+                {
+                    "phone_number": second_only_remote,
+                    "display_name": "Leaked Contact",
+                },
+                self.first_number,
+                first_user["id"],
+            )
+
+        later_user = create_limited_user(
+            {
+                "username": "later-operator",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        later_contacts = _search_contacts(self.conn, {}, later_user["id"])["contacts"]
+        self.assertEqual(
+            {
+                item["phone_number"]: item["display_name"]
+                for item in later_contacts
+            },
+            {
+                shared_remote: "Later Admin Rename",
+                late_remote: "Late Admin Contact",
+            },
+        )
+
+        update_limited_user(
+            first_user["id"],
+            {
+                "username": "first-operator",
+                "identity_id": self._identity_id(self.second_number),
+                "is_active": True,
+            },
+        )
+        reassigned_contacts = _search_contacts(
+            self.conn,
+            {},
+            first_user["id"],
+        )["contacts"]
+        self.assertEqual(
+            {
+                item["phone_number"]: item["display_name"]
+                for item in reassigned_contacts
+            },
+            {
+                shared_remote: "Later Admin Rename",
+                second_only_remote: "Second Line Secret",
+            },
+        )
+
+    def test_existing_limited_users_receive_one_time_scope_backfill(self) -> None:
+        conversation_id, _ = self._seed_shared_conversation()
+        shared_remote = "+12075551234"
+        self._name_contact(shared_remote, "Migration Snapshot")
+        user = create_limited_user(
+            {
+                "username": "existing-operator",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        self.conn.execute(
+            "DELETE FROM limited_user_contacts WHERE limited_user_id = ?",
+            (user["id"],),
+        )
+        self.conn.execute(
+            "DELETE FROM app_metadata WHERE key = ?",
+            (LIMITED_USER_SCOPES_KEY,),
+        )
+        self.conn.commit()
+
+        backfill_limited_user_scopes(self.conn)
+        contacts = _search_contacts(self.conn, {}, user["id"])["contacts"]
+        read_state = self.conn.execute(
+            """
+            SELECT 1
+            FROM limited_user_conversation_states
+            WHERE conversation_id = ? AND limited_user_id = ?
+            """,
+            (conversation_id, user["id"]),
+        ).fetchone()
+
+        self.assertEqual(
+            [(item["phone_number"], item["display_name"]) for item in contacts],
+            [(shared_remote, "Migration Snapshot")],
+        )
+        self.assertIsNone(read_state)
+
+        self._name_contact(shared_remote, "Changed After Migration")
+        backfill_limited_user_scopes(self.conn)
+        contacts = _search_contacts(self.conn, {}, user["id"])["contacts"]
+        self.assertEqual(contacts[0]["display_name"], "Migration Snapshot")
+
     def test_bootstrap_and_refresh_are_scoped_and_unrelated_threads_are_denied(self) -> None:
         conversation_id, _ = self._seed_shared_conversation()
+        user = create_limited_user(
+            {
+                "username": "bootstrap-operator",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
         principal = {
             "role": "limited",
+            "user_id": user["id"],
             "username": "operator",
             "phone_number": self.first_number,
             "theme_family": "console",
@@ -145,7 +611,9 @@ class LimitedUserTests(unittest.TestCase):
 
         payload = _bootstrap(self.conn, principal)
         refresh = refresh_state(
-            {"conversation_id": [str(conversation_id)]}, self.first_number
+            {"conversation_id": [str(conversation_id)]},
+            self.first_number,
+            user["id"],
         )
 
         self.assertEqual([item["phone_number"] for item in payload["identities"]], [self.first_number])
@@ -153,7 +621,12 @@ class LimitedUserTests(unittest.TestCase):
         self.assertEqual(payload["preferences"], {"theme_family": "console", "theme_mode": "dark"})
         self.assertTrue(refresh["tokens"]["conversation"])
         with self.assertRaisesRegex(LookupError, "Conversation not found"):
-            _get_messages(self.conn, conversation_id + 1, assigned_phone=self.first_number)
+            _get_messages(
+                self.conn,
+                conversation_id + 1,
+                assigned_phone=self.first_number,
+                limited_user_id=user["id"],
+            )
 
     def test_user_management_sessions_and_preferences(self) -> None:
         identity_id = self._identity_id(self.first_number)
@@ -175,6 +648,22 @@ class LimitedUserTests(unittest.TestCase):
         )
         principal = principal_from_session(auth.verify_session_payload(token))
         self.assertEqual(principal["phone_number"], self.first_number)
+
+        admin_bootstrap = _bootstrap(self.conn)
+        limited_bootstrap = _bootstrap(self.conn, principal)
+        self.assertEqual(
+            admin_bootstrap["limited_assignments"],
+            [
+                {
+                    "user_id": created["id"],
+                    "username": "operator",
+                    "identity_id": identity_id,
+                    "phone_number": self.first_number,
+                    "is_active": True,
+                }
+            ],
+        )
+        self.assertEqual(limited_bootstrap["limited_assignments"], [])
 
         preferences = update_limited_user_preferences(
             created["id"], {"theme_family": "unicorn", "theme_mode": "dark"}
@@ -256,6 +745,11 @@ class LimitedUserHttpTests(unittest.TestCase):
         other_conversation = ensure_conversation(
             conn, ["+12075559876"], [self.second_number]
         )
+        group_conversation = ensure_conversation(
+            conn,
+            ["+12075551111", "+12075552222"],
+            [self.first_number],
+        )
         upsert_message(
             conn,
             conversation_id=other_conversation,
@@ -266,9 +760,15 @@ class LimitedUserHttpTests(unittest.TestCase):
             text="Other line",
             occurred_at="2026-08-01T10:00:00-04:00",
         )
+        other_contact_id = ensure_contact_for_phone(conn, "+12075559876")
+        conn.execute(
+            "UPDATE contacts SET display_name = ?, updated_at = ? WHERE id = ?",
+            ("Other Line Secret", "2026-08-01T10:00:00-04:00", other_contact_id),
+        )
         conn.commit()
         conn.close()
         self.other_conversation = other_conversation
+        self.group_conversation = group_conversation
         create_limited_user(
             {"username": "operator", "password": "operator-pass", "identity_id": first_id}
         )
@@ -316,6 +816,15 @@ class LimitedUserHttpTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         cookie = set_cookie.split(";", 1)[0]
 
+        status, payload, _ = self.request(
+            "POST",
+            f"/api/conversations/{self.group_conversation}/title",
+            cookie=cookie,
+            body={"title": "Operator group"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["conversation"]["custom_title"], "Operator group")
+
         status, bootstrap_payload, _ = self.request("GET", "/api/bootstrap", cookie=cookie)
         self.assertEqual(status, 200)
         self.assertTrue(bootstrap_payload["access"]["limited"])
@@ -323,6 +832,22 @@ class LimitedUserHttpTests(unittest.TestCase):
             [identity["phone_number"] for identity in bootstrap_payload["identities"]],
             [self.first_number],
         )
+
+        status, contacts_payload, _ = self.request("GET", "/api/contacts", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(contacts_payload["contacts"], [])
+
+        status, contact_payload, _ = self.request(
+            "POST",
+            "/api/contacts/name",
+            cookie=cookie,
+            body={
+                "phone_number": "+12075559876",
+                "display_name": "Should Not Be Visible",
+            },
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("Contact not found", contact_payload["error"])
 
         status, settings_payload, _ = self.request("GET", "/api/settings", cookie=cookie)
         self.assertEqual(status, 403)

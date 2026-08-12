@@ -74,6 +74,7 @@ from .voice import (
 
 STATIC_DIR = config.ROOT / "static"
 MESSAGE_PAGE_SIZE = 80
+MAX_CONVERSATION_TITLE_LENGTH = 120
 UPLOAD_CONTENT_PREFIXES = ("image/", "video/", "audio/")
 UPLOAD_CONTENT_TYPES = {"application/pdf"}
 DEFAULT_REQUEST_BODY_LIMIT = 16 * 1024 * 1024
@@ -152,6 +153,48 @@ def canonical_theme_family(value: object) -> str:
     return THEME_FAMILY_ALIASES.get(theme_family, theme_family)
 
 
+def _seed_limited_user_contacts(
+    conn,
+    limited_user_id: int,
+    phone_number: str,
+    *,
+    reset: bool = False,
+) -> None:
+    if reset:
+        conn.execute(
+            "DELETE FROM limited_user_contacts WHERE limited_user_id = ?",
+            (limited_user_id,),
+        )
+    participant_rows = conn.execute(
+        """
+        SELECT DISTINCT participant.phone_number
+        FROM conversation_participants participant
+        WHERE participant.role = 'participant'
+          AND EXISTS (
+            SELECT 1
+            FROM conversation_participants self_cp
+            WHERE self_cp.conversation_id = participant.conversation_id
+              AND self_cp.role = 'self'
+              AND self_cp.phone_number = ?
+          )
+        """,
+        (phone_number,),
+    ).fetchall()
+    names = _contact_names(conn, (row["phone_number"] for row in participant_rows))
+    timestamp = now_est()
+    conn.executemany(
+        """
+        INSERT INTO limited_user_contacts(
+          limited_user_id, phone_number, display_name, source, created_at, updated_at
+        )
+        VALUES (?, ?, ?, 'snapshot', ?, ?)
+        ON CONFLICT(limited_user_id, phone_number) DO NOTHING
+        """,
+        [
+            (limited_user_id, phone, display_name, timestamp, timestamp)
+            for phone, display_name in names.items()
+        ],
+    )
 def _json_default(value):
     return str(value)
 
@@ -245,6 +288,11 @@ def create_limited_user(payload: dict) -> dict:
                 """,
                 (username, auth.hash_password(password), identity["id"], timestamp, timestamp),
             )
+            _seed_limited_user_contacts(
+                conn,
+                int(cursor.lastrowid),
+                str(identity["phone_number"]),
+            )
         except sqlite3.IntegrityError as exc:
             raise ValueError("That username already exists.") from exc
         conn.commit()
@@ -295,6 +343,17 @@ def update_limited_user(user_id: int, payload: dict) -> dict:
                 """,
                 assignments,
             )
+            if int(identity["id"]) != int(existing["identity_id"]):
+                conn.execute(
+                    "DELETE FROM limited_user_conversation_states WHERE limited_user_id = ?",
+                    (user_id,),
+                )
+                _seed_limited_user_contacts(
+                    conn,
+                    user_id,
+                    str(identity["phone_number"]),
+                    reset=True,
+                )
         except sqlite3.IntegrityError as exc:
             raise ValueError("That username already exists.") from exc
         conn.commit()
@@ -671,6 +730,7 @@ def _scheduled_messages_for_conversation(
     conn,
     conversation_id: int,
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> list[dict]:
     access_sql = " AND from_number = ?" if assigned_phone else ""
     params: list[object] = [conversation_id]
@@ -687,7 +747,11 @@ def _scheduled_messages_for_conversation(
         """,
         params,
     ).fetchall()
-    contact_names = _contact_names(conn, (row["from_number"] for row in rows))
+    contact_names = _contact_names(
+        conn,
+        (row["from_number"] for row in rows),
+        limited_user_id,
+    )
     scheduled = []
     for row in rows:
         to_numbers = from_json(row["to_numbers"], [])
@@ -770,6 +834,98 @@ UNREAD_CONVERSATION_CLAUSE = """
   )
 )
 """
+
+
+def _unread_conversation_clause(
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> tuple[str, list[object]]:
+    if not assigned_phone:
+        return UNREAD_CONVERSATION_CLAUSE, []
+    if not limited_user_id:
+        raise PermissionError("Limited user account required.")
+    return (
+        f"""
+        (
+          COALESCE((
+            SELECT state.manual_unread_at
+            FROM limited_user_conversation_states state
+            WHERE state.conversation_id = c.id AND state.limited_user_id = ?
+          ), '') <> ''
+          OR EXISTS (
+            SELECT 1
+            FROM messages latest
+            WHERE latest.conversation_id = c.id
+              AND latest.direction = 'inbound'
+              AND EXISTS (
+                SELECT 1 FROM json_each(latest.to_numbers) latest_to
+                WHERE latest_to.value = ?
+              )
+              AND (
+                COALESCE((
+                  SELECT state.dealt_with_at
+                  FROM limited_user_conversation_states state
+                  WHERE state.conversation_id = c.id AND state.limited_user_id = ?
+                ), '') = ''
+                OR latest.occurred_at > (
+                  SELECT state.dealt_with_at
+                  FROM limited_user_conversation_states state
+                  WHERE state.conversation_id = c.id AND state.limited_user_id = ?
+                )
+              )
+              AND latest.id = (
+                SELECT candidate.id
+                FROM messages candidate
+                WHERE candidate.conversation_id = c.id
+                  AND COALESCE(candidate.source, '') != 'autoreply'
+                  AND {_message_access_sql('candidate')}
+                ORDER BY candidate.occurred_at DESC, candidate.id DESC
+                LIMIT 1
+              )
+          )
+        )
+        """,
+        [
+            limited_user_id,
+            assigned_phone,
+            limited_user_id,
+            limited_user_id,
+            assigned_phone,
+            assigned_phone,
+        ],
+    )
+
+
+def _conversation_user_states(
+    conn,
+    conversation_ids,
+    limited_user_id: int,
+) -> dict[int, dict]:
+    ids = list(dict.fromkeys(int(conversation_id) for conversation_id in conversation_ids))
+    if not ids:
+        return {}
+    states: dict[int, dict] = {}
+    for offset in range(0, len(ids), 800):
+        chunk = ids[offset : offset + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT conversation_id, dealt_with_at, manual_unread_at, updated_at
+            FROM limited_user_conversation_states
+            WHERE limited_user_id = ? AND conversation_id IN ({placeholders})
+            """,
+            (limited_user_id, *chunk),
+        ).fetchall()
+        for row in rows:
+            states[int(row["conversation_id"])] = _row_dict(row)
+    return states
+
+
+def _conversation_user_state(conn, conversation_id: int, limited_user_id: int) -> dict:
+    return _conversation_user_states(conn, [conversation_id], limited_user_id).get(
+        int(conversation_id),
+        {"dealt_with_at": None, "manual_unread_at": None, "updated_at": ""},
+    )
 
 CONVERSATION_SORT_EXPR = """
 CASE
@@ -869,12 +1025,29 @@ def _decorate_message_status(message: dict) -> dict:
     return message
 
 
-def _contact_names(conn, phones) -> dict[str, str]:
+def _contact_names(conn, phones, limited_user_id: int | None = None) -> dict[str, str]:
     unique_phones = list(dict.fromkeys(str(phone) for phone in phones if phone))
     names: dict[str, str] = {}
     for offset in range(0, len(unique_phones), 800):
         chunk = unique_phones[offset : offset + 800]
         placeholders = ",".join("?" for _ in chunk)
+        if limited_user_id:
+            rows = conn.execute(
+                f"""
+                SELECT phone_number, display_name
+                FROM limited_user_contacts
+                WHERE limited_user_id = ?
+                  AND phone_number IN ({placeholders})
+                ORDER BY updated_at DESC
+                """,
+                (limited_user_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                phone = row["phone_number"]
+                display_name = row["display_name"]
+                if phone not in names and display_name and display_name != phone:
+                    names[phone] = display_name
+            continue
         rows = conn.execute(
             f"""
             SELECT cp.phone_number, c.display_name
@@ -900,14 +1073,15 @@ def _contact_names(conn, phones) -> dict[str, str]:
     return names
 
 
-def _contact_name(conn, phone: str) -> str:
-    return _contact_names(conn, [phone]).get(phone) or display_phone(phone)
+def _contact_name(conn, phone: str, limited_user_id: int | None = None) -> str:
+    return _contact_names(conn, [phone], limited_user_id).get(phone) or display_phone(phone)
 
 
 def _participants_for_conversations(
     conn,
     conversation_ids,
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict[int, list[dict]]:
     ids = list(dict.fromkeys(int(conversation_id) for conversation_id in conversation_ids))
     participants: dict[int, list[dict]] = {conversation_id: [] for conversation_id in ids}
@@ -932,7 +1106,11 @@ def _participants_for_conversations(
                 chunk,
             ).fetchall()
         )
-    contact_names = _contact_names(conn, (row["phone_number"] for row in rows))
+    contact_names = _contact_names(
+        conn,
+        (row["phone_number"] for row in rows),
+        limited_user_id,
+    )
     for row in rows:
         phone = row["phone_number"]
         if assigned_phone and row["role"] == "self" and phone != assigned_phone:
@@ -955,8 +1133,18 @@ def _participants_for_conversations(
     return participants
 
 
-def _participants(conn, conversation_id: int, assigned_phone: str | None = None) -> list[dict]:
-    return _participants_for_conversations(conn, [conversation_id], assigned_phone).get(conversation_id, [])
+def _participants(
+    conn,
+    conversation_id: int,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> list[dict]:
+    return _participants_for_conversations(
+        conn,
+        [conversation_id],
+        assigned_phone,
+        limited_user_id,
+    ).get(conversation_id, [])
 
 
 def _conversation_title_from_participants(participants: list[dict], fallback: str | None = None) -> str:
@@ -970,34 +1158,101 @@ def _conversation_title(conn, conversation_id: int, fallback: str | None = None)
     return _conversation_title_from_participants(_participants(conn, conversation_id), fallback)
 
 
+def _limited_conversation_titles(
+    conn,
+    conversation_ids,
+    limited_user_id: int | None,
+) -> dict[int, str]:
+    ids = sorted({int(value) for value in conversation_ids if int(value) > 0})
+    if not limited_user_id or not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT conversation_id, title
+        FROM limited_user_conversation_titles
+        WHERE limited_user_id = ? AND conversation_id IN ({placeholders})
+        """,
+        (limited_user_id, *ids),
+    ).fetchall()
+    return {int(row["conversation_id"]): str(row["title"] or "") for row in rows}
+
+
+def _stored_conversation_title(
+    conn,
+    conversation_id: int,
+    limited_user_id: int | None = None,
+) -> str:
+    if limited_user_id:
+        row = conn.execute(
+            """
+            SELECT title
+            FROM limited_user_conversation_titles
+            WHERE limited_user_id = ? AND conversation_id = ?
+            """,
+            (limited_user_id, conversation_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT title FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+    return str(row["title"] or "") if row else ""
+
+
 def _search_terms(value: str) -> list[str]:
     return [part for part in re.split(r"\s+", value.strip().lower()) if part]
 
 
-def _conversation_direct_search_expr(terms: list[str]) -> tuple[str, list[str]]:
+def _conversation_direct_search_expr(
+    terms: list[str],
+    limited_user_id: int | None = None,
+) -> tuple[str, list[object]]:
     clauses: list[str] = []
-    params: list[str] = []
+    params: list[object] = []
     for term in terms:
         like = f"%{term}%"
-        clauses.append(
+        contact_join = "LEFT JOIN contacts direct_co ON direct_co.id = direct_cp.contact_id"
+        contact_name = "direct_co.display_name"
+        title_match = "lower(COALESCE(c.title, '')) LIKE ?"
+        if limited_user_id:
+            contact_join = """
+                LEFT JOIN limited_user_contacts direct_luc
+                  ON direct_luc.phone_number = direct_cp.phone_number
+                 AND direct_luc.limited_user_id = ?
             """
+            contact_name = "direct_luc.display_name"
+            title_match = """
+                EXISTS (
+                  SELECT 1
+                  FROM limited_user_conversation_titles direct_luct
+                  WHERE direct_luct.conversation_id = c.id
+                    AND direct_luct.limited_user_id = ?
+                    AND lower(direct_luct.title) LIKE ?
+                )
+            """
+        clauses.append(
+            f"""
             (
-              lower(COALESCE(c.title, '')) LIKE ?
+              {title_match}
               OR EXISTS (
                 SELECT 1
                 FROM conversation_participants direct_cp
-                LEFT JOIN contacts direct_co ON direct_co.id = direct_cp.contact_id
+                {contact_join}
                 WHERE direct_cp.conversation_id = c.id
                   AND direct_cp.role = 'participant'
                   AND (
-                    lower(COALESCE(direct_co.display_name, '')) LIKE ?
+                    lower(COALESCE({contact_name}, '')) LIKE ?
                     OR lower(direct_cp.phone_number) LIKE ?
                   )
               )
             )
             """
         )
-        params.extend([like, like, like])
+        if limited_user_id:
+            params.extend([limited_user_id, like, limited_user_id, like, like])
+        else:
+            params.extend([like, like, like])
     return " AND ".join(clauses) if clauses else "0", params
 
 
@@ -1039,8 +1294,9 @@ def _conversation_text_search_expr(
 def _conversation_search_clause(
     terms: list[str],
     assigned_phone: str | None = None,
-) -> tuple[str, list[str]]:
-    direct_sql, direct_params = _conversation_direct_search_expr(terms)
+    limited_user_id: int | None = None,
+) -> tuple[str, list[object]]:
+    direct_sql, direct_params = _conversation_direct_search_expr(terms, limited_user_id)
     message_sql, message_params = _conversation_text_search_expr("messages", "search_m", terms, assigned_phone)
     scheduled_sql, scheduled_params = _conversation_text_search_expr(
         "scheduled_messages", "search_sm", terms, assigned_phone
@@ -1106,14 +1362,24 @@ def _conversation_message_search_match(
     }
 
 
-def _decorate_conversation_summary(row, participants: list[dict]) -> dict:
+def _decorate_conversation_summary(
+    row,
+    participants: list[dict],
+    read_state: dict | None = None,
+    custom_title: str | None = None,
+) -> dict:
     item = _row_dict(row)
     item.pop("search_name_rank", None)
+    dealt_with_at = read_state.get("dealt_with_at") if read_state is not None else row["dealt_with_at"]
+    manual_unread_at = read_state.get("manual_unread_at") if read_state is not None else row["manual_unread_at"]
+    if read_state is not None:
+        item["dealt_with_at"] = dealt_with_at
+        item["manual_unread_at"] = manual_unread_at
     needs_attention = _needs_attention(
         row["last_direction"],
         row["last_occurred_at"],
-        row["dealt_with_at"],
-        row["manual_unread_at"],
+        dealt_with_at,
+        manual_unread_at,
     )
     use_scheduled = bool(row["scheduled_id"]) and (
         not row["last_occurred_at"] or row["scheduled_for"] >= row["last_occurred_at"]
@@ -1125,10 +1391,16 @@ def _decorate_conversation_summary(row, participants: list[dict]) -> dict:
         item["last_text"] = row["scheduled_text"]
         item["last_message_type"] = "MMS" if scheduled_media_urls or len(scheduled_to_numbers) > 1 else "SMS"
         item["last_direction"] = "outbound"
+        item["last_from_number"] = row["scheduled_from_number"]
+        item["last_to_numbers"] = scheduled_to_numbers
         item["last_status"] = "failed" if scheduled_failed else "scheduled"
         item["last_occurred_at"] = row["scheduled_for"]
         item["last_raw_json"] = None
-    item["title"] = row["title"] or _conversation_title_from_participants(participants)
+    else:
+        item["last_to_numbers"] = from_json(row["last_to_numbers"], [])
+    stored_title = row["title"] if read_state is None else custom_title
+    item["custom_title"] = str(stored_title or "")
+    item["title"] = stored_title or _conversation_title_from_participants(participants)
     item["participants"] = participants
     item["sort_at"] = row["list_sort_at"] or row["last_message_at"] or row["updated_at"]
     item["needs_attention"] = needs_attention
@@ -1147,6 +1419,7 @@ def _list_conversations(
     conn,
     query: dict[str, list[str]],
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     search = (query.get("search") or [""])[0].strip()
     search_terms = _search_terms(search)
@@ -1171,15 +1444,27 @@ def _list_conversations(
             """
         )
         params.append(assigned_phone)
-    search_select_params: list[str] = []
+    search_select_params: list[object] = []
     search_rank_select = "0 AS search_name_rank"
     if unread:
-        clauses.append(UNREAD_CONVERSATION_CLAUSE)
+        unread_clause, unread_params = _unread_conversation_clause(
+            assigned_phone,
+            limited_user_id,
+        )
+        clauses.append(unread_clause)
+        params.extend(unread_params)
     if search_terms:
-        direct_search_sql, direct_search_params = _conversation_direct_search_expr(search_terms)
+        direct_search_sql, direct_search_params = _conversation_direct_search_expr(
+            search_terms,
+            limited_user_id,
+        )
         search_rank_select = f"CASE WHEN {direct_search_sql} THEN 1 ELSE 0 END AS search_name_rank"
         search_select_params.extend(direct_search_params)
-        search_clause, search_params = _conversation_search_clause(search_terms, assigned_phone)
+        search_clause, search_params = _conversation_search_clause(
+            search_terms,
+            assigned_phone,
+            limited_user_id,
+        )
         if search_clause:
             clauses.append(f"({search_clause})")
             params.extend(search_params)
@@ -1196,7 +1481,7 @@ def _list_conversations(
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     message_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
     scheduled_access_sql = "AND from_number = ?" if assigned_phone else ""
-    access_select_params: list[str] = []
+    access_select_params: list[object] = []
     if assigned_phone:
         access_select_params.extend([assigned_phone, assigned_phone, assigned_phone])
     rows = conn.execute(
@@ -1206,11 +1491,14 @@ def _list_conversations(
           m.id AS last_message_id,
           m.message_type AS last_message_type,
           m.direction AS last_direction,
+          m.from_number AS last_from_number,
+          m.to_numbers AS last_to_numbers,
           m.status AS last_status,
           m.occurred_at AS last_occurred_at,
           m.raw_json AS last_raw_json,
           sm.id AS scheduled_id,
           sm.text AS scheduled_text,
+          sm.from_number AS scheduled_from_number,
           sm.to_numbers AS scheduled_to_numbers,
           sm.media_urls AS scheduled_media_urls,
           sm.scheduled_for AS scheduled_for,
@@ -1253,7 +1541,20 @@ def _list_conversations(
     has_more = len(rows) > limit
     rows = rows[:limit]
     participants_by_conversation = _participants_for_conversations(
-        conn, (row["id"] for row in rows), assigned_phone
+        conn,
+        (row["id"] for row in rows),
+        assigned_phone,
+        limited_user_id,
+    )
+    limited_titles = _limited_conversation_titles(
+        conn,
+        (row["id"] for row in rows),
+        limited_user_id,
+    )
+    read_states = (
+        _conversation_user_states(conn, (row["id"] for row in rows), limited_user_id)
+        if assigned_phone and limited_user_id
+        else {}
     )
     conversations = []
     for row in rows:
@@ -1261,6 +1562,13 @@ def _list_conversations(
         item = _decorate_conversation_summary(
             row,
             participants_by_conversation.get(row["id"], []),
+            read_states.get(
+                int(row["id"]),
+                {"dealt_with_at": None, "manual_unread_at": None},
+            )
+            if assigned_phone
+            else None,
+            limited_titles.get(int(row["id"])),
         )
         if search_terms and not direct_search_match:
             item["search_match"] = _conversation_message_search_match(
@@ -1270,9 +1578,13 @@ def _list_conversations(
     return {"conversations": conversations, "has_more": has_more}
 
 
-def list_conversations(query: dict[str, list[str]], assigned_phone: str | None = None) -> dict:
+def list_conversations(
+    query: dict[str, list[str]],
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     with closing(connect()) as conn:
-        return _list_conversations(conn, query, assigned_phone)
+        return _list_conversations(conn, query, assigned_phone, limited_user_id)
 
 
 def _notification_key(row) -> str:
@@ -1292,6 +1604,7 @@ def _mobile_notifications(
     conn,
     query: dict[str, list[str]],
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     enabled = get_bool("notifications.native_enabled", config.NATIVE_NOTIFICATIONS_ENABLED)
     interval_minutes = max(get_int("notifications.native_interval_minutes", config.NATIVE_NOTIFICATION_INTERVAL_MINUTES), 15)
@@ -1301,6 +1614,25 @@ def _mobile_notifications(
     access_sql = f"AND {_message_access_sql('m')}" if assigned_phone else ""
     access_params = [assigned_phone, assigned_phone] if assigned_phone else []
     if enabled and since_at:
+        state_join = ""
+        state_params: list[str] = []
+        read_clause = """
+                c.manual_unread_at IS NOT NULL
+                OR c.dealt_with_at IS NULL
+                OR m.occurred_at > c.dealt_with_at
+        """
+        if assigned_phone:
+            state_join = """
+            LEFT JOIN limited_user_conversation_states read_state
+              ON read_state.conversation_id = c.id
+             AND read_state.limited_user_id = ?
+            """
+            state_params = [limited_user_id or 0]
+            read_clause = """
+                read_state.manual_unread_at IS NOT NULL
+                OR read_state.dealt_with_at IS NULL
+                OR m.occurred_at > read_state.dealt_with_at
+            """
         rows = conn.execute(
             f"""
             SELECT m.id,
@@ -1318,19 +1650,18 @@ def _mobile_notifications(
               ) AS attachment_count
             FROM messages m
             JOIN conversations c ON c.id = m.conversation_id
+            {state_join}
             WHERE m.direction = 'inbound'
               {access_sql}
               AND COALESCE(c.is_archived, 0) = 0
               AND (m.occurred_at > ? OR (m.occurred_at = ? AND m.id > ?))
               AND (
-                c.manual_unread_at IS NOT NULL
-                OR c.dealt_with_at IS NULL
-                OR m.occurred_at > c.dealt_with_at
+                {read_clause}
               )
             ORDER BY m.occurred_at ASC, m.id ASC
             LIMIT ?
             """,
-            (*access_params, since_at, since_at, since_id, limit),
+            (*state_params, *access_params, since_at, since_at, since_id, limit),
         ).fetchall()
     latest = rows[-1] if rows else conn.execute(
         f"""
@@ -1353,7 +1684,19 @@ def _mobile_notifications(
             text = f"{attachment_count} attachment{'s' if attachment_count != 1 else ''}"
         elif not text:
             text = "New text message"
-        title = _conversation_title(conn, row["conversation_id"])
+        participant_title = _conversation_title_from_participants(
+            _participants(
+                conn,
+                row["conversation_id"],
+                assigned_phone,
+                limited_user_id,
+            )
+        )
+        title = _stored_conversation_title(
+            conn,
+            int(row["conversation_id"]),
+            limited_user_id,
+        ) or participant_title
         notifications.append(
             {
                 "notification_key": _notification_key(row),
@@ -1361,7 +1704,7 @@ def _mobile_notifications(
                 "conversation_id": row["conversation_id"],
                 "title": title,
                 "from_number": row["from_number"],
-                "from_display": _contact_name(conn, row["from_number"]),
+                "from_display": _contact_name(conn, row["from_number"], limited_user_id),
                 "text": text,
                 "attachment_count": attachment_count,
                 "occurred_at": row["occurred_at"],
@@ -1379,21 +1722,27 @@ def _mobile_notifications(
 def mobile_notifications(
     query: dict[str, list[str]],
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     with closing(connect()) as conn:
-        return _mobile_notifications(conn, query, assigned_phone)
+        return _mobile_notifications(conn, query, assigned_phone, limited_user_id)
 
 
 def _refresh_tokens(
     conn,
     conversation_id: int | None = None,
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict[str, str]:
     def token_part(row, key: str) -> str:
         value = row[key]
         return "" if value is None else str(value)
 
     if assigned_phone:
+        unread_clause, unread_params = _unread_conversation_clause(
+            assigned_phone,
+            limited_user_id,
+        )
         list_row = conn.execute(
             f"""
             WITH accessible_conversations AS (
@@ -1414,7 +1763,7 @@ def _refresh_tokens(
             SELECT
               (SELECT COUNT(*) FROM accessible_conversations) AS conversation_count,
               (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 1) AS hidden_count,
-              (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_count,
+              (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0 AND {unread_clause}) AS unread_count,
               (SELECT COALESCE(MAX(c.updated_at), '') FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id) AS conversations_updated_at,
               (SELECT COUNT(*) FROM accessible_messages) AS message_count,
               (SELECT COALESCE(MAX(updated_at), '') FROM accessible_messages) AS messages_updated_at,
@@ -1423,20 +1772,44 @@ def _refresh_tokens(
               1 AS identity_count,
               (SELECT COALESCE(updated_at, '') FROM identities WHERE phone_number = ?) AS identities_updated_at,
               (
-                SELECT COUNT(DISTINCT cp.phone_number)
-                FROM conversation_participants cp
-                JOIN accessible_conversations ac ON ac.id = cp.conversation_id
-                WHERE cp.role = 'participant'
+                SELECT COUNT(*)
+                FROM limited_user_contacts luc
+                WHERE luc.limited_user_id = ?
               ) AS contact_count,
               (
-                SELECT COALESCE(MAX(c.updated_at), '')
-                FROM contacts c
-                JOIN contact_phones cp ON cp.contact_id = c.id
-                JOIN conversation_participants participant ON participant.phone_number = cp.phone_number
-                JOIN accessible_conversations ac ON ac.id = participant.conversation_id
-              ) AS contacts_updated_at
+                SELECT COALESCE(MAX(luc.updated_at), '')
+                FROM limited_user_contacts luc
+                WHERE luc.limited_user_id = ?
+              ) AS contacts_updated_at,
+              (
+                SELECT COALESCE(MAX(read_state.updated_at), '')
+                FROM limited_user_conversation_states read_state
+                WHERE read_state.limited_user_id = ?
+              ) AS conversation_states_updated_at,
+              (
+                SELECT COUNT(*)
+                FROM limited_user_conversation_titles luct
+                WHERE luct.limited_user_id = ?
+              ) AS limited_title_count,
+              (
+                SELECT COALESCE(MAX(luct.updated_at), '')
+                FROM limited_user_conversation_titles luct
+                WHERE luct.limited_user_id = ?
+              ) AS limited_titles_updated_at
             """,
-            (assigned_phone, assigned_phone, assigned_phone, assigned_phone, assigned_phone),
+            (
+                assigned_phone,
+                assigned_phone,
+                assigned_phone,
+                assigned_phone,
+                *unread_params,
+                assigned_phone,
+                limited_user_id or 0,
+                limited_user_id or 0,
+                limited_user_id or 0,
+                limited_user_id or 0,
+                limited_user_id or 0,
+            ),
         ).fetchone()
     else:
         list_row = conn.execute(
@@ -1453,7 +1826,10 @@ def _refresh_tokens(
           (SELECT COUNT(*) FROM identities) AS identity_count,
           (SELECT COALESCE(MAX(updated_at), '') FROM identities) AS identities_updated_at,
           (SELECT COUNT(*) FROM contacts) AS contact_count,
-          (SELECT COALESCE(MAX(updated_at), '') FROM contacts) AS contacts_updated_at
+          (SELECT COALESCE(MAX(updated_at), '') FROM contacts) AS contacts_updated_at,
+          '' AS conversation_states_updated_at,
+          0 AS limited_title_count,
+          '' AS limited_titles_updated_at
             """
         ).fetchone()
     tokens = {
@@ -1468,6 +1844,9 @@ def _refresh_tokens(
                 "messages_updated_at",
                 "scheduled_count",
                 "scheduled_updated_at",
+                "conversation_states_updated_at",
+                "limited_title_count",
+                "limited_titles_updated_at",
             )
         ),
         "bootstrap": "|".join(
@@ -1490,6 +1869,11 @@ def _refresh_tokens(
                 f"""
                 SELECT
                   c.updated_at AS conversation_updated_at,
+                  (
+                    SELECT COALESCE(luct.updated_at, '')
+                    FROM limited_user_conversation_titles luct
+                    WHERE luct.limited_user_id = ? AND luct.conversation_id = c.id
+                  ) AS title_updated_at,
                   COALESCE(c.dealt_with_at, '') AS dealt_with_at,
                   COALESCE(c.manual_unread_at, '') AS manual_unread_at,
                   COALESCE(c.last_message_at, '') AS last_message_at,
@@ -1503,6 +1887,7 @@ def _refresh_tokens(
                 WHERE c.id = ?
                 """,
                 (
+                    limited_user_id or 0,
                     assigned_phone, assigned_phone,
                     assigned_phone, assigned_phone,
                     assigned_phone, assigned_phone,
@@ -1515,6 +1900,7 @@ def _refresh_tokens(
                 """
             SELECT
               c.updated_at AS conversation_updated_at,
+              '' AS title_updated_at,
               COALESCE(c.dealt_with_at, '') AS dealt_with_at,
               COALESCE(c.manual_unread_at, '') AS manual_unread_at,
               COALESCE(c.last_message_at, '') AS last_message_at,
@@ -1532,10 +1918,20 @@ def _refresh_tokens(
                 (conversation_id,),
             ).fetchone()
         if row:
+            read_state = (
+                _conversation_user_state(conn, conversation_id, limited_user_id)
+                if assigned_phone and limited_user_id
+                else None
+            )
             tokens["conversation"] = "|".join(
-                token_part(row, key)
+                (
+                    str(read_state.get(key) or "")
+                    if read_state is not None and key in {"dealt_with_at", "manual_unread_at"}
+                    else token_part(row, key)
+                )
                 for key in (
                     "conversation_updated_at",
+                    "title_updated_at",
                     "dealt_with_at",
                     "manual_unread_at",
                     "last_message_at",
@@ -1553,13 +1949,19 @@ def _refresh_tokens(
 def refresh_state(
     query: dict[str, list[str]],
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     conversation_id_raw = (query.get("conversation_id") or ["0"])[0]
     conversation_id = int(conversation_id_raw) if conversation_id_raw.isdigit() else None
     with closing(connect()) as conn:
         return {
             "server_time": now_est(),
-            "tokens": _refresh_tokens(conn, conversation_id, assigned_phone),
+            "tokens": _refresh_tokens(
+                conn,
+                conversation_id,
+                assigned_phone,
+                limited_user_id,
+            ),
         }
 
 
@@ -1568,6 +1970,7 @@ def _get_messages(
     conversation_id: int,
     query: dict[str, list[str]] | None = None,
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     query = query or {}
     _require_conversation_access(conn, conversation_id, assigned_phone)
@@ -1598,6 +2001,7 @@ def _get_messages(
     contact_names = _contact_names(
         conn,
         (row["from_number"] for row in rows if not row["identity_label"]),
+        limited_user_id,
     )
     attachments_by_message: dict[int, list[dict]] = {row["id"]: [] for row in rows}
     message_ids = list(attachments_by_message)
@@ -1621,7 +2025,12 @@ def _get_messages(
         messages.append(_decorate_message_status(message))
     scheduled_messages = []
     if not before and not before_id:
-        scheduled_messages = _scheduled_messages_for_conversation(conn, conversation_id, assigned_phone)
+        scheduled_messages = _scheduled_messages_for_conversation(
+            conn,
+            conversation_id,
+            assigned_phone,
+            limited_user_id,
+        )
         messages.extend(scheduled_messages)
         messages.sort(key=lambda item: (item.get("occurred_at") or "", str(item.get("id") or "")))
     older_count = 0
@@ -1646,6 +2055,10 @@ def _get_messages(
             ),
         ).fetchone()["count"]
     conversation = _row_dict(conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone())
+    if assigned_phone:
+        read_state = _conversation_user_state(conn, conversation_id, limited_user_id)
+        conversation["dealt_with_at"] = read_state.get("dealt_with_at")
+        conversation["manual_unread_at"] = read_state.get("manual_unread_at")
     last_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
     last_access_params = [assigned_phone, assigned_phone] if assigned_phone else []
     last_message = conn.execute(
@@ -1680,8 +2093,15 @@ def _get_messages(
         ):
             conversation["last_direction"] = "outbound"
             conversation["last_occurred_at"] = latest_scheduled["occurred_at"]
-    participants = _participants(conn, conversation_id, assigned_phone)
-    conversation["title"] = _conversation_title_from_participants(participants)
+    participants = _participants(
+        conn,
+        conversation_id,
+        assigned_phone,
+        limited_user_id,
+    )
+    custom_title = _stored_conversation_title(conn, conversation_id, limited_user_id)
+    conversation["custom_title"] = custom_title
+    conversation["title"] = custom_title or _conversation_title_from_participants(participants)
     conversation["participants"] = participants
     return {
         "conversation": conversation,
@@ -1695,14 +2115,22 @@ def get_messages(
     conversation_id: int,
     query: dict[str, list[str]] | None = None,
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     with closing(connect()) as conn:
-        return _get_messages(conn, conversation_id, query, assigned_phone)
+        return _get_messages(
+            conn,
+            conversation_id,
+            query,
+            assigned_phone,
+            limited_user_id,
+        )
 
 
 def _bootstrap(conn, principal: dict | None = None) -> dict:
     server_time = now_est()
     assigned_phone = str((principal or {}).get("phone_number") or "") or None
+    limited_user_id = int((principal or {}).get("user_id") or 0) or None
     identity_where = "WHERE i.phone_number = ?" if assigned_phone else ""
     identity_params: list[object] = [DEFAULT_AUTOREPLY_COOLDOWN_HOURS]
     if assigned_phone:
@@ -1733,6 +2161,10 @@ def _bootstrap(conn, principal: dict | None = None) -> dict:
     ]
     default_identity = _apply_default_identity(identities)
     if assigned_phone:
+        unread_clause, unread_params = _unread_conversation_clause(
+            assigned_phone,
+            limited_user_id,
+        )
         stats = _row_dict(
             conn.execute(
                 f"""
@@ -1751,17 +2183,22 @@ def _bootstrap(conn, principal: dict | None = None) -> dict:
                   (SELECT COUNT(*) FROM accessible_conversations) AS conversations,
                   (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0) AS inbox_conversations,
                   (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 1) AS hidden_conversations,
-                  (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0 AND {UNREAD_CONVERSATION_CLAUSE}) AS unread_conversations,
+                  (SELECT COUNT(*) FROM conversations c JOIN accessible_conversations ac ON ac.id = c.id WHERE COALESCE(c.is_archived, 0) = 0 AND {unread_clause}) AS unread_conversations,
                   (SELECT COUNT(*) FROM accessible_messages) AS messages,
                   (SELECT COUNT(*) FROM attachments a JOIN accessible_messages am ON am.id = a.message_id) AS attachments,
                   (
-                    SELECT COUNT(DISTINCT cp.phone_number)
-                    FROM conversation_participants cp
-                    JOIN accessible_conversations ac ON ac.id = cp.conversation_id
-                    WHERE cp.role = 'participant'
+                    SELECT COUNT(*)
+                    FROM limited_user_contacts luc
+                    WHERE luc.limited_user_id = ?
                   ) AS contacts
                 """,
-                (assigned_phone, assigned_phone, assigned_phone),
+                (
+                    assigned_phone,
+                    assigned_phone,
+                    assigned_phone,
+                    *unread_params,
+                    limited_user_id or 0,
+                ),
             ).fetchone()
         )
     else:
@@ -1781,8 +2218,28 @@ def _bootstrap(conn, principal: dict | None = None) -> dict:
         )
     providers = configured_providers()
     messaging_providers = configured_messaging_providers()
+    limited_assignments = []
+    if not assigned_phone:
+        limited_assignments = [
+            {
+                "user_id": row["id"],
+                "username": row["username"],
+                "identity_id": row["identity_id"],
+                "phone_number": row["phone_number"],
+                "is_active": bool(row["is_active"]),
+            }
+            for row in conn.execute(
+                """
+                SELECT u.id, u.username, u.identity_id, u.is_active, i.phone_number
+                FROM limited_users u
+                JOIN identities i ON i.id = u.identity_id
+                ORDER BY lower(u.username), u.id
+                """
+            ).fetchall()
+        ]
     return {
         "identities": identities,
+        "limited_assignments": limited_assignments,
         "stats": stats,
         "server_time_et": server_time,
         "server_time_est": server_time,
@@ -2226,9 +2683,30 @@ def message_stats(query: dict[str, list[str]] | None = None) -> dict:
         return _message_stats(conn, query)
 
 
-def _search_contacts(conn, query: dict[str, list[str]]) -> dict:
+def _search_contacts(
+    conn,
+    query: dict[str, list[str]],
+    limited_user_id: int | None = None,
+) -> dict:
     terms = _search_terms((query.get("q") or [""])[0])
-    if not terms:
+    if limited_user_id:
+        clauses = ["limited_user_id = ?"]
+        params: list[object] = [limited_user_id]
+        for term in terms:
+            clauses.append("(lower(display_name) LIKE ? OR phone_number LIKE ?)")
+            like = f"%{term}%"
+            params.extend([like, like])
+        rows = conn.execute(
+            f"""
+            SELECT phone_number AS id, display_name, source, phone_number, 'mobile' AS label
+            FROM limited_user_contacts
+            WHERE {' AND '.join(clauses)}
+            ORDER BY CASE source WHEN 'user' THEN 2 ELSE 1 END DESC, updated_at DESC
+            LIMIT 50
+            """,
+            params,
+        ).fetchall()
+    elif not terms:
         rows = conn.execute(
             """
             SELECT c.id, c.display_name, c.source, cp.phone_number, cp.label
@@ -2284,14 +2762,18 @@ def _search_contacts(conn, query: dict[str, list[str]]) -> dict:
     }
 
 
-def search_contacts(query: dict[str, list[str]]) -> dict:
+def search_contacts(
+    query: dict[str, list[str]],
+    limited_user_id: int | None = None,
+) -> dict:
     with closing(connect()) as conn:
-        return _search_contacts(conn, query)
+        return _search_contacts(conn, query, limited_user_id)
 
 
 def match_conversation(
     query: dict[str, list[str]],
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     raw_recipients: list[str] = []
     for value in (query.get("recipient") or []) + (query.get("recipients") or []):
@@ -2307,18 +2789,83 @@ def match_conversation(
         return {"conversation": None}
     return {
         "conversation_id": int(row["id"]),
-        "conversation": get_messages(int(row["id"]), assigned_phone=assigned_phone)["conversation"],
+        "conversation": get_messages(
+            int(row["id"]),
+            assigned_phone=assigned_phone,
+            limited_user_id=limited_user_id,
+        )["conversation"],
     }
 
 
-def save_contact_name(payload: dict, assigned_phone: str | None = None) -> dict:
+def save_contact_name(
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     phone = payload.get("phone_number") or payload.get("phone") or ""
     display_name = str(payload.get("display_name") or payload.get("name") or "").strip()
-    result = save_synced_contact_name(phone, display_name)
+    if assigned_phone and limited_user_id:
+        phone = normalize_phone(phone)
+        display_name = re.sub(r"\s+", " ", display_name).strip()
+        if not phone:
+            raise ValueError("A valid phone number is required.")
+        if not display_name:
+            raise ValueError("Contact name is required.")
+        if len(display_name) > 140:
+            raise ValueError("Contact name is too long.")
+        with closing(connect()) as conn:
+            accessible = conn.execute(
+                """
+                SELECT 1
+                FROM conversation_participants participant
+                WHERE participant.role = 'participant'
+                  AND participant.phone_number = ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM conversation_participants self_cp
+                    WHERE self_cp.conversation_id = participant.conversation_id
+                      AND self_cp.role = 'self'
+                      AND self_cp.phone_number = ?
+                  )
+                LIMIT 1
+                """,
+                (phone, assigned_phone),
+            ).fetchone()
+            if not accessible:
+                raise LookupError("Contact not found.")
+            timestamp = now_est()
+            conn.execute(
+                """
+                INSERT INTO limited_user_contacts(
+                  limited_user_id, phone_number, display_name, source, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'user', ?, ?)
+                ON CONFLICT(limited_user_id, phone_number) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  source = 'user',
+                  updated_at = excluded.updated_at
+                """,
+                (limited_user_id, phone, display_name, timestamp, timestamp),
+            )
+            conn.commit()
+        result = {
+            "contact": {
+                "id": phone,
+                "display_name": display_name,
+                "phone_number": phone,
+                "source": "user",
+            },
+            "synced": False,
+            "participants": 0,
+        }
+    else:
+        result = save_synced_contact_name(phone, display_name)
     conversation_id = payload.get("conversation_id")
     if conversation_id:
         result["conversation"] = get_messages(
-            int(conversation_id), assigned_phone=assigned_phone
+            int(conversation_id),
+            assigned_phone=assigned_phone,
+            limited_user_id=limited_user_id,
         )["conversation"]
     return result
 
@@ -2513,7 +3060,85 @@ def set_conversation_archived(
     return {"conversation": _row_dict(row)}
 
 
-def _conversation_summary(conn, conversation_id: int) -> dict:
+def set_conversation_title(
+    conversation_id: int,
+    title: object,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
+    custom_title = str(title or "").strip()
+    if len(custom_title) > MAX_CONVERSATION_TITLE_LENGTH:
+        raise ValueError(
+            f"Group names must be {MAX_CONVERSATION_TITLE_LENGTH} characters or fewer."
+        )
+    with closing(connect()) as conn:
+        init_db(conn)
+        _require_conversation_access(conn, conversation_id, assigned_phone)
+        conversation = conn.execute(
+            "SELECT kind FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if not conversation:
+            raise LookupError("Conversation not found")
+        if conversation["kind"] != "group":
+            raise ValueError("Only group conversations can be named.")
+        timestamp = now_est()
+        if assigned_phone:
+            if not limited_user_id:
+                raise PermissionError("Limited user account required.")
+            if custom_title:
+                conn.execute(
+                    """
+                    INSERT INTO limited_user_conversation_titles(
+                      limited_user_id, conversation_id, title, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(limited_user_id, conversation_id) DO UPDATE SET
+                      title = excluded.title,
+                      updated_at = excluded.updated_at
+                    """,
+                    (limited_user_id, conversation_id, custom_title, timestamp, timestamp),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM limited_user_conversation_titles
+                    WHERE limited_user_id = ? AND conversation_id = ?
+                    """,
+                    (limited_user_id, conversation_id),
+                )
+        else:
+            conn.execute(
+                """
+                UPDATE conversations
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (custom_title or None, timestamp, conversation_id),
+            )
+        conn.commit()
+        return {
+            "conversation": _conversation_summary(
+                conn,
+                conversation_id,
+                assigned_phone,
+                limited_user_id,
+            )
+        }
+
+
+def _conversation_summary(
+    conn,
+    conversation_id: int,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
+    message_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+    scheduled_access_sql = "AND from_number = ?" if assigned_phone else ""
+    params: list[object] = []
+    if assigned_phone:
+        params.extend([assigned_phone, assigned_phone, assigned_phone])
+    params.append(conversation_id)
     row = conn.execute(
         f"""
         SELECT c.*,
@@ -2521,11 +3146,14 @@ def _conversation_summary(conn, conversation_id: int) -> dict:
           m.id AS last_message_id,
           m.message_type AS last_message_type,
           m.direction AS last_direction,
+          m.from_number AS last_from_number,
+          m.to_numbers AS last_to_numbers,
           m.status AS last_status,
           m.occurred_at AS last_occurred_at,
           m.raw_json AS last_raw_json,
           sm.id AS scheduled_id,
           sm.text AS scheduled_text,
+          sm.from_number AS scheduled_from_number,
           sm.to_numbers AS scheduled_to_numbers,
           sm.media_urls AS scheduled_media_urls,
           sm.scheduled_for AS scheduled_for,
@@ -2537,6 +3165,7 @@ def _conversation_summary(conn, conversation_id: int) -> dict:
           SELECT id FROM messages
           WHERE conversation_id = c.id
             AND COALESCE(source, '') != 'autoreply'
+            {message_access_sql}
             AND (
               c.last_message_at IS NULL
               OR occurred_at <= c.last_message_at
@@ -2553,22 +3182,36 @@ def _conversation_summary(conn, conversation_id: int) -> dict:
           SELECT id FROM scheduled_messages
           WHERE conversation_id = c.id
             AND status IN ('queued', 'sending', 'failed')
+            {scheduled_access_sql}
           ORDER BY scheduled_for DESC, id DESC
           LIMIT 1
         )
         WHERE c.id = ?
         """,
-        (conversation_id,),
+        params,
     ).fetchone()
     if not row:
         return {}
-    return _decorate_conversation_summary(row, _participants(conn, conversation_id))
+    read_state = (
+        _conversation_user_state(conn, conversation_id, limited_user_id)
+        if assigned_phone and limited_user_id
+        else None
+    )
+    return _decorate_conversation_summary(
+        row,
+        _participants(conn, conversation_id, assigned_phone, limited_user_id),
+        read_state,
+        _stored_conversation_title(conn, conversation_id, limited_user_id)
+        if limited_user_id
+        else None,
+    )
 
 
 def set_conversation_dealt(
     conversation_id: int,
     dealt: bool = True,
     assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
 ) -> dict:
     with closing(connect()) as conn:
         _require_conversation_access(conn, conversation_id, assigned_phone)
@@ -2576,22 +3219,69 @@ def set_conversation_dealt(
         if not row:
             raise ValueError("Conversation not found.")
         timestamp = now_est()
-        dealt_with_at = (row["last_message_at"] or timestamp) if dealt else None
-        manual_unread_at = None if dealt else (row["last_message_at"] or timestamp)
-        conn.execute(
-            """
-            UPDATE conversations
-            SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (dealt_with_at, manual_unread_at, timestamp, conversation_id),
-        )
+        if assigned_phone:
+            if not limited_user_id:
+                raise PermissionError("Limited user account required.")
+            latest = conn.execute(
+                f"""
+                SELECT occurred_at
+                FROM messages scoped_message
+                WHERE scoped_message.conversation_id = ?
+                  AND {_message_access_sql('scoped_message')}
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT 1
+                """,
+                (conversation_id, assigned_phone, assigned_phone),
+            ).fetchone()
+            marker = (latest["occurred_at"] if latest else None) or timestamp
+            dealt_with_at = marker if dealt else None
+            manual_unread_at = None if dealt else marker
+            conn.execute(
+                """
+                INSERT INTO limited_user_conversation_states(
+                  limited_user_id, conversation_id, dealt_with_at, manual_unread_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(limited_user_id, conversation_id) DO UPDATE SET
+                  dealt_with_at = excluded.dealt_with_at,
+                  manual_unread_at = excluded.manual_unread_at,
+                  updated_at = excluded.updated_at
+                """,
+                (limited_user_id, conversation_id, dealt_with_at, manual_unread_at, timestamp),
+            )
+        else:
+            dealt_with_at = (row["last_message_at"] or timestamp) if dealt else None
+            manual_unread_at = None if dealt else (row["last_message_at"] or timestamp)
+            conn.execute(
+                """
+                UPDATE conversations
+                SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (dealt_with_at, manual_unread_at, timestamp, conversation_id),
+            )
         conn.commit()
-        conversation = _conversation_summary(conn, conversation_id)
-        return {"conversation": conversation, "unread_count": _unread_conversation_count(conn)}
+        conversation = _conversation_summary(
+            conn,
+            conversation_id,
+            assigned_phone,
+            limited_user_id,
+        )
+        return {
+            "conversation": conversation,
+            "unread_count": _unread_conversation_count(
+                conn,
+                assigned_phone,
+                limited_user_id,
+            ),
+        }
 
 
-def bulk_update_conversations(payload: dict, assigned_phone: str | None = None) -> dict:
+def bulk_update_conversations(
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     ids = []
     for value in payload.get("conversation_ids") or payload.get("ids") or []:
         try:
@@ -2608,6 +3298,9 @@ def bulk_update_conversations(payload: dict, assigned_phone: str | None = None) 
     conn = connect()
     init_db(conn)
     if assigned_phone:
+        if not limited_user_id:
+            conn.close()
+            raise PermissionError("Limited user account required.")
         inaccessible = [
             conversation_id
             for conversation_id in ids
@@ -2639,20 +3332,57 @@ def bulk_update_conversations(payload: dict, assigned_phone: str | None = None) 
             ids,
         ).fetchall()
         for row in rows:
-            marker = row["last_message_at"] or timestamp
-            conn.execute(
-                """
-                UPDATE conversations
-                SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (marker if dealt else None, None if dealt else marker, timestamp, row["id"]),
-            )
+            if assigned_phone:
+                latest = conn.execute(
+                    f"""
+                    SELECT occurred_at
+                    FROM messages scoped_message
+                    WHERE scoped_message.conversation_id = ?
+                      AND {_message_access_sql('scoped_message')}
+                    ORDER BY occurred_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (row["id"], assigned_phone, assigned_phone),
+                ).fetchone()
+                marker = (latest["occurred_at"] if latest else None) or timestamp
+                conn.execute(
+                    """
+                    INSERT INTO limited_user_conversation_states(
+                      limited_user_id, conversation_id, dealt_with_at, manual_unread_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(limited_user_id, conversation_id) DO UPDATE SET
+                      dealt_with_at = excluded.dealt_with_at,
+                      manual_unread_at = excluded.manual_unread_at,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        limited_user_id,
+                        row["id"],
+                        marker if dealt else None,
+                        None if dealt else marker,
+                        timestamp,
+                    ),
+                )
+            else:
+                marker = row["last_message_at"] or timestamp
+                conn.execute(
+                    """
+                    UPDATE conversations
+                    SET dealt_with_at = ?, manual_unread_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (marker if dealt else None, None if dealt else marker, timestamp, row["id"]),
+                )
     conn.commit()
     return {"updated": len(ids), "action": action, "conversation_ids": ids}
 
 
-def create_conversation(payload: dict, assigned_phone: str | None = None) -> dict:
+def create_conversation(
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     recipients = [normalize_phone(x) for x in payload.get("recipients", []) if normalize_phone(x)]
     if not recipients:
         raise ValueError("At least one recipient is required.")
@@ -2672,51 +3402,112 @@ def create_conversation(payload: dict, assigned_phone: str | None = None) -> dic
     conn.commit()
     return {
         "conversation_id": conversation_id,
-        **get_messages(conversation_id, assigned_phone=assigned_phone),
+        **get_messages(
+            conversation_id,
+            assigned_phone=assigned_phone,
+            limited_user_id=limited_user_id,
+        ),
     }
 
 
-def _unread_conversation_count(conn) -> int:
+def _unread_conversation_count(
+    conn,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> int:
+    unread_clause, unread_params = _unread_conversation_clause(
+        assigned_phone,
+        limited_user_id,
+    )
+    access_clause = ""
+    access_params: list[str] = []
+    if assigned_phone:
+        access_clause = """
+              AND EXISTS (
+                SELECT 1 FROM conversation_participants access_cp
+                WHERE access_cp.conversation_id = c.id
+                  AND access_cp.role = 'self'
+                  AND access_cp.phone_number = ?
+              )
+        """
+        access_params = [assigned_phone]
     return int(
         conn.execute(
             f"""
             SELECT COUNT(*)
             FROM conversations c
             WHERE COALESCE(c.is_archived, 0) = 0
-              AND {UNREAD_CONVERSATION_CLAUSE}
-            """
+              {access_clause}
+              AND {unread_clause}
+            """,
+            (*access_params, *unread_params),
         ).fetchone()[0]
     )
 
 
-def _mark_reply_message_read(message_id: int) -> dict | None:
+def _mark_reply_message_read(
+    message_id: int,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict | None:
     with closing(connect()) as conn:
         row = conn.execute(
-            "SELECT conversation_id, occurred_at FROM messages WHERE id = ?",
+            "SELECT conversation_id, occurred_at, from_number FROM messages WHERE id = ?",
             (message_id,),
         ).fetchone()
         if not row:
             return None
         conversation_id = int(row["conversation_id"])
         marker = row["occurred_at"] or now_est()
-        conn.execute(
-            """
-            UPDATE conversations
-            SET dealt_with_at = ?,
-                manual_unread_at = NULL,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (marker, now_est(), conversation_id),
-        )
+        timestamp = now_est()
+        if assigned_phone:
+            if not limited_user_id:
+                raise PermissionError("Limited user account required.")
+            conn.execute(
+                """
+                INSERT INTO limited_user_conversation_states(
+                  limited_user_id, conversation_id, dealt_with_at, manual_unread_at, updated_at
+                )
+                VALUES (?, ?, ?, NULL, ?)
+                ON CONFLICT(limited_user_id, conversation_id) DO UPDATE SET
+                  dealt_with_at = excluded.dealt_with_at,
+                  manual_unread_at = NULL,
+                  updated_at = excluded.updated_at
+                """,
+                (limited_user_id, conversation_id, marker, timestamp),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE conversations
+                SET dealt_with_at = ?,
+                    manual_unread_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (marker, timestamp, conversation_id),
+            )
         conn.commit()
         return {
-            "conversation": _conversation_summary(conn, conversation_id),
-            "unread_count": _unread_conversation_count(conn),
+            "conversation": _conversation_summary(
+                conn,
+                conversation_id,
+                assigned_phone,
+                limited_user_id,
+            ),
+            "unread_count": _unread_conversation_count(
+                conn,
+                assigned_phone,
+                limited_user_id,
+            ),
         }
 
 
-def send_api_message(payload: dict, assigned_phone: str | None = None) -> dict:
+def send_api_message(
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     conversation_id = payload.get("conversation_id")
     to_numbers = [normalize_phone(x) for x in payload.get("to_numbers", []) if normalize_phone(x)]
     text = str(payload.get("text") or "")
@@ -2741,7 +3532,11 @@ def send_api_message(payload: dict, assigned_phone: str | None = None) -> dict:
     if result.get("message_id"):
         message_id = int(result["message_id"])
         _mark_uploaded_attachments_local(message_id, media_urls)
-        read_state = _mark_reply_message_read(message_id)
+        read_state = _mark_reply_message_read(
+            message_id,
+            assigned_phone,
+            limited_user_id,
+        )
         if read_state:
             conversation = read_state["conversation"]
             result["conversation_id"] = conversation["id"]
@@ -2801,7 +3596,11 @@ def send_external_api_message(payload: dict) -> dict:
     return api_message_receipt(int(message_id))
 
 
-def send_api_fax(payload: dict, assigned_phone: str | None = None) -> dict:
+def send_api_fax(
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     conversation_id = payload.get("conversation_id")
     media_url = str(payload.get("media_url") or "").strip()
     to_number = normalize_phone(payload.get("to_number"))
@@ -2827,7 +3626,11 @@ def send_api_fax(payload: dict, assigned_phone: str | None = None) -> dict:
     if result.get("message_id"):
         message_id = int(result["message_id"])
         _mark_uploaded_attachments_local(message_id, [media_url])
-        read_state = _mark_reply_message_read(message_id)
+        read_state = _mark_reply_message_read(
+            message_id,
+            assigned_phone,
+            limited_user_id,
+        )
         if read_state:
             conversation = read_state["conversation"]
             result["conversation_id"] = conversation["id"]
@@ -2860,7 +3663,11 @@ def _scheduled_message_dict(row) -> dict:
     return message
 
 
-def schedule_api_message(payload: dict, assigned_phone: str | None = None) -> dict:
+def schedule_api_message(
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     conversation_id = payload.get("conversation_id")
     to_numbers = [normalize_phone(x) for x in payload.get("to_numbers", []) if normalize_phone(x)]
     text = str(payload.get("text") or "")
@@ -2875,6 +3682,8 @@ def schedule_api_message(payload: dict, assigned_phone: str | None = None) -> di
     init_db(conn)
     from_number = normalize_phone(payload.get("from_number") or "")
     if assigned_phone:
+        if not limited_user_id:
+            raise PermissionError("Limited user account required.")
         if from_number and from_number != assigned_phone:
             raise ValueError("You can only send from your assigned number.")
         from_number = assigned_phone
@@ -2888,13 +3697,14 @@ def schedule_api_message(payload: dict, assigned_phone: str | None = None) -> di
     cur = conn.execute(
         """
         INSERT INTO scheduled_messages(
-          conversation_id, from_number, to_numbers, text, media_urls,
+          conversation_id, limited_user_id, from_number, to_numbers, text, media_urls,
           scheduled_for, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
         """,
         (
             conversation_id,
+            limited_user_id,
             from_number,
             json.dumps(to_numbers, separators=(",", ":")),
             text,
@@ -2942,7 +3752,11 @@ def cancel_scheduled_message(scheduled_id: int, assigned_phone: str | None = Non
     }
 
 
-def send_scheduled_message_now(scheduled_id: int, assigned_phone: str | None = None) -> dict:
+def send_scheduled_message_now(
+    scheduled_id: int,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
     conn = connect()
     init_db(conn)
     row = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
@@ -2954,7 +3768,7 @@ def send_scheduled_message_now(scheduled_id: int, assigned_phone: str | None = N
     if status != "queued":
         raise ValueError("Only queued scheduled messages can be sent now.")
     conversation_id = int(row["conversation_id"]) if row["conversation_id"] else None
-    _send_scheduled_row(conn, row)
+    _send_scheduled_row(conn, row, limited_user_id)
     updated = conn.execute("SELECT * FROM scheduled_messages WHERE id = ?", (scheduled_id,)).fetchone()
     return {
         "conversation_id": conversation_id,
@@ -2963,7 +3777,7 @@ def send_scheduled_message_now(scheduled_id: int, assigned_phone: str | None = N
     }
 
 
-def _send_scheduled_row(conn, row) -> None:
+def _send_scheduled_row(conn, row, acting_limited_user_id: int | None = None) -> None:
     scheduled = _scheduled_message_dict(row)
     scheduled_id = int(scheduled["id"])
     timestamp = now_est()
@@ -2989,7 +3803,12 @@ def _send_scheduled_row(conn, row) -> None:
         message_id = int(result["message_id"]) if result.get("message_id") else None
         if message_id:
             _mark_uploaded_attachments_local(message_id, scheduled["media_urls"])
-            _mark_reply_message_read(message_id)
+            owner_user_id = int(scheduled.get("limited_user_id") or acting_limited_user_id or 0) or None
+            _mark_reply_message_read(
+                message_id,
+                str(scheduled.get("from_number") or "") if owner_user_id else None,
+                owner_user_id,
+            )
         conn.execute(
             """
             UPDATE scheduled_messages
@@ -3683,6 +4502,12 @@ class TextingHandler(BaseHTTPRequestHandler):
         phone = str((principal or {}).get("phone_number") or "")
         return phone or None
 
+    def _limited_user_id(self) -> int | None:
+        principal = self._current_principal() or {}
+        if principal.get("role") != "limited":
+            return None
+        return int(principal.get("user_id") or 0) or None
+
     def _limited_request_forbidden(self, method: str, path: str) -> bool:
         principal = self._current_principal()
         if not principal or principal.get("role") != "limited":
@@ -4102,13 +4927,31 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path == "/api/stats":
                 self._send_json(message_stats(query))
             elif path == "/api/mobile/notifications":
-                self._send_json(mobile_notifications(query, self._assigned_phone()))
+                self._send_json(
+                    mobile_notifications(
+                        query,
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
             elif path == "/api/refresh":
-                self._send_json(refresh_state(query, self._assigned_phone()))
+                self._send_json(
+                    refresh_state(
+                        query,
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
             elif path == "/api/uploads/diagnostics":
                 self._send_json(upload_diagnostics(self._request_url()))
             elif path == "/api/conversations":
-                self._send_json(list_conversations(query, self._assigned_phone()))
+                self._send_json(
+                    list_conversations(
+                        query,
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
             elif path == "/api/assistant/v1/unread-conversations":
                 self._send_json(list_assistant_unread_conversations(query))
             elif match := re.fullmatch(r"/api/assistant/v1/conversations/(\d+)/context", path):
@@ -4120,13 +4963,24 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif match := re.fullmatch(r"/api/v1/messages/(\d+)", path):
                 self._send_json({"message": api_message_receipt(int(match.group(1)))})
             elif path == "/api/conversations/match":
-                self._send_json(match_conversation(query, self._assigned_phone()))
+                self._send_json(
+                    match_conversation(
+                        query,
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
             elif match := re.fullmatch(r"/api/conversations/(\d+)/messages", path):
                 self._send_json(
-                    get_messages(int(match.group(1)), query, self._assigned_phone())
+                    get_messages(
+                        int(match.group(1)),
+                        query,
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif path == "/api/contacts":
-                self._send_json(search_contacts(query))
+                self._send_json(search_contacts(query, self._limited_user_id()))
             elif path == "/api/database/download":
                 self._send_database_download()
             elif path in {"/api/twilio/voice", "/api/telnyx/voice"}:
@@ -4222,7 +5076,11 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json(delete_limited_user(int(match.group(1))))
             elif path == "/api/messages":
                 self._send_json(
-                    send_api_message(self._read_json(), self._assigned_phone())
+                    send_api_message(
+                        self._read_json(),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif path == "/api/v1/messages":
                 receipt = send_external_api_message(self._read_json())
@@ -4233,10 +5091,20 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path == "/api/assistant/v1/action-reviews":
                 self._send_json(record_action_review(self._read_json()))
             elif path == "/api/fax/send":
-                self._send_json(send_api_fax(self._read_json(), self._assigned_phone()))
+                self._send_json(
+                    send_api_fax(
+                        self._read_json(),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
             elif path == "/api/messages/schedule":
                 self._send_json(
-                    schedule_api_message(self._read_json(), self._assigned_phone())
+                    schedule_api_message(
+                        self._read_json(),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/cancel", path):
                 self._send_json(
@@ -4244,11 +5112,19 @@ class TextingHandler(BaseHTTPRequestHandler):
                 )
             elif match := re.fullmatch(r"/api/messages/schedule/(\d+)/send-now", path):
                 self._send_json(
-                    send_scheduled_message_now(int(match.group(1)), self._assigned_phone())
+                    send_scheduled_message_now(
+                        int(match.group(1)),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif path == "/api/conversations":
                 self._send_json(
-                    create_conversation(self._read_json(), self._assigned_phone())
+                    create_conversation(
+                        self._read_json(),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif match := re.fullmatch(r"/api/conversations/(\d+)/archive", path):
                 payload = self._read_json()
@@ -4258,17 +5134,34 @@ class TextingHandler(BaseHTTPRequestHandler):
                         int(match.group(1)), archived, self._assigned_phone()
                     )
                 )
+            elif match := re.fullmatch(r"/api/conversations/(\d+)/title", path):
+                payload = self._read_json()
+                self._send_json(
+                    set_conversation_title(
+                        int(match.group(1)),
+                        payload.get("title"),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
             elif match := re.fullmatch(r"/api/conversations/(\d+)/dealt", path):
                 payload = self._read_json()
                 dealt = bool(payload.get("dealt", True))
                 self._send_json(
                     set_conversation_dealt(
-                        int(match.group(1)), dealt, self._assigned_phone()
+                        int(match.group(1)),
+                        dealt,
+                        self._assigned_phone(),
+                        self._limited_user_id(),
                     )
                 )
             elif path == "/api/conversations/bulk":
                 self._send_json(
-                    bulk_update_conversations(self._read_json(), self._assigned_phone())
+                    bulk_update_conversations(
+                        self._read_json(),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif path == "/api/contacts/sync":
                 self._send_json({"synced": sync_contacts()})
@@ -4276,7 +5169,11 @@ class TextingHandler(BaseHTTPRequestHandler):
                 self._send_json({"synced": import_phone_contacts(self._read_json())})
             elif path == "/api/contacts/name":
                 self._send_json(
-                    save_contact_name(self._read_json(), self._assigned_phone())
+                    save_contact_name(
+                        self._read_json(),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
                 )
             elif path == "/api/identities":
                 self._send_json(create_identity(self._read_json()), HTTPStatus.CREATED)

@@ -50,6 +50,7 @@ const state = {
   recipientSuggestionSeq: 0,
   draftMatchSeq: 0,
   contactNameParticipantPhone: "",
+  groupNameEditingConversationId: null,
   columnWidths: { left: 340, right: 330 },
   uploadedMedia: [],
   mediaUploadProgress: [],
@@ -161,11 +162,21 @@ const els = {
   contactNameForm: document.querySelector("#contactNameForm"),
   contactNameInput: document.querySelector("#contactNameInput"),
   contactNameCancel: document.querySelector("#contactNameCancel"),
+  groupNameToggle: document.querySelector("#groupNameToggle"),
+  groupNameForm: document.querySelector("#groupNameForm"),
+  groupNameInput: document.querySelector("#groupNameInput"),
+  groupNameClear: document.querySelector("#groupNameClear"),
+  groupNameCancel: document.querySelector("#groupNameCancel"),
   contactNameModal: document.querySelector("#contactNameModal"),
   contactNameModalForm: document.querySelector("#contactNameModalForm"),
   contactNameModalInput: document.querySelector("#contactNameModalInput"),
   contactNameModalClose: document.querySelector("#contactNameModalClose"),
   contactNameModalCancel: document.querySelector("#contactNameModalCancel"),
+  groupMembersModal: document.querySelector("#groupMembersModal"),
+  groupMembersClose: document.querySelector("#groupMembersClose"),
+  groupMembersDone: document.querySelector("#groupMembersDone"),
+  groupMembersSummary: document.querySelector("#groupMembersSummary"),
+  groupMembersList: document.querySelector("#groupMembersList"),
   scheduleModal: document.querySelector("#scheduleModal"),
   scheduleForm: document.querySelector("#scheduleForm"),
   scheduleTime: document.querySelector("#scheduleTime"),
@@ -273,7 +284,7 @@ const PENDING_MESSAGE_STATUSES = new Set(["queued", "sending", "accepted", "sent
 const MIN_AUTO_REFRESH_SECONDS = 5;
 const SEND_HOLD_MS = 550;
 const ATTACH_HOLD_MS = SEND_HOLD_MS;
-const MESSAGE_SPARKLE_MS = 1400;
+const MESSAGE_SPARKLE_MS = 2100;
 const SEND_NOW_SYMBOL = "➤";
 const SCHEDULE_SEND_SYMBOL = "◷";
 const STATS_PERIOD_OPTIONS = [
@@ -399,6 +410,8 @@ const I18N = {
     "users.saved": "Limited user saved.",
     "users.removed": "Limited user removed.",
     "users.remove_confirm": "Remove this limited user?",
+    "users.assignment_badge": "{users}",
+    "users.assignment_title": "Limited-user assignment: {users}",
     "preferences.title": "Preferences",
     "preferences.description": "Adjust your appearance or sign out. Your account is limited to its assigned number.",
     "preferences.appearance": "Appearance",
@@ -515,6 +528,18 @@ const I18N = {
     "contact.enter_name": "Enter a contact name.",
     "contact.saved_synced": "Saved to contacts.",
     "contact.saved_local": "Saved locally. Configure contact sync to publish changes.",
+    "group.name": "Name group",
+    "group.rename": "Rename group",
+    "group.members": "Members:",
+    "group.members_title": "Group members",
+    "group.members_open": "View all group members",
+    "group.members_count": "{count} members",
+    "group.unnamed_member": "Unnamed member",
+    "group.close": "Close",
+    "group.name_placeholder": "Group name",
+    "group.enter_name": "Enter a group name.",
+    "group.saved": "Group name saved.",
+    "group.cleared": "Group name removed.",
     "recipient.add": "Add recipient",
     "recipient.needs_phone": "Recipient needs a phone number.",
     "recipient.add_one": "Add a recipient.",
@@ -786,6 +811,18 @@ const I18N = {
     "contact.enter_name": "Escribe un nombre de contacto.",
     "contact.saved_synced": "Guardado en contactos.",
     "contact.saved_local": "Guardado localmente. Configura sincronización de contactos para publicarlo.",
+    "group.name": "Nombrar grupo",
+    "group.rename": "Renombrar grupo",
+    "group.members": "Miembros:",
+    "group.members_title": "Miembros del grupo",
+    "group.members_open": "Ver todos los miembros del grupo",
+    "group.members_count": "{count} miembros",
+    "group.unnamed_member": "Miembro sin nombre",
+    "group.close": "Cerrar",
+    "group.name_placeholder": "Nombre del grupo",
+    "group.enter_name": "Escribe un nombre para el grupo.",
+    "group.saved": "Nombre del grupo guardado.",
+    "group.cleared": "Nombre del grupo eliminado.",
     "recipient.add": "Agregar destinatario",
     "recipient.needs_phone": "El destinatario necesita un número de teléfono.",
     "recipient.add_one": "Agrega un destinatario.",
@@ -1057,6 +1094,18 @@ const I18N = {
     "contact.enter_name": "Entrez un nom de contact.",
     "contact.saved_synced": "Enregistré dans les contacts.",
     "contact.saved_local": "Enregistré localement. Configurez la synchronisation pour publier les changements.",
+    "group.name": "Nommer le groupe",
+    "group.rename": "Renommer le groupe",
+    "group.members": "Membres :",
+    "group.members_title": "Membres du groupe",
+    "group.members_open": "Voir tous les membres du groupe",
+    "group.members_count": "{count} membres",
+    "group.unnamed_member": "Membre sans nom",
+    "group.close": "Fermer",
+    "group.name_placeholder": "Nom du groupe",
+    "group.enter_name": "Saisissez un nom de groupe.",
+    "group.saved": "Nom du groupe enregistré.",
+    "group.cleared": "Nom du groupe supprimé.",
     "recipient.add": "Ajouter un destinataire",
     "recipient.needs_phone": "Le destinataire doit avoir un numéro de téléphone.",
     "recipient.add_one": "Ajoutez un destinataire.",
@@ -1440,6 +1489,10 @@ window.textingCloseThreadForNativeBack = () => {
   }
   if (isContactNameModalOpen()) {
     closeContactNameModal({ restoreFocus: true });
+    return true;
+  }
+  if (isModalOpen(els.groupMembersModal)) {
+    closeGroupMembersModal({ restoreFocus: true });
     return true;
   }
   if (isModalOpen(els.scheduleModal)) {
@@ -2664,6 +2717,18 @@ function limitedUserPayload(card, { creating = false } = {}) {
 async function refreshLimitedUsersSettings() {
   const payload = await api("/api/users");
   state.limitedUsers = payload.users || [];
+  if (state.bootstrap && !isLimitedUser()) {
+    state.bootstrap.limited_assignments = state.limitedUsers.map((user) => ({
+      user_id: user.id,
+      username: user.username,
+      identity_id: user.identity_id,
+      phone_number: user.phone_number,
+      is_active: Boolean(user.is_active),
+    }));
+    renderBootstrap();
+    renderConversationsPreservingScroll();
+    renderMessages(state.messages, "preserve");
+  }
   renderSettings(state.bootstrap?.settings);
 }
 
@@ -3898,19 +3963,66 @@ function groupTitleHtml(participants) {
     .join("");
 }
 
-function groupParticipantLineHtml(participants) {
-  return participants
+function groupParticipantLineHtml(participants, { showMemberNames = false } = {}) {
+  const memberList = participants
     .map(
       (participant) => `<button class="participant-name-button participant-line-participant-button" type="button" data-participant-phone="${escapeHtml(
         participant.phone_number,
-      )}" title="${escapeHtml(t("contact.rename"))}">${escapeHtml(phoneDisplay(participant.phone_number))}</button>`,
+      )}" title="${escapeHtml(t("contact.rename"))}">${escapeHtml(
+        showMemberNames ? participantTitleDisplay(participant) : phoneDisplay(participant.phone_number),
+      )}</button>`,
     )
     .join("");
+  return showMemberNames
+    ? `<button class="participant-list-label members-list-button" type="button" data-group-members-open aria-haspopup="dialog" title="${escapeHtml(
+        t("group.members_open"),
+      )}">${escapeHtml(t("group.members"))}</button>${memberList}`
+    : memberList;
+}
+
+function closeGroupMembersModal({ restoreFocus = false } = {}) {
+  if (!els.groupMembersModal) return;
+  els.groupMembersModal.classList.add("hidden");
+  syncNativePullRefreshEnabled();
+  if (restoreFocus) {
+    els.participantLine.querySelector("[data-group-members-open]")?.focus();
+  }
+}
+
+function openGroupMembersModal() {
+  const conversation = state.currentConversation;
+  if (conversation?.kind !== "group" || !els.groupMembersModal) return;
+  const participants = (conversation.participants || []).filter(
+    (participant) => participant.role === "participant",
+  );
+  els.groupMembersSummary.textContent = t("group.members_count", { count: participants.length });
+  els.groupMembersList.innerHTML = participants
+    .map((participant) => {
+      const savedName = participantSavedName(participant);
+      const displayName = savedName || t("group.unnamed_member");
+      return `
+        <article class="group-member-row" role="listitem">
+          <span class="avatar group-member-avatar" aria-hidden="true">${escapeHtml(
+            participantInitials(participant),
+          )}</span>
+          <span class="group-member-copy">
+            <strong>${escapeHtml(displayName)}</strong>
+            <span>${escapeHtml(phoneDisplay(participant.phone_number))}</span>
+          </span>
+        </article>`;
+    })
+    .join("");
+  els.groupMembersModal.classList.remove("hidden");
+  syncNativePullRefreshEnabled();
+  requestAnimationFrame(() => els.groupMembersModal.focus());
 }
 
 function updateParticipantRowVisibility() {
   const hasDetail = Boolean((els.participantLine?.textContent || "").trim() || els.participantLine?.children.length);
-  const hasNameAction = Boolean(els.contactNameToggle && !els.contactNameToggle.hidden);
+  const hasNameAction = Boolean(
+    (els.contactNameToggle && !els.contactNameToggle.hidden) ||
+      (els.groupNameToggle && !els.groupNameToggle.hidden),
+  );
   els.participantLine?.parentElement?.classList.toggle("hidden", !hasDetail && !hasNameAction);
 }
 
@@ -3992,6 +4104,7 @@ function openContactNameModal(participant) {
   if (!participant || !els.contactNameModal || !els.contactNameModalInput) return;
   state.contactNameParticipantPhone = participant.phone_number;
   els.contactNameForm.classList.add("hidden");
+  setGroupNameEditor(false);
   els.contactNameModalInput.value = participantSavedName(participant);
   els.contactNameModal.classList.remove("hidden");
   syncNativePullRefreshEnabled();
@@ -4045,6 +4158,22 @@ function openContactRename(participant = currentDirectParticipant()) {
   setContactNameEditor(true, participant);
 }
 
+function setGroupNameEditor(visible) {
+  const conversation = state.currentConversation;
+  if (!visible || conversation?.kind !== "group") {
+    state.groupNameEditingConversationId = null;
+    els.groupNameForm.classList.add("hidden");
+    return;
+  }
+  setContactNameEditor(false);
+  state.groupNameEditingConversationId = Number(conversation.id);
+  els.groupNameInput.value = String(conversation.custom_title || "");
+  els.groupNameClear.hidden = !conversation.custom_title;
+  els.groupNameForm.classList.remove("hidden");
+  els.groupNameInput.focus();
+  els.groupNameInput.select();
+}
+
 function activeIdentity() {
   const phone = els.fromNumber.value;
   return state.bootstrap?.identities?.find((identity) => identity.phone_number === phone);
@@ -4054,15 +4183,74 @@ function activeIdentityPhones() {
   return new Set((state.bootstrap?.identities || []).filter((identity) => identity.is_active).map((identity) => identity.phone_number));
 }
 
+function limitedAssignmentsForPhone(phone) {
+  if (isLimitedUser() || !phone) return [];
+  return (state.bootstrap?.limited_assignments || []).filter(
+    (assignment) => assignment.phone_number === phone,
+  );
+}
+
+function uniqueLimitedAssignments(assignments) {
+  const seen = new Set();
+  return assignments.filter((assignment) => {
+    const key = `${assignment.user_id || assignment.username}|${assignment.phone_number}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function limitedAssignmentsForRecord(record) {
+  if (!record || isLimitedUser()) return [];
+  const direction = record.direction || record.last_direction;
+  const fromNumber = record.from_number || record.last_from_number;
+  const toNumbers = record.to_numbers || record.last_to_numbers || [];
+  const candidatePhones =
+    direction === "outbound"
+      ? [fromNumber]
+      : direction === "inbound"
+        ? toNumbers
+        : [fromNumber, ...toNumbers];
+  return uniqueLimitedAssignments(
+    [...new Set(candidatePhones.filter(Boolean))].flatMap(limitedAssignmentsForPhone),
+  );
+}
+
+function limitedAssignmentsForConversation(conversation) {
+  const messageAssignments = limitedAssignmentsForRecord(conversation);
+  if (messageAssignments.length) return messageAssignments;
+  return uniqueLimitedAssignments(
+    (conversation?.participants || [])
+      .filter((participant) => participant.role === "self")
+      .flatMap((participant) => limitedAssignmentsForPhone(participant.phone_number)),
+  );
+}
+
+function limitedAssignmentLabel(assignments) {
+  const users = [...new Set(assignments.map((assignment) => assignment.username).filter(Boolean))].join(", ");
+  return users ? t("users.assignment_badge", { users }) : "";
+}
+
+function limitedAssignmentBadgeHtml(assignments, extraClass = "") {
+  const label = limitedAssignmentLabel(assignments);
+  if (!label) return "";
+  const details = assignments
+    .map((assignment) => `${assignment.username} · ${phoneDisplay(assignment.phone_number)}`)
+    .join(", ");
+  return `<span class="limited-assignment-badge ${escapeHtml(extraClass)}" title="${escapeHtml(
+    t("users.assignment_title", { users: details }),
+  )}">${escapeHtml(label)}</span>`;
+}
+
 function fromNumberOptionsHtml() {
   return (state.bootstrap?.identities || [])
     .filter((identity) => identity.is_active)
-    .map(
-      (identity) =>
-        `<option value="${escapeHtml(identity.phone_number)}">${escapeHtml(identity.label)} · ${escapeHtml(
-          phoneDisplay(identity.phone_number),
-        )}</option>`,
-    )
+    .map((identity) => {
+      const assignmentLabel = limitedAssignmentLabel(limitedAssignmentsForPhone(identity.phone_number));
+      return `<option value="${escapeHtml(identity.phone_number)}">${escapeHtml(identity.label)} · ${escapeHtml(
+        phoneDisplay(identity.phone_number),
+      )}${assignmentLabel ? ` — ${escapeHtml(assignmentLabel)}` : ""}</option>`;
+    })
     .join("");
 }
 
@@ -4280,6 +4468,10 @@ function renderIdentities() {
   els.identityList.innerHTML = (state.bootstrap.identities || [])
     .map(
       (identity) => {
+        const assignmentBadge = limitedAssignmentBadgeHtml(
+          limitedAssignmentsForPhone(identity.phone_number),
+          "identity-assignment-badge",
+        );
         const autoreplyEnabled = identity.autoreply_enabled ? "checked" : "";
         const autoreplyOpen = identity.autoreply_enabled ? "open" : "";
         const autoreplyStatus = identity.autoreply_enabled ? t("identities.autoreply_on") : t("identities.autoreply_off");
@@ -4303,6 +4495,7 @@ function renderIdentities() {
           </div>
           <div class="identity-meta">
             <div class="identity-phone">${escapeHtml(phoneDisplay(identity.phone_number))}</div>
+            ${assignmentBadge}
             <label class="identity-default-toggle">
               <input class="identity-default-from" name="identity-default-from" type="radio" ${defaultChecked} />
               <span>${escapeHtml(t("identities.default_from"))}</span>
@@ -4444,6 +4637,10 @@ function renderConversations() {
       const showsDraftPreview = Boolean(draftPreview) && !searchMatch && !(isActiveConversation && composerHasFocusWithin());
       const showsQueuedPreview = !showsDraftPreview && !searchMatch && conversation.last_status === "scheduled";
       const failedClass = conversation.last_status_kind === "failed" && !showsDraftPreview ? "failed-message" : "";
+      const assignmentBadge = limitedAssignmentBadgeHtml(
+        limitedAssignmentsForConversation(conversation),
+        "conversation-assignment-badge",
+      );
       const previewPrefix =
         !showsDraftPreview && (showsQueuedPreview || conversation.last_direction === "outbound")
           ? t("conversation.you")
@@ -4474,7 +4671,7 @@ function renderConversations() {
           </span>
           <div class="conversation-copy">
             <div class="conversation-top">
-              <strong>${escapeHtml(title)}</strong>
+              <span class="conversation-title"><strong>${escapeHtml(title)}</strong>${assignmentBadge}</span>
               <time>${escapeHtml(formatTime(conversation.last_occurred_at, true))}</time>
             </div>
             <div class="${previewClass}">${previewHtml}</div>
@@ -5029,8 +5226,10 @@ function renderThreadHeader() {
     els.threadTitle.removeAttribute("title");
     els.participantLine.textContent = "";
     els.contactNameToggle.hidden = true;
+    els.groupNameToggle.hidden = true;
     updateParticipantRowVisibility();
     setContactNameEditor(false);
+    setGroupNameEditor(false);
     els.recipientBar.classList.remove("hidden");
     els.threadPane.classList.add("recipients-visible");
     els.archiveButton.disabled = true;
@@ -5040,10 +5239,19 @@ function renderThreadHeader() {
     return;
   }
   const conversation = state.currentConversation;
+  if (
+    state.groupNameEditingConversationId &&
+    state.groupNameEditingConversationId !== Number(conversation.id)
+  ) {
+    setGroupNameEditor(false);
+  }
   const archived = Boolean(conversation.is_archived);
   const participants = (conversation.participants || []).filter((p) => p.role === "participant");
+  const customTitle = String(conversation.custom_title || "").trim();
   els.threadKind.textContent = conversation.kind === "group" ? t("thread.group") : t("thread.direct");
-  if (conversation.kind === "group" && participants.length) {
+  if (conversation.kind === "group" && customTitle) {
+    els.threadTitle.textContent = customTitle;
+  } else if (conversation.kind === "group" && participants.length) {
     els.threadTitle.innerHTML = groupTitleHtml(participants);
   } else {
     els.threadTitle.textContent = conversation.title || t("thread.conversation");
@@ -5051,7 +5259,9 @@ function renderThreadHeader() {
   els.participantLine.replaceChildren();
   const participant = currentDirectParticipant(conversation);
   if (conversation.kind === "group" && participants.length) {
-    els.participantLine.innerHTML = groupParticipantLineHtml(participants);
+    els.participantLine.innerHTML = groupParticipantLineHtml(participants, {
+      showMemberNames: Boolean(customTitle),
+    });
   } else if (participant && participantSavedName(participant)) {
     els.participantLine.textContent = phoneDisplay(participant.phone_number);
   }
@@ -5068,9 +5278,14 @@ function renderThreadHeader() {
   }
   els.contactNameToggle.hidden = !participant || Boolean(participantSavedName(participant));
   els.contactNameToggle.textContent = t("contact.name");
+  els.groupNameToggle.hidden = conversation.kind !== "group";
+  els.groupNameToggle.textContent = customTitle ? t("group.rename") : t("group.name");
   updateParticipantRowVisibility();
   if (!participant) {
     els.contactNameForm.classList.add("hidden");
+  }
+  if (conversation.kind !== "group") {
+    els.groupNameForm.classList.add("hidden");
   }
   els.recipientBar.classList.add("hidden");
   els.threadPane.classList.remove("recipients-visible");
@@ -5743,6 +5958,10 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
       const messageId = message.id !== undefined && message.id !== null ? String(message.id) : "";
       const isSearchTarget = Boolean(messageId && messageId === state.searchTargetMessageId);
       const isSparkling = Number(message._sparkleUntil || 0) > Date.now();
+      const assignmentBadge = limitedAssignmentBadgeHtml(
+        limitedAssignmentsForRecord(message),
+        "message-assignment-badge",
+      );
       const messageTextHtml = isSearchTarget
         ? renderHighlightedText(message.text || "", state.searchTargetTerms)
         : escapeHtml(message.text);
@@ -5766,6 +5985,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
               ${failureDetail}
               <div class="message-meta">
                 <span>${escapeHtml(message.from_display || phoneDisplay(message.from_number))}</span>
+                ${assignmentBadge}
                 <time>${escapeHtml(formatTime(message.occurred_at))}</time>
                 <span class="message-status ${escapeHtml(statusKind)}" title="${escapeHtml(statusDetail)}">${escapeHtml(statusLabel)}</span>
                 ${scheduledActions}
@@ -6383,6 +6603,13 @@ function handleGlobalKeydown(event) {
     }
     return;
   }
+  if (isModalOpen(els.groupMembersModal)) {
+    if (event.key === "Escape") {
+      closeGroupMembersModal({ restoreFocus: true });
+      event.preventDefault();
+    }
+    return;
+  }
   const scheduleOpen = !els.scheduleModal.classList.contains("hidden");
   if (scheduleOpen) {
     if (event.key === "Escape") {
@@ -6758,6 +6985,7 @@ function isAnyModalOpen() {
     isModalOpen(els.settingsModal) ||
     isModalOpen(els.statsModal) ||
     isModalOpen(els.contactNameModal) ||
+    isModalOpen(els.groupMembersModal) ||
     isModalOpen(els.scheduleModal) ||
     isModalOpen(els.faxModal)
   );
@@ -7997,6 +8225,8 @@ function applyOptimisticOutgoingMessage(draft, snapshot, { scrollMode = "bottom"
       last_text: draft.text,
       last_message_type: message.message_type,
       last_direction: "outbound",
+      last_from_number: draft.from_number,
+      last_to_numbers: [...draft.to_numbers],
       last_occurred_at: timestamp,
       sort_at: timestamp,
       last_status: "sending",
@@ -8561,6 +8791,40 @@ async function saveCurrentContactName() {
   }
 }
 
+async function saveCurrentGroupName(title = els.groupNameInput.value.trim()) {
+  const conversationId = Number(state.currentConversationId);
+  if (!conversationId || state.currentConversation?.kind !== "group") return;
+  const groupName = String(title || "").trim();
+  if (!groupName && !state.currentConversation.custom_title) {
+    toast(t("group.enter_name"));
+    return;
+  }
+  const controls = els.groupNameForm.querySelectorAll("input, button");
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  try {
+    const payload = await api(`/api/conversations/${conversationId}/title`, {
+      method: "POST",
+      body: JSON.stringify({ title: groupName }),
+    });
+    if (payload.conversation) {
+      mergeConversationIntoLoadedState(payload.conversation);
+      cacheCurrentThread();
+    }
+    setGroupNameEditor(false);
+    renderConversationsPreservingScroll();
+    renderThreadHeader();
+    toast(groupName ? t("group.saved") : t("group.cleared"));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    controls.forEach((control) => {
+      control.disabled = false;
+    });
+  }
+}
+
 function bindEvents() {
   document.addEventListener("pointerdown", unlockAudio, { once: true, passive: true });
   document.addEventListener("keydown", unlockAudio, { once: true });
@@ -8743,6 +9007,10 @@ function bindEvents() {
     openContactRename();
   });
   els.participantLine.addEventListener("click", (event) => {
+    if (event.target.closest("[data-group-members-open]")) {
+      openGroupMembersModal();
+      return;
+    }
     const button = event.target.closest("[data-participant-phone]");
     if (!button) return;
     const participant = participantByPhone(button.dataset.participantPhone);
@@ -8754,10 +9022,22 @@ function bindEvents() {
     event.preventDefault();
     saveCurrentContactName();
   });
+  els.groupNameToggle.addEventListener("click", () => setGroupNameEditor(true));
+  els.groupNameCancel.addEventListener("click", () => setGroupNameEditor(false));
+  els.groupNameClear.addEventListener("click", () => saveCurrentGroupName(""));
+  els.groupNameForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveCurrentGroupName();
+  });
   els.contactNameModalClose?.addEventListener("click", () => closeContactNameModal({ restoreFocus: true }));
   els.contactNameModalCancel?.addEventListener("click", () => closeContactNameModal({ restoreFocus: true }));
   els.contactNameModal?.addEventListener("click", (event) => {
     if (event.target === els.contactNameModal) closeContactNameModal({ restoreFocus: true });
+  });
+  els.groupMembersClose?.addEventListener("click", () => closeGroupMembersModal({ restoreFocus: true }));
+  els.groupMembersDone?.addEventListener("click", () => closeGroupMembersModal({ restoreFocus: true }));
+  els.groupMembersModal?.addEventListener("click", (event) => {
+    if (event.target === els.groupMembersModal) closeGroupMembersModal({ restoreFocus: true });
   });
   els.contactNameModalForm?.addEventListener("submit", (event) => {
     event.preventDefault();
