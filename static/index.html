@@ -32,7 +32,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/styles.css?v=group-members-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=group-branch-reference-1" />
   </head>
   <body>
     <div class="app-shell">
@@ -94,6 +94,10 @@
               <div class="participant-line" id="participantLine"></div>
               <button class="name-contact-button" id="contactNameToggle" type="button" hidden data-i18n="contact.name">Name</button>
               <button class="name-contact-button" id="groupNameToggle" type="button" hidden data-i18n="group.name">Name group</button>
+            </div>
+            <div class="branch-reference hidden" id="branchReference">
+              <span data-i18n="group.branched_from">Branched from</span>
+              <a id="branchReferenceLink" href="#"></a>
             </div>
             <form class="contact-name-form hidden" id="contactNameForm">
               <input id="contactNameInput" type="text" placeholder="Contact name" autocomplete="off" data-i18n-placeholder="contact.name_placeholder" />
@@ -272,10 +276,30 @@
         </header>
         <div class="group-members-body">
           <p class="group-members-summary" id="groupMembersSummary"></p>
+          <p class="group-members-note" data-i18n="group.branch_note">Member changes create a separate group conversation. The original conversation and its messages stay unchanged.</p>
           <div class="group-members-list" id="groupMembersList" role="list"></div>
+          <form class="group-member-add-form" id="groupMemberAddForm">
+            <div class="recipient-entry group-member-add-entry">
+              <input
+                id="groupMemberInput"
+                type="text"
+                placeholder="Add a member"
+                data-i18n-placeholder="group.add_member"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-autocomplete="list"
+                aria-controls="groupMemberSuggestions"
+                aria-expanded="false"
+              />
+              <div class="recipient-suggestions group-member-suggestions hidden" id="groupMemberSuggestions" role="listbox"></div>
+            </div>
+            <button class="small-button" id="groupMemberAdd" type="submit" data-i18n="group.add">Add</button>
+          </form>
         </div>
         <footer class="contact-name-footer group-members-footer">
-          <button class="small-button done-button" id="groupMembersDone" type="button" data-i18n="group.close">Close</button>
+          <button class="small-button" id="groupMembersDone" type="button" data-i18n="common.cancel">Cancel</button>
+          <button class="small-button done-button" id="groupMembersCreate" type="button" data-i18n="group.create_branch" disabled>Start new group</button>
         </footer>
       </section>
     </div>
@@ -374,6 +398,6 @@
       <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next image" data-i18n-aria-label="lightbox.next">›</button>
     </div>
     <div class="reaction-menu hidden" id="reactionMenu" role="menu" aria-label="Message reactions" data-i18n-aria-label="message.react"></div>
-    <script src="/static/app.js?v=group-members-1" type="module"></script>
+    <script src="/static/app.js?v=group-branch-reference-1" type="module"></script>
   </body>
 </html>

@@ -53,6 +53,29 @@ def _contrast_ratio(
 
 
 class ThemeContrastTests(unittest.TestCase):
+    def test_branch_reference_is_readable_in_every_theme(self) -> None:
+        styles = STYLES_PATH.read_text()
+        reference_block = re.search(r"\.branch-reference\s*\{([^}]*)\}", styles, re.DOTALL)
+        link_block = re.search(r"\.branch-reference a\s*\{([^}]*)\}", styles, re.DOTALL)
+        self.assertIsNotNone(reference_block)
+        self.assertIsNotNone(link_block)
+        self.assertIn("color: var(--ink)", reference_block.group(1))
+        self.assertIn("color: var(--accent)", link_block.group(1))
+
+        themes = {
+            (family, mode): dict(VARIABLE_RE.findall(block))
+            for family, mode, block in THEME_BLOCK_RE.findall(styles)
+        }
+        self.assertEqual(len(themes), 10)
+        for theme, variables in themes.items():
+            background = _rgb(variables["panel-2"])
+            for foreground_key in ("ink", "accent"):
+                self.assertGreaterEqual(
+                    _contrast_ratio(_rgb(variables[foreground_key]), background),
+                    4.5,
+                    f"Branch reference {foreground_key} is too low contrast for {theme[0]} {theme[1]}",
+                )
+
     def test_assignment_badge_is_high_contrast_in_every_theme_and_selected_state(self) -> None:
         styles = STYLES_PATH.read_text()
         badge_block = re.search(

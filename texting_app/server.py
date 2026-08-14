@@ -1200,6 +1200,37 @@ def _stored_conversation_title(
     return str(row["title"] or "") if row else ""
 
 
+def _conversation_reference(
+    conn,
+    conversation_id: object,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict | None:
+    try:
+        reference_id = int(conversation_id or 0)
+    except (TypeError, ValueError):
+        return None
+    if reference_id <= 0 or not _conversation_accessible(conn, reference_id, assigned_phone):
+        return None
+    row = conn.execute(
+        "SELECT id FROM conversations WHERE id = ?",
+        (reference_id,),
+    ).fetchone()
+    if not row:
+        return None
+    participants = _participants(
+        conn,
+        reference_id,
+        assigned_phone,
+        limited_user_id,
+    )
+    title = _stored_conversation_title(conn, reference_id, limited_user_id)
+    return {
+        "id": reference_id,
+        "title": title or _conversation_title_from_participants(participants),
+    }
+
+
 def _search_terms(value: str) -> list[str]:
     return [part for part in re.split(r"\s+", value.strip().lower()) if part]
 
@@ -2103,6 +2134,12 @@ def _get_messages(
     conversation["custom_title"] = custom_title
     conversation["title"] = custom_title or _conversation_title_from_participants(participants)
     conversation["participants"] = participants
+    conversation["branched_from"] = _conversation_reference(
+        conn,
+        conversation.get("branched_from_conversation_id"),
+        assigned_phone,
+        limited_user_id,
+    )
     return {
         "conversation": conversation,
         "messages": messages,
@@ -3197,7 +3234,7 @@ def _conversation_summary(
         if assigned_phone and limited_user_id
         else None
     )
-    return _decorate_conversation_summary(
+    conversation = _decorate_conversation_summary(
         row,
         _participants(conn, conversation_id, assigned_phone, limited_user_id),
         read_state,
@@ -3205,6 +3242,13 @@ def _conversation_summary(
         if limited_user_id
         else None,
     )
+    conversation["branched_from"] = _conversation_reference(
+        conn,
+        conversation.get("branched_from_conversation_id"),
+        assigned_phone,
+        limited_user_id,
+    )
+    return conversation
 
 
 def set_conversation_dealt(
@@ -3391,17 +3435,47 @@ def create_conversation(
         if from_number and from_number != assigned_phone:
             raise ValueError("You can only send from your assigned number.")
         from_number = assigned_phone
-    conn = connect()
-    init_db(conn)
-    conversation_id = ensure_conversation(
-        conn,
-        recipients,
-        [from_number] if from_number else [],
-        payload.get("title"),
-    )
-    conn.commit()
+    branched_from_raw = payload.get("branched_from_conversation_id")
+    branched_from_id = None
+    if branched_from_raw not in (None, ""):
+        try:
+            branched_from_id = int(branched_from_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Original conversation reference is invalid.") from exc
+        if branched_from_id <= 0:
+            raise ValueError("Original conversation reference is invalid.")
+    with closing(connect()) as conn:
+        init_db(conn)
+        if branched_from_id:
+            source = conn.execute(
+                "SELECT id FROM conversations WHERE id = ?",
+                (branched_from_id,),
+            ).fetchone()
+            if not source or not _conversation_accessible(conn, branched_from_id, assigned_phone):
+                raise LookupError("Original conversation not found.")
+        existing = conn.execute(
+            "SELECT id FROM conversations WHERE conversation_key = ?",
+            (conversation_key(recipients),),
+        ).fetchone()
+        conversation_id = ensure_conversation(
+            conn,
+            recipients,
+            [from_number] if from_number else [],
+            payload.get("title"),
+        )
+        if existing is None and branched_from_id:
+            conn.execute(
+                """
+                UPDATE conversations
+                SET branched_from_conversation_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (branched_from_id, now_est(), conversation_id),
+            )
+        conn.commit()
     return {
         "conversation_id": conversation_id,
+        "created": existing is None,
         **get_messages(
             conversation_id,
             assigned_phone=assigned_phone,

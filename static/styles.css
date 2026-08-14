@@ -1346,6 +1346,44 @@ select:focus {
   display: none;
 }
 
+.branch-reference {
+  align-items: baseline;
+  color: var(--ink);
+  display: flex;
+  font-size: 12px;
+  font-weight: 650;
+  gap: 5px;
+  line-height: 1.35;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.branch-reference.hidden {
+  display: none;
+}
+
+.branch-reference a {
+  color: var(--accent);
+  font-weight: 800;
+  min-width: 0;
+  overflow: hidden;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-overflow: ellipsis;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.branch-reference a:hover {
+  text-decoration-thickness: 2px;
+}
+
+.branch-reference a:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .participant-line {
   color: var(--muted);
   flex: 0 1 auto;
@@ -3193,7 +3231,14 @@ select:focus {
   color: var(--muted);
   font-size: 12px;
   font-weight: 750;
-  margin: 0 0 10px;
+  margin: 0;
+}
+
+.group-members-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 5px 0 12px;
 }
 
 .group-members-list {
@@ -3208,8 +3253,23 @@ select:focus {
   border-radius: 10px;
   display: grid;
   gap: 11px;
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr) auto;
   padding: 10px;
+}
+
+.group-member-remove {
+  align-self: center;
+  border-radius: 999px;
+  font-size: 18px;
+  height: 32px;
+  min-height: 32px;
+  min-width: 32px;
+  padding: 0;
+}
+
+.group-member-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .group-member-avatar {
@@ -3241,8 +3301,29 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.group-member-add-form {
+  align-items: start;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-top: 12px;
+}
+
+.group-member-add-entry {
+  min-width: 0;
+}
+
+.group-member-add-form input,
+.group-member-add-form .small-button {
+  min-height: 38px;
+}
+
+.group-member-suggestions {
+  max-height: min(240px, 34dvh);
+}
+
 .group-members-footer {
-  grid-template-columns: 1fr;
+  grid-template-columns: 1fr 1fr;
 }
 
 .schedule-card,

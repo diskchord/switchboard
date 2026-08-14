@@ -427,7 +427,7 @@ Delivery status is updated from provider callbacks where available. Telnyx outbo
 
 ### Interface and Hotkeys
 
-The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings. Choose the Switchboard, Console, Midnight Commander, Papyrus, or Unicorn theme family in Settings; the header light/dark button switches only the selected theme family between light and dark mode.
+The interface can run in English, Spanish, or French. Set `TEXTING_UI_LANGUAGE=auto` to follow the browser, or choose `en`, `es`, or `fr` in Settings. Choose the Switchboard, Console, Midnight Commander, Papyrus, or Unicorn theme family in Settings; the header light/dark button switches only the selected theme family between light and dark mode. In a Group MMS thread, open **Members** to add or remove people; applying the change opens a separate conversation for the new membership, leaves the original thread untouched, and adds a link from the new thread back to its source.
 
 The browser checks `/api/refresh` on the configured auto-refresh interval. That endpoint returns lightweight change tokens first; the app only reloads the conversation list or open thread when those tokens change. Use `TEXTING_AUTO_REFRESH_SECONDS=0`, or set Auto-refresh seconds to `0` in Settings, to disable browser polling.
 

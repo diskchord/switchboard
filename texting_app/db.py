@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   conversation_key TEXT NOT NULL UNIQUE,
   kind TEXT NOT NULL CHECK(kind IN ('direct', 'group')),
   title TEXT,
+  branched_from_conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
   is_archived INTEGER NOT NULL DEFAULT 0,
   archived_at TEXT,
   dealt_with_at TEXT,
@@ -622,6 +623,15 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE conversations ADD COLUMN dealt_with_at TEXT")
     if "manual_unread_at" not in columns:
         conn.execute("ALTER TABLE conversations ADD COLUMN manual_unread_at TEXT")
+    if "branched_from_conversation_id" not in columns:
+        conn.execute(
+            "ALTER TABLE conversations ADD COLUMN branched_from_conversation_id "
+            "INTEGER REFERENCES conversations(id) ON DELETE SET NULL"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_branched_from "
+        "ON conversations(branched_from_conversation_id)"
+    )
     apply_dealt_with_cutoff(conn)
     backfill_limited_user_scopes(conn)
 
