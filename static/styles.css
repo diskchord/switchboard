@@ -543,6 +543,17 @@ button {
   position: relative;
 }
 
+@media (min-width: 761px) {
+  body.keyboard-open .app-shell {
+    height: calc(var(--visual-viewport-height, 100dvh) - var(--layout-keyboard-inset, 0px));
+  }
+
+  body.keyboard-open .thread-pane {
+    height: 100%;
+    max-height: 100%;
+  }
+}
+
 body.details-collapsed .app-shell {
   grid-template-columns: var(--conversation-column) 6px minmax(320px, 1fr);
 }
