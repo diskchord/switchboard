@@ -58,6 +58,7 @@ const state = {
   groupMemberSuggestions: [],
   groupMemberSuggestionIndex: -1,
   groupMemberSuggestionSeq: 0,
+  groupMemberContactEditingPhone: "",
   columnWidths: { left: 340, right: 330 },
   uploadedMedia: [],
   mediaUploadProgress: [],
@@ -551,7 +552,11 @@ const I18N = {
     "group.members_title": "Group members",
     "group.members_open": "View all group members",
     "group.members_count": "{count} members",
+    "group.more_members": "{count} more members",
     "group.unnamed_member": "Unnamed member",
+    "group.rename_member": "Name or rename {name}",
+    "group.member_color": "Color for {name}",
+    "group.color_saved": "Member color saved.",
     "group.close": "Close",
     "group.branch_note": "Member changes create a separate group conversation. The original conversation and its messages stay unchanged.",
     "group.add_member": "Add a member",
@@ -850,7 +855,11 @@ const I18N = {
     "group.members_title": "Miembros del grupo",
     "group.members_open": "Ver todos los miembros del grupo",
     "group.members_count": "{count} miembros",
+    "group.more_members": "{count} miembros más",
     "group.unnamed_member": "Miembro sin nombre",
+    "group.rename_member": "Nombrar o renombrar a {name}",
+    "group.member_color": "Color de {name}",
+    "group.color_saved": "Color del miembro guardado.",
     "group.close": "Cerrar",
     "group.branch_note": "Los cambios de miembros crean una conversación grupal separada. La conversación original y sus mensajes no cambian.",
     "group.add_member": "Agregar un miembro",
@@ -1149,7 +1158,11 @@ const I18N = {
     "group.members_title": "Membres du groupe",
     "group.members_open": "Voir tous les membres du groupe",
     "group.members_count": "{count} membres",
+    "group.more_members": "{count} membres de plus",
     "group.unnamed_member": "Membre sans nom",
+    "group.rename_member": "Nommer ou renommer {name}",
+    "group.member_color": "Couleur de {name}",
+    "group.color_saved": "Couleur du membre enregistrée.",
     "group.close": "Fermer",
     "group.branch_note": "Les changements de membres créent une conversation de groupe distincte. La conversation et les messages d’origine restent inchangés.",
     "group.add_member": "Ajouter un membre",
@@ -4017,18 +4030,31 @@ function participantTitleDisplay(participant) {
   return participantSavedName(participant) || phoneDisplay(participant?.phone_number);
 }
 
+const GROUP_HEADER_MEMBER_LIMIT = 3;
+
+function groupParticipantOverflowHtml(hiddenCount) {
+  if (hiddenCount <= 0) return "";
+  const label = t("group.more_members", { count: hiddenCount });
+  return `<button class="participant-overflow-button" type="button" data-group-members-open aria-haspopup="dialog" title="${escapeHtml(
+    label,
+  )}" aria-label="${escapeHtml(label)}">+${hiddenCount}</button>`;
+}
+
 function groupTitleHtml(participants) {
-  return participants
+  const visibleParticipants = participants.slice(0, GROUP_HEADER_MEMBER_LIMIT);
+  const memberList = visibleParticipants
     .map(
       (participant) => `<button class="participant-name-button thread-title-participant-button" type="button" data-participant-phone="${escapeHtml(
         participant.phone_number,
       )}" title="${escapeHtml(t("contact.rename"))}">${escapeHtml(participantTitleDisplay(participant))}</button>`,
     )
     .join("");
+  return memberList + groupParticipantOverflowHtml(participants.length - visibleParticipants.length);
 }
 
 function groupParticipantLineHtml(participants, { showMemberNames = false } = {}) {
-  const memberList = participants
+  const visibleParticipants = participants.slice(0, GROUP_HEADER_MEMBER_LIMIT);
+  const memberList = visibleParticipants
     .map(
       (participant) => `<button class="participant-name-button participant-line-participant-button" type="button" data-participant-phone="${escapeHtml(
         participant.phone_number,
@@ -4039,7 +4065,14 @@ function groupParticipantLineHtml(participants, { showMemberNames = false } = {}
     .join("");
   return `<button class="participant-list-label members-list-button" type="button" data-group-members-open aria-haspopup="dialog" title="${escapeHtml(
     t("group.members_open"),
-  )}">${escapeHtml(t("group.members"))}</button>${memberList}`;
+  )}">${escapeHtml(t("group.members"))}</button>${memberList}${groupParticipantOverflowHtml(
+    participants.length - visibleParticipants.length,
+  )}`;
+}
+
+function participantColor(participant) {
+  const color = String(participant?.color || "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : "#46515f";
 }
 
 function groupMemberPhones(members = state.groupMemberDraft) {
@@ -4101,21 +4134,42 @@ function renderGroupMemberSuggestions() {
 function renderGroupMembersModal() {
   const participants = state.groupMemberDraft;
   const canRemove = participants.length > 1;
+  const persistedPhones = new Set(state.groupMemberOriginalPhones);
   els.groupMembersSummary.textContent = t("group.members_count", { count: participants.length });
   els.groupMembersList.innerHTML = participants
     .map((participant) => {
       const savedName = participantSavedName(participant);
       const displayName = savedName || t("group.unnamed_member");
       const accessibleName = savedName || phoneDisplay(participant.phone_number);
+      const color = participantColor(participant);
+      const canSetColor = persistedPhones.has(participant.phone_number);
       return `
         <article class="group-member-row" role="listitem">
-          <span class="avatar group-member-avatar" aria-hidden="true">${escapeHtml(
-            participantInitials(participant),
-          )}</span>
-          <span class="group-member-copy">
-            <strong>${escapeHtml(displayName)}</strong>
-            <span>${escapeHtml(phoneDisplay(participant.phone_number))}</span>
-          </span>
+          <button
+            class="group-member-contact"
+            type="button"
+            data-rename-group-member="${escapeHtml(participant.phone_number)}"
+            title="${escapeHtml(t("group.rename_member", { name: accessibleName }))}"
+            aria-label="${escapeHtml(t("group.rename_member", { name: accessibleName }))}"
+            style="--participant-color:${escapeHtml(color)}"
+          >
+            <span class="avatar group-member-avatar" aria-hidden="true">${escapeHtml(
+              participantInitials(participant),
+            )}</span>
+            <span class="group-member-copy">
+              <strong>${escapeHtml(displayName)}</strong>
+              <span>${escapeHtml(phoneDisplay(participant.phone_number))}</span>
+            </span>
+          </button>
+          <input
+            class="group-member-color"
+            type="color"
+            value="${escapeHtml(color)}"
+            data-group-member-color="${escapeHtml(participant.phone_number)}"
+            title="${escapeHtml(t("group.member_color", { name: accessibleName }))}"
+            aria-label="${escapeHtml(t("group.member_color", { name: accessibleName }))}"
+            ${canSetColor ? "" : "disabled"}
+          />
           <button
             class="small-button danger-button group-member-remove"
             type="button"
@@ -4177,6 +4231,63 @@ function removeGroupMember(phone) {
   );
   clearGroupMemberSuggestions();
   renderGroupMembersModal();
+}
+
+function openGroupMemberContactRename(phone) {
+  const participant = state.groupMemberDraft.find((item) => item.phone_number === phone);
+  if (!participant || !els.groupMembersModal) return;
+  state.groupMemberContactEditingPhone = participant.phone_number;
+  els.groupMembersModal.classList.add("hidden");
+  openContactRename(participant);
+}
+
+async function saveGroupMemberColor(phone, rawColor) {
+  const source = groupMemberSourceConversation();
+  const participant = state.groupMemberDraft.find((item) => item.phone_number === phone);
+  const color = String(rawColor || "").trim().toLowerCase();
+  if (!source || !participant || !/^#[0-9a-f]{6}$/.test(color)) {
+    renderGroupMembersModal();
+    return;
+  }
+  const sourceConversationId = Number(source.id);
+  const input = els.groupMembersList.querySelector(`[data-group-member-color="${CSS.escape(phone)}"]`);
+  if (input) input.disabled = true;
+  try {
+    const payload = await api(`/api/conversations/${source.id}/participants/color`, {
+      method: "POST",
+      body: JSON.stringify({ phone_number: phone, color }),
+    });
+    if (payload.conversation) mergeConversationIntoLoadedState(payload.conversation);
+    const refreshedParticipant = (payload.conversation?.participants || []).find(
+      (item) => item.role === "participant" && item.phone_number === phone,
+    );
+    if (
+      Number(state.groupMemberSourceConversationId) === sourceConversationId &&
+      groupMemberSourceConversation()
+    ) {
+      const currentDraftParticipant = state.groupMemberDraft.find((item) => item.phone_number === phone);
+      if (currentDraftParticipant) Object.assign(currentDraftParticipant, refreshedParticipant || {}, { color });
+      renderGroupMembersModal();
+    }
+    if (Number(state.currentConversationId) === sourceConversationId) {
+      state.messages = state.messages.map((message) =>
+        message.direction === "inbound" && message.from_number === phone
+          ? { ...message, sender_color: color }
+          : message,
+      );
+      renderThreadHeader();
+      renderMessages(state.messages, "preserve");
+      toast(t("group.color_saved"));
+    }
+  } catch (error) {
+    if (
+      Number(state.groupMemberSourceConversationId) === sourceConversationId &&
+      groupMemberSourceConversation()
+    ) {
+      renderGroupMembersModal();
+    }
+    toast(error.message);
+  }
 }
 
 function moveGroupMemberSuggestion(delta) {
@@ -4247,6 +4358,7 @@ function closeGroupMembersModal({ restoreFocus = false } = {}) {
   state.groupMemberSourceConversationId = null;
   state.groupMemberOriginalPhones = [];
   state.groupMemberDraft = [];
+  state.groupMemberContactEditingPhone = "";
   if (els.groupMemberInput) els.groupMemberInput.value = "";
   clearGroupMemberSuggestions();
   syncNativePullRefreshEnabled();
@@ -4262,6 +4374,7 @@ function openGroupMembersModal() {
     (participant) => participant.role === "participant",
   );
   state.groupMemberSourceConversationId = Number(conversation.id);
+  state.groupMemberContactEditingPhone = "";
   state.groupMemberOriginalPhones = participants.map((participant) => participant.phone_number);
   state.groupMemberDraft = participants.map((participant) => ({ ...participant }));
   clearGroupMemberSuggestions();
@@ -4411,7 +4524,11 @@ function participantByPhone(phone, conversation = state.currentConversation) {
 }
 
 function currentContactNameParticipant(conversation = state.currentConversation) {
-  return participantByPhone(state.contactNameParticipantPhone, conversation) || currentDirectParticipant(conversation);
+  return (
+    participantByPhone(state.contactNameParticipantPhone, conversation) ||
+    state.groupMemberDraft.find((participant) => participant.phone_number === state.contactNameParticipantPhone) ||
+    currentDirectParticipant(conversation)
+  );
 }
 
 function participantSavedName(participant) {
@@ -4428,8 +4545,21 @@ function isContactNameModalOpen() {
 
 function closeContactNameModal({ restoreFocus = false } = {}) {
   if (!els.contactNameModal) return;
+  const groupMemberPhone = state.groupMemberContactEditingPhone;
   els.contactNameModal.classList.add("hidden");
   state.contactNameParticipantPhone = "";
+  state.groupMemberContactEditingPhone = "";
+  if (groupMemberPhone && groupMemberSourceConversation() && els.groupMembersModal) {
+    renderGroupMembersModal();
+    els.groupMembersModal.classList.remove("hidden");
+    syncNativePullRefreshEnabled();
+    requestAnimationFrame(() => {
+      els.groupMembersList
+        ?.querySelector(`[data-rename-group-member="${CSS.escape(groupMemberPhone)}"]`)
+        ?.focus();
+    });
+    return;
+  }
   syncNativePullRefreshEnabled();
   if (restoreFocus) {
     els.threadTitle?.focus();
@@ -6316,9 +6446,18 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
         ? `<span class="message-inline-actions">${sendScheduledNowAction}${cancelScheduledAction}</span>`
         : "";
       const hasAudioAttachment = messageAttachments.some((attachment) => isAudioAttachment(attachment, mediaUrl(attachment)));
-      const bubbleStyle =
-        message.direction === "outbound" && message.identity_color
-          ? ` style="--message-out:${escapeHtml(message.identity_color)}"`
+      const currentSender = participantByPhone(message.from_number);
+      const senderColorValue = String(currentSender?.color || message.sender_color || "").trim();
+      const senderColor =
+        message.direction === "inbound" &&
+        state.currentConversation?.kind === "group" &&
+        /^#[0-9a-f]{6}$/i.test(senderColorValue)
+          ? senderColorValue.toLowerCase()
+          : "";
+      const bubbleStyle = message.direction === "outbound" && message.identity_color
+        ? ` style="--message-out:${escapeHtml(message.identity_color)}"`
+        : senderColor
+          ? ` style="--message-participant:${escapeHtml(senderColor)}"`
           : "";
       const canReact = messageCanBeReactedTo(message);
       const messageId = message.id !== undefined && message.id !== null ? String(message.id) : "";
@@ -6340,7 +6479,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
           : "";
       return `
         ${divider}
-        <article class="message-row ${message.direction} ${statusKind} ${messageAttachments.length ? "attachment-message" : ""} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""} ${isSparkling ? "message-sparkling" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
+        <article class="message-row ${message.direction} ${statusKind} ${messageAttachments.length ? "attachment-message" : ""} ${hasAudioAttachment ? "audio-message" : ""} ${canReact ? "reactable" : ""} ${isSearchTarget ? "search-target" : ""} ${isSparkling ? "message-sparkling" : ""} ${senderColor ? "participant-colored" : ""}" data-message-id="${escapeHtml(messageId)}"${bubbleStyle}>
           <div class="message-stack">
             <div class="message-bubble">
               ${messageTypeLabel}
@@ -7083,6 +7222,15 @@ function conversationPayloadMatchesState(payload) {
   return JSON.stringify(payload?.conversation || null) === JSON.stringify(state.currentConversation || null);
 }
 
+function participantColorSignature(conversation) {
+  return JSON.stringify(
+    (conversation?.participants || [])
+      .filter((participant) => participant.role === "participant")
+      .map((participant) => [participant.phone_number, participant.color || ""])
+      .sort(([firstPhone], [secondPhone]) => String(firstPhone).localeCompare(String(secondPhone))),
+  );
+}
+
 function messagePayloadMatchesState(payload) {
   return (
     JSON.stringify(payload?.messages || []) === JSON.stringify(state.messages || []) &&
@@ -7306,6 +7454,8 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     const payload = mergeRefreshedThreadPayload(state.messages, freshPayload);
     const conversationChanged = !conversationPayloadMatchesState(payload);
     const messagesChanged = !messagePayloadMatchesState(payload);
+    const participantColorsChanged =
+      participantColorSignature(payload.conversation) !== participantColorSignature(state.currentConversation);
     if (!conversationChanged && !messagesChanged) {
       return;
     }
@@ -7328,7 +7478,7 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     if (conversationChanged || messagesChanged) {
       renderThreadHeader();
     }
-    if (messagesChanged) {
+    if (messagesChanged || participantColorsChanged) {
       if (passive && mediaWasPlaying) {
         queuePendingPassiveMessageRender(messageScrollMode);
       } else {
@@ -9178,6 +9328,15 @@ async function saveCurrentContactName() {
     if (payload.conversation) {
       mergeConversationIntoLoadedState(payload.conversation);
     }
+    const draftParticipant = state.groupMemberDraft.find(
+      (item) => item.phone_number === participant.phone_number,
+    );
+    if (draftParticipant) {
+      const refreshedParticipant = (payload.conversation?.participants || []).find(
+        (item) => item.role === "participant" && item.phone_number === participant.phone_number,
+      );
+      Object.assign(draftParticipant, refreshedParticipant || {}, { display: displayName });
+    }
     state.messages = state.messages.map((message) =>
       message.from_number === participant.phone_number ? { ...message, from_display: displayName } : message,
     );
@@ -9400,6 +9559,10 @@ function bindEvents() {
   els.newConversationButton.addEventListener("click", startNewConversation);
   els.mobilePanelButton?.addEventListener("click", toggleDetailsPanel);
   els.threadTitle.addEventListener("click", (event) => {
+    if (event.target.closest("[data-group-members-open]")) {
+      openGroupMembersModal();
+      return;
+    }
     const button = event.target.closest("[data-participant-phone]");
     if (button) {
       const participant = participantByPhone(button.dataset.participantPhone);
@@ -9456,8 +9619,17 @@ function bindEvents() {
     if (event.target === els.groupMembersModal) closeGroupMembersModal({ restoreFocus: true });
   });
   els.groupMembersList?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-remove-group-member]");
-    if (button) removeGroupMember(button.dataset.removeGroupMember);
+    const removeButton = event.target.closest("[data-remove-group-member]");
+    if (removeButton) {
+      removeGroupMember(removeButton.dataset.removeGroupMember);
+      return;
+    }
+    const renameButton = event.target.closest("[data-rename-group-member]");
+    if (renameButton) openGroupMemberContactRename(renameButton.dataset.renameGroupMember);
+  });
+  els.groupMembersList?.addEventListener("change", (event) => {
+    const colorInput = event.target.closest("[data-group-member-color]");
+    if (colorInput) saveGroupMemberColor(colorInput.dataset.groupMemberColor, colorInput.value);
   });
   els.groupMemberAddForm?.addEventListener("submit", (event) => {
     event.preventDefault();

@@ -1289,16 +1289,22 @@ select:focus {
   padding: 14px 22px;
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
+  max-width: 100%;
   min-height: 88px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .thread-title-wrap {
   flex: 1 1 auto;
+  max-width: 100%;
   min-width: 0;
+  overflow: hidden;
 }
 
 .thread-title-wrap h2 {
   line-height: 1.24;
+  max-width: 100%;
   overflow: hidden;
   padding: 2px 0;
   text-overflow: ellipsis;
@@ -1349,8 +1355,10 @@ select:focus {
   gap: 10px;
   line-height: 1.3;
   margin-top: 6px;
+  max-width: 100%;
   min-height: 24px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .participant-row.hidden {
@@ -1397,8 +1405,9 @@ select:focus {
 
 .participant-line {
   color: var(--muted);
-  flex: 0 1 auto;
+  flex: 1 1 0;
   font-size: 13px;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1413,7 +1422,11 @@ select:focus {
   cursor: pointer;
   font: inherit;
   min-height: 24px;
+  max-width: min(18rem, 40vw);
+  overflow: hidden;
   padding: 1px 3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .participant-name-button:not(:last-child)::after {
@@ -1423,6 +1436,24 @@ select:focus {
 .participant-name-button:hover,
 .participant-name-button:focus-visible {
   color: var(--accent);
+  outline: 0;
+  text-decoration: underline;
+}
+
+.participant-overflow-button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--accent-strong);
+  font: inherit;
+  font-weight: 800;
+  min-height: 0;
+  padding: 0 3px;
+  vertical-align: baseline;
+}
+
+.participant-overflow-button:hover,
+.participant-overflow-button:focus-visible {
   outline: 0;
   text-decoration: underline;
 }
@@ -1823,6 +1854,27 @@ select:focus {
   background: var(--bubble-in);
   padding: 10px 12px;
   box-shadow: var(--message-shadow);
+}
+
+.message-row.inbound.participant-colored .message-bubble {
+  background: color-mix(in srgb, var(--message-participant) 18%, var(--bubble-in));
+  border-inline-start: 4px solid var(--message-participant);
+}
+
+.message-row.inbound.participant-colored .message-meta > span:first-child {
+  align-items: center;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 4px;
+}
+
+.message-row.inbound.participant-colored .message-meta > span:first-child::before {
+  background: var(--message-participant);
+  border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 999px;
+  content: "";
+  height: 7px;
+  width: 7px;
 }
 
 .outbound .message-bubble {
@@ -3264,8 +3316,61 @@ select:focus {
   border-radius: 10px;
   display: grid;
   gap: 11px;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   padding: 10px;
+}
+
+.group-member-contact {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: inherit;
+  display: grid;
+  gap: 11px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  min-width: 0;
+  padding: 2px;
+  text-align: left;
+}
+
+.group-member-contact:hover .group-member-copy strong {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+.group-member-contact:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.group-member-color {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  height: 34px;
+  padding: 3px;
+  width: 34px;
+}
+
+.group-member-color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.group-member-color::-webkit-color-swatch {
+  border: 0;
+  border-radius: 999px;
+}
+
+.group-member-color::-moz-color-swatch {
+  border: 0;
+  border-radius: 999px;
+}
+
+.group-member-color:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .group-member-remove {
@@ -3285,7 +3390,8 @@ select:focus {
 
 .group-member-avatar {
   border-radius: 50%;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+  background: color-mix(in srgb, var(--participant-color) 20%, var(--avatar-bg));
+  box-shadow: inset 0 0 0 3px var(--participant-color);
 }
 
 .group-member-copy {
@@ -4143,14 +4249,14 @@ select:focus {
 @media (max-width: 760px) {
   .app-shell {
     display: grid;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
     height: calc(var(--visual-viewport-height, 100dvh) - var(--layout-keyboard-inset, 0px));
     overflow: hidden;
   }
 
   body.details-collapsed .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
 
@@ -4291,7 +4397,8 @@ select:focus {
 
   .participant-line {
     font-size: 12px;
-    overflow-x: auto;
+    max-width: 100%;
+    overflow-x: hidden;
     text-overflow: clip;
   }
 

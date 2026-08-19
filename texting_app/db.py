@@ -111,7 +111,20 @@ CREATE TABLE IF NOT EXISTS conversation_participants (
   phone_number TEXT NOT NULL,
   role TEXT NOT NULL CHECK(role IN ('self', 'participant')),
   contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+  color TEXT,
   PRIMARY KEY(conversation_id, phone_number)
+);
+
+CREATE TABLE IF NOT EXISTS limited_user_participant_colors (
+  limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  phone_number TEXT NOT NULL,
+  color TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(limited_user_id, conversation_id, phone_number),
+  FOREIGN KEY(conversation_id, phone_number)
+    REFERENCES conversation_participants(conversation_id, phone_number) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS limited_user_conversation_states (
@@ -401,6 +414,27 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    participant_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(conversation_participants)").fetchall()
+    }
+    if "color" not in participant_columns:
+        conn.execute("ALTER TABLE conversation_participants ADD COLUMN color TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS limited_user_participant_colors (
+          limited_user_id INTEGER NOT NULL REFERENCES limited_users(id) ON DELETE CASCADE,
+          conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          phone_number TEXT NOT NULL,
+          color TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(limited_user_id, conversation_id, phone_number),
+          FOREIGN KEY(conversation_id, phone_number)
+            REFERENCES conversation_participants(conversation_id, phone_number) ON DELETE CASCADE
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_limited_user_contacts_phone ON limited_user_contacts(phone_number)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_limited_user_conversation_states_user "
@@ -409,6 +443,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_limited_user_conversation_titles_conversation "
         "ON limited_user_conversation_titles(conversation_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_limited_user_participant_colors_conversation "
+        "ON limited_user_participant_colors(conversation_id, phone_number)"
     )
     conn.execute(
         """

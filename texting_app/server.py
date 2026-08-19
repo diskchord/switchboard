@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import colorsys
 import json
 import mimetypes
 import os
@@ -75,6 +76,8 @@ from .voice import (
 STATIC_DIR = config.ROOT / "static"
 MESSAGE_PAGE_SIZE = 80
 MAX_CONVERSATION_TITLE_LENGTH = 120
+PARTICIPANT_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+PARTICIPANT_COLOR_PALETTE = tuple(config.IDENTITY_COLORS)
 UPLOAD_CONTENT_PREFIXES = ("image/", "video/", "audio/")
 UPLOAD_CONTENT_TYPES = {"application/pdf"}
 DEFAULT_REQUEST_BODY_LIMIT = 16 * 1024 * 1024
@@ -1077,6 +1080,83 @@ def _contact_name(conn, phone: str, limited_user_id: int | None = None) -> str:
     return _contact_names(conn, [phone], limited_user_id).get(phone) or display_phone(phone)
 
 
+def _limited_participant_colors(
+    conn,
+    conversation_ids,
+    limited_user_id: int | None,
+) -> dict[tuple[int, str], str]:
+    ids = list(dict.fromkeys(int(conversation_id) for conversation_id in conversation_ids))
+    if not limited_user_id or not ids:
+        return {}
+    colors: dict[tuple[int, str], str] = {}
+    for offset in range(0, len(ids), 800):
+        chunk = ids[offset : offset + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT conversation_id, phone_number, color
+            FROM limited_user_participant_colors
+            WHERE limited_user_id = ?
+              AND conversation_id IN ({placeholders})
+            """,
+            (limited_user_id, *chunk),
+        ).fetchall()
+        colors.update(
+            {
+                (int(row["conversation_id"]), str(row["phone_number"])): str(row["color"])
+                for row in rows
+            }
+        )
+    return colors
+
+
+def _assign_default_participant_colors(
+    conversation_id: int,
+    participants: list[dict],
+) -> None:
+    remote_participants = sorted(
+        (participant for participant in participants if participant["role"] == "participant"),
+        key=lambda participant: str(participant["phone_number"]),
+    )
+    if not any(not participant.get("color") for participant in remote_participants):
+        return
+    palette = PARTICIPANT_COLOR_PALETTE
+    if not palette:
+        return
+    offset = int(conversation_id) % len(palette)
+    rotated = palette[offset:] + palette[:offset]
+    used = {
+        str(participant.get("color") or "").lower()
+        for participant in remote_participants
+        if participant.get("color")
+    }
+    for index, participant in enumerate(remote_participants):
+        if participant.get("color"):
+            continue
+        if index < len(rotated):
+            color = rotated[index]
+        else:
+            color = _generated_participant_color(conversation_id, index - len(rotated))
+        collision_index = 0
+        while color.lower() in used:
+            collision_index += 1
+            color = _generated_participant_color(
+                conversation_id,
+                index + collision_index * max(1, len(remote_participants)),
+            )
+        participant["color"] = color
+        used.add(color.lower())
+
+
+def _generated_participant_color(conversation_id: int, index: int) -> str:
+    seed = abs(int(conversation_id)) * 97 + max(0, int(index))
+    hue = ((seed * 137.50776405003785) % 360) / 360
+    saturation = 0.62 + (seed % 3) * 0.06
+    lightness = 0.40 + ((seed // 3) % 3) * 0.05
+    red, green, blue = colorsys.hls_to_rgb(hue, lightness, saturation)
+    return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+
+
 def _participants_for_conversations(
     conn,
     conversation_ids,
@@ -1098,7 +1178,8 @@ def _participants_for_conversations(
                   cp.phone_number,
                   cp.role,
                   i.label AS identity_label,
-                  i.color
+                  i.color AS identity_color,
+                  cp.color AS participant_color
                 FROM conversation_participants cp
                 LEFT JOIN identities i ON i.phone_number = cp.phone_number
                 WHERE cp.conversation_id IN ({placeholders})
@@ -1111,19 +1192,25 @@ def _participants_for_conversations(
         (row["phone_number"] for row in rows),
         limited_user_id,
     )
+    limited_colors = _limited_participant_colors(conn, ids, limited_user_id)
     for row in rows:
         phone = row["phone_number"]
         if assigned_phone and row["role"] == "self" and phone != assigned_phone:
             continue
+        conversation_id = int(row["conversation_id"])
+        color = row["identity_color"] if row["role"] == "self" else row["participant_color"]
+        if row["role"] == "participant":
+            color = limited_colors.get((conversation_id, phone), color)
         participants[row["conversation_id"]].append(
             {
                 "phone_number": phone,
                 "display": row["identity_label"] or contact_names.get(phone) or display_phone(phone),
                 "role": row["role"],
-                "color": row["color"],
+                "color": color,
             }
         )
-    for conversation_participants in participants.values():
+    for conversation_id, conversation_participants in participants.items():
+        _assign_default_participant_colors(conversation_id, conversation_participants)
         conversation_participants.sort(
             key=lambda participant: (
                 0 if participant["role"] == "self" else 1,
@@ -1715,13 +1802,20 @@ def _mobile_notifications(
             text = f"{attachment_count} attachment{'s' if attachment_count != 1 else ''}"
         elif not text:
             text = "New text message"
-        participant_title = _conversation_title_from_participants(
-            _participants(
-                conn,
-                row["conversation_id"],
-                assigned_phone,
-                limited_user_id,
-            )
+        conversation_participants = _participants(
+            conn,
+            row["conversation_id"],
+            assigned_phone,
+            limited_user_id,
+        )
+        participant_title = _conversation_title_from_participants(conversation_participants)
+        sender_color = next(
+            (
+                participant.get("color")
+                for participant in conversation_participants
+                if participant["phone_number"] == row["from_number"]
+            ),
+            None,
         )
         title = _stored_conversation_title(
             conn,
@@ -1736,6 +1830,7 @@ def _mobile_notifications(
                 "title": title,
                 "from_number": row["from_number"],
                 "from_display": _contact_name(conn, row["from_number"], limited_user_id),
+                "sender_color": sender_color,
                 "text": text,
                 "attachment_count": attachment_count,
                 "occurred_at": row["occurred_at"],
@@ -1826,7 +1921,17 @@ def _refresh_tokens(
                 SELECT COALESCE(MAX(luct.updated_at), '')
                 FROM limited_user_conversation_titles luct
                 WHERE luct.limited_user_id = ?
-              ) AS limited_titles_updated_at
+              ) AS limited_titles_updated_at,
+              (
+                SELECT COUNT(*)
+                FROM limited_user_participant_colors lupc
+                WHERE lupc.limited_user_id = ?
+              ) AS limited_participant_color_count,
+              (
+                SELECT COALESCE(MAX(lupc.updated_at), '')
+                FROM limited_user_participant_colors lupc
+                WHERE lupc.limited_user_id = ?
+              ) AS limited_participant_colors_updated_at
             """,
             (
                 assigned_phone,
@@ -1835,6 +1940,8 @@ def _refresh_tokens(
                 assigned_phone,
                 *unread_params,
                 assigned_phone,
+                limited_user_id or 0,
+                limited_user_id or 0,
                 limited_user_id or 0,
                 limited_user_id or 0,
                 limited_user_id or 0,
@@ -1860,7 +1967,9 @@ def _refresh_tokens(
           (SELECT COALESCE(MAX(updated_at), '') FROM contacts) AS contacts_updated_at,
           '' AS conversation_states_updated_at,
           0 AS limited_title_count,
-          '' AS limited_titles_updated_at
+          '' AS limited_titles_updated_at,
+          0 AS limited_participant_color_count,
+          '' AS limited_participant_colors_updated_at
             """
         ).fetchone()
     tokens = {
@@ -1878,6 +1987,8 @@ def _refresh_tokens(
                 "conversation_states_updated_at",
                 "limited_title_count",
                 "limited_titles_updated_at",
+                "limited_participant_color_count",
+                "limited_participant_colors_updated_at",
             )
         ),
         "bootstrap": "|".join(
@@ -1905,6 +2016,11 @@ def _refresh_tokens(
                     FROM limited_user_conversation_titles luct
                     WHERE luct.limited_user_id = ? AND luct.conversation_id = c.id
                   ) AS title_updated_at,
+                  (
+                    SELECT COALESCE(MAX(lupc.updated_at), '')
+                    FROM limited_user_participant_colors lupc
+                    WHERE lupc.limited_user_id = ? AND lupc.conversation_id = c.id
+                  ) AS participant_colors_updated_at,
                   COALESCE(c.dealt_with_at, '') AS dealt_with_at,
                   COALESCE(c.manual_unread_at, '') AS manual_unread_at,
                   COALESCE(c.last_message_at, '') AS last_message_at,
@@ -1919,6 +2035,7 @@ def _refresh_tokens(
                 """,
                 (
                     limited_user_id or 0,
+                    limited_user_id or 0,
                     assigned_phone, assigned_phone,
                     assigned_phone, assigned_phone,
                     assigned_phone, assigned_phone,
@@ -1932,6 +2049,7 @@ def _refresh_tokens(
             SELECT
               c.updated_at AS conversation_updated_at,
               '' AS title_updated_at,
+              '' AS participant_colors_updated_at,
               COALESCE(c.dealt_with_at, '') AS dealt_with_at,
               COALESCE(c.manual_unread_at, '') AS manual_unread_at,
               COALESCE(c.last_message_at, '') AS last_message_at,
@@ -1963,6 +2081,7 @@ def _refresh_tokens(
                 for key in (
                     "conversation_updated_at",
                     "title_updated_at",
+                    "participant_colors_updated_at",
                     "dealt_with_at",
                     "manual_unread_at",
                     "last_message_at",
@@ -2034,6 +2153,16 @@ def _get_messages(
         (row["from_number"] for row in rows if not row["identity_label"]),
         limited_user_id,
     )
+    participants = _participants(
+        conn,
+        conversation_id,
+        assigned_phone,
+        limited_user_id,
+    )
+    participant_colors = {
+        participant["phone_number"]: participant.get("color")
+        for participant in participants
+    }
     attachments_by_message: dict[int, list[dict]] = {row["id"]: [] for row in rows}
     message_ids = list(attachments_by_message)
     if message_ids:
@@ -2052,6 +2181,8 @@ def _get_messages(
         message["from_display"] = (
             row["identity_label"] or contact_names.get(row["from_number"]) or display_phone(row["from_number"])
         )
+        if row["direction"] == "inbound":
+            message["sender_color"] = participant_colors.get(row["from_number"])
         message["attachments"] = attachments_by_message[row["id"]]
         messages.append(_decorate_message_status(message))
     scheduled_messages = []
@@ -2124,12 +2255,6 @@ def _get_messages(
         ):
             conversation["last_direction"] = "outbound"
             conversation["last_occurred_at"] = latest_scheduled["occurred_at"]
-    participants = _participants(
-        conn,
-        conversation_id,
-        assigned_phone,
-        limited_user_id,
-    )
     custom_title = _stored_conversation_title(conn, conversation_id, limited_user_id)
     conversation["custom_title"] = custom_title
     conversation["title"] = custom_title or _conversation_title_from_participants(participants)
@@ -3152,6 +3277,88 @@ def set_conversation_title(
                 WHERE id = ?
                 """,
                 (custom_title or None, timestamp, conversation_id),
+            )
+        conn.commit()
+        return {
+            "conversation": _conversation_summary(
+                conn,
+                conversation_id,
+                assigned_phone,
+                limited_user_id,
+            )
+        }
+
+
+def set_conversation_participant_color(
+    conversation_id: int,
+    payload: dict,
+    assigned_phone: str | None = None,
+    limited_user_id: int | None = None,
+) -> dict:
+    phone_number = normalize_phone(str(payload.get("phone_number") or payload.get("phone") or ""))
+    color = str(payload.get("color") or "").strip().lower()
+    if not phone_number:
+        raise ValueError("A valid participant phone number is required.")
+    if not PARTICIPANT_COLOR_PATTERN.fullmatch(color):
+        raise ValueError("Participant color must use #RRGGBB format.")
+    with closing(connect()) as conn:
+        init_db(conn)
+        _require_conversation_access(conn, conversation_id, assigned_phone)
+        conversation = conn.execute(
+            "SELECT kind FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if not conversation:
+            raise LookupError("Conversation not found.")
+        if conversation["kind"] != "group":
+            raise ValueError("Participant colors are only available for group conversations.")
+        participant = conn.execute(
+            """
+            SELECT role
+            FROM conversation_participants
+            WHERE conversation_id = ? AND phone_number = ?
+            """,
+            (conversation_id, phone_number),
+        ).fetchone()
+        if not participant or participant["role"] != "participant":
+            raise LookupError("Group participant not found.")
+        # Refresh tokens use updated_at values, so retain sub-second precision for
+        # repeated color changes that can happen within one UI interaction burst.
+        timestamp = datetime.now(EASTERN).isoformat(timespec="microseconds")
+        if assigned_phone:
+            if not limited_user_id:
+                raise PermissionError("Limited user account required.")
+            conn.execute(
+                """
+                INSERT INTO limited_user_participant_colors(
+                  limited_user_id, conversation_id, phone_number, color, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(limited_user_id, conversation_id, phone_number) DO UPDATE SET
+                  color = excluded.color,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    limited_user_id,
+                    conversation_id,
+                    phone_number,
+                    color,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE conversation_participants
+                SET color = ?
+                WHERE conversation_id = ? AND phone_number = ? AND role = 'participant'
+                """,
+                (color, conversation_id, phone_number),
+            )
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (timestamp, conversation_id),
             )
         conn.commit()
         return {
@@ -5262,6 +5469,15 @@ class TextingHandler(BaseHTTPRequestHandler):
                     set_conversation_title(
                         int(match.group(1)),
                         payload.get("title"),
+                        self._assigned_phone(),
+                        self._limited_user_id(),
+                    )
+                )
+            elif match := re.fullmatch(r"/api/conversations/(\d+)/participants/color", path):
+                self._send_json(
+                    set_conversation_participant_color(
+                        int(match.group(1)),
+                        self._read_json(),
                         self._assigned_phone(),
                         self._limited_user_id(),
                     )
