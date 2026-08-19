@@ -55,6 +55,42 @@ class GroupParticipantUiTests(unittest.TestCase):
             2,
         )
 
+    def test_member_list_opens_without_focusing_the_add_input(self) -> None:
+        open_members = self.script.split("function openGroupMembersModal()", 1)[1].split(
+            "async function createGroupMembershipBranch()",
+            1,
+        )[0]
+
+        self.assertIn(
+            "els.groupMembersModal?.focus({ preventScroll: true })",
+            open_members,
+        )
+        self.assertIn("blurActiveElementWithin(document)", open_members)
+        self.assertNotIn("els.groupMemberInput?.focus()", open_members)
+
+    def test_closing_member_and_contact_dialogs_blurs_their_active_element(self) -> None:
+        close_members = self.script.split("function closeGroupMembersModal", 1)[1].split(
+            "function openGroupMembersModal()",
+            1,
+        )[0]
+        close_contact = self.script.split("function closeContactNameModal", 1)[1].split(
+            "function openContactNameModal",
+            1,
+        )[0]
+
+        self.assertIn("function blurActiveElementWithin(container)", self.script)
+        self.assertIn("blurActiveElementWithin(els.groupMembersModal)", close_members)
+        self.assertIn("blurActiveElementWithin(els.contactNameModal)", close_contact)
+
+    def test_member_rename_keeps_contact_name_input_focus_and_selection(self) -> None:
+        open_contact = self.script.split("function openContactNameModal", 1)[1].split(
+            "function valueIsTruthy",
+            1,
+        )[0]
+
+        self.assertIn("els.contactNameModalInput.focus()", open_contact)
+        self.assertIn("els.contactNameModalInput.select()", open_contact)
+
 
 if __name__ == "__main__":
     unittest.main()

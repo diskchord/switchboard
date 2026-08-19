@@ -3252,6 +3252,12 @@ select:focus {
   display: none;
 }
 
+body.keyboard-open .contact-name-modal {
+  top: var(--visual-viewport-offset-top, 0px);
+  bottom: auto;
+  height: calc(var(--visual-viewport-height, 100dvh) - var(--layout-keyboard-inset, 0px));
+}
+
 .settings-card,
 .stats-card,
 .contact-name-card,

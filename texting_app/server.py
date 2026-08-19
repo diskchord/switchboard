@@ -807,14 +807,16 @@ PENDING_STATUSES = {"queued", "scheduled", "sending", "sent", "accepted", "final
 
 
 def _needs_attention(
-    last_direction: str | None,
-    last_occurred_at: str | None,
+    last_inbound_occurred_at: str | None,
     dealt_with_at: str | None,
     manual_unread_at: str | None = None,
 ) -> int:
     if manual_unread_at:
         return 1
-    return int(last_direction == "inbound" and bool(last_occurred_at) and (not dealt_with_at or last_occurred_at > dealt_with_at))
+    return int(
+        bool(last_inbound_occurred_at)
+        and (not dealt_with_at or last_inbound_occurred_at > dealt_with_at)
+    )
 
 
 UNREAD_CONVERSATION_CLAUSE = """
@@ -825,15 +827,8 @@ UNREAD_CONVERSATION_CLAUSE = """
     FROM messages latest
     WHERE latest.conversation_id = c.id
       AND latest.direction = 'inbound'
-      AND (c.dealt_with_at IS NULL OR latest.occurred_at > c.dealt_with_at)
-      AND latest.id = (
-        SELECT candidate.id
-        FROM messages candidate
-        WHERE candidate.conversation_id = c.id
-          AND COALESCE(candidate.source, '') != 'autoreply'
-        ORDER BY candidate.occurred_at DESC, candidate.id DESC
-        LIMIT 1
-      )
+      AND COALESCE(latest.source, '') != 'autoreply'
+      AND latest.occurred_at > COALESCE(c.dealt_with_at, '')
   )
 )
 """
@@ -860,31 +855,16 @@ def _unread_conversation_clause(
             FROM messages latest
             WHERE latest.conversation_id = c.id
               AND latest.direction = 'inbound'
+              AND COALESCE(latest.source, '') != 'autoreply'
               AND EXISTS (
                 SELECT 1 FROM json_each(latest.to_numbers) latest_to
                 WHERE latest_to.value = ?
               )
-              AND (
-                COALESCE((
-                  SELECT state.dealt_with_at
-                  FROM limited_user_conversation_states state
-                  WHERE state.conversation_id = c.id AND state.limited_user_id = ?
-                ), '') = ''
-                OR latest.occurred_at > (
-                  SELECT state.dealt_with_at
-                  FROM limited_user_conversation_states state
-                  WHERE state.conversation_id = c.id AND state.limited_user_id = ?
-                )
-              )
-              AND latest.id = (
-                SELECT candidate.id
-                FROM messages candidate
-                WHERE candidate.conversation_id = c.id
-                  AND COALESCE(candidate.source, '') != 'autoreply'
-                  AND {_message_access_sql('candidate')}
-                ORDER BY candidate.occurred_at DESC, candidate.id DESC
-                LIMIT 1
-              )
+              AND latest.occurred_at > COALESCE((
+                SELECT state.dealt_with_at
+                FROM limited_user_conversation_states state
+                WHERE state.conversation_id = c.id AND state.limited_user_id = ?
+              ), '')
           )
         )
         """,
@@ -892,9 +872,6 @@ def _unread_conversation_clause(
             limited_user_id,
             assigned_phone,
             limited_user_id,
-            limited_user_id,
-            assigned_phone,
-            assigned_phone,
         ],
     )
 
@@ -1494,8 +1471,7 @@ def _decorate_conversation_summary(
         item["dealt_with_at"] = dealt_with_at
         item["manual_unread_at"] = manual_unread_at
     needs_attention = _needs_attention(
-        row["last_direction"],
-        row["last_occurred_at"],
+        row["last_inbound_occurred_at"],
         dealt_with_at,
         manual_unread_at,
     )
@@ -1598,9 +1574,12 @@ def _list_conversations(
         params.extend([before, before, before_id])
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     message_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+    inbound_access_sql = f"AND {_message_access_sql('latest_inbound')}" if assigned_phone else ""
     scheduled_access_sql = "AND from_number = ?" if assigned_phone else ""
+    inbound_select_params: list[object] = []
     access_select_params: list[object] = []
     if assigned_phone:
+        inbound_select_params.extend([assigned_phone, assigned_phone])
         access_select_params.extend([assigned_phone, assigned_phone, assigned_phone])
     rows = conn.execute(
         f"""
@@ -1623,7 +1602,15 @@ def _list_conversations(
           sm.status AS scheduled_status,
           sm.failure AS scheduled_failure,
           {CONVERSATION_SORT_EXPR} AS list_sort_at,
-          {search_rank_select}
+          {search_rank_select},
+          (
+            SELECT MAX(latest_inbound.occurred_at)
+            FROM messages latest_inbound
+            WHERE latest_inbound.conversation_id = c.id
+              AND latest_inbound.direction = 'inbound'
+              AND COALESCE(latest_inbound.source, '') != 'autoreply'
+              {inbound_access_sql}
+          ) AS last_inbound_occurred_at
         FROM conversations c
         LEFT JOIN messages m ON m.id = (
           SELECT id FROM messages
@@ -1654,7 +1641,13 @@ def _list_conversations(
         ORDER BY search_name_rank DESC, list_sort_at DESC, c.id DESC
         LIMIT ?
         """,
-        (*search_select_params, *access_select_params, *params, limit + 1),
+        (
+            *search_select_params,
+            *inbound_select_params,
+            *access_select_params,
+            *params,
+            limit + 1,
+        ),
     ).fetchall()
     has_more = len(rows) > limit
     rows = rows[:limit]
@@ -2238,9 +2231,24 @@ def _get_messages(
     if last_message:
         conversation["last_direction"] = last_message["direction"]
         conversation["last_occurred_at"] = last_message["occurred_at"]
+    last_inbound = conn.execute(
+        f"""
+        SELECT occurred_at
+        FROM messages
+        WHERE conversation_id = ?
+          AND direction = 'inbound'
+          AND COALESCE(source, '') != 'autoreply'
+          {last_access_sql}
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT 1
+        """,
+        (conversation_id, *last_access_params),
+    ).fetchone()
+    conversation["last_inbound_occurred_at"] = (
+        last_inbound["occurred_at"] if last_inbound else None
+    )
     conversation["needs_attention"] = _needs_attention(
-        conversation.get("last_direction"),
-        conversation.get("last_occurred_at"),
+        conversation.get("last_inbound_occurred_at"),
         conversation.get("dealt_with_at"),
         conversation.get("manual_unread_at"),
     )
@@ -2414,7 +2422,9 @@ def _bootstrap(conn, principal: dict | None = None) -> dict:
         "contacts_provider": active_provider(),
         "contact_providers": providers,
         "settings": configured_values() if not assigned_phone else {"sections": []},
-        "mark_read_on_open": get_bool("behavior.mark_read_on_open", False),
+        "mark_read_on_open": get_bool("behavior.mark_read_on_open", True),
+        "enter_to_send_desktop": get_bool("behavior.enter_to_send_desktop", True),
+        "enter_to_send_mobile": get_bool("behavior.enter_to_send_mobile", False),
         "details_collapsed_default": get_bool("behavior.details_collapsed_default", True),
         "default_identity": default_identity,
         "access": {
@@ -3378,9 +3388,12 @@ def _conversation_summary(
     limited_user_id: int | None = None,
 ) -> dict:
     message_access_sql = f"AND {_message_access_sql('messages')}" if assigned_phone else ""
+    inbound_access_sql = f"AND {_message_access_sql('latest_inbound')}" if assigned_phone else ""
     scheduled_access_sql = "AND from_number = ?" if assigned_phone else ""
+    inbound_select_params: list[object] = []
     params: list[object] = []
     if assigned_phone:
+        inbound_select_params.extend([assigned_phone, assigned_phone])
         params.extend([assigned_phone, assigned_phone, assigned_phone])
     params.append(conversation_id)
     row = conn.execute(
@@ -3403,7 +3416,15 @@ def _conversation_summary(
           sm.scheduled_for AS scheduled_for,
           sm.status AS scheduled_status,
           sm.failure AS scheduled_failure,
-          {CONVERSATION_SORT_EXPR} AS list_sort_at
+          {CONVERSATION_SORT_EXPR} AS list_sort_at,
+          (
+            SELECT MAX(latest_inbound.occurred_at)
+            FROM messages latest_inbound
+            WHERE latest_inbound.conversation_id = c.id
+              AND latest_inbound.direction = 'inbound'
+              AND COALESCE(latest_inbound.source, '') != 'autoreply'
+              {inbound_access_sql}
+          ) AS last_inbound_occurred_at
         FROM conversations c
         LEFT JOIN messages m ON m.id = (
           SELECT id FROM messages
@@ -3432,7 +3453,7 @@ def _conversation_summary(
         )
         WHERE c.id = ?
         """,
-        params,
+        (*inbound_select_params, *params),
     ).fetchone()
     if not row:
         return {}

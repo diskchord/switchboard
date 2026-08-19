@@ -32,7 +32,6 @@ const state = {
   threadCache: new Map(),
   threadRevalidationFailedIds: new Set(),
   readOnOpenPendingIds: new Set(),
-  readOnOpenFailedIds: new Set(),
   readOnOpenPromises: new Map(),
   conversationReadMutationIds: new Set(),
   conversationReadMutationTargets: new Map(),
@@ -1437,6 +1436,13 @@ function isMobileLayout() {
   return !isDesktopLayout();
 }
 
+function isMobileDevice() {
+  if (document.documentElement.dataset.nativeApp === "android") return true;
+  if (navigator.userAgentData?.mobile === true) return true;
+  if (navigator.maxTouchPoints > 0 && window.matchMedia("(pointer: coarse)").matches) return true;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(String(navigator.userAgent || ""));
+}
+
 function isDetailsOverlayLayout() {
   return window.matchMedia("(max-width: 1120px)").matches;
 }
@@ -2123,6 +2129,14 @@ function configureAutoRefresh() {
 function settingBool(key, fallback = false) {
   const value = String(bootstrapSettingValue(key, fallback ? "1" : "0")).trim().toLowerCase();
   return ["1", "true", "yes", "on"].includes(value);
+}
+
+function enterToSendEnabled() {
+  const mobile = isMobileDevice();
+  const bootstrapKey = mobile ? "enter_to_send_mobile" : "enter_to_send_desktop";
+  const settingKey = mobile ? "behavior.enter_to_send_mobile" : "behavior.enter_to_send_desktop";
+  const configured = state.bootstrap?.[bootstrapKey];
+  return typeof configured === "boolean" ? configured : settingBool(settingKey, !mobile);
 }
 
 function configureSounds() {
@@ -4303,6 +4317,13 @@ function chooseGroupMemberSuggestion(index = state.groupMemberSuggestionIndex) {
   return addGroupMember(contact.phone_number, contact.kind === "manual" ? "" : contact.display_name);
 }
 
+function blurActiveElementWithin(container) {
+  const activeElement = document.activeElement;
+  if (activeElement && container?.contains(activeElement) && typeof activeElement.blur === "function") {
+    activeElement.blur();
+  }
+}
+
 async function searchGroupMemberSuggestions() {
   const term = els.groupMemberInput.value.trim();
   if (!term || !groupMemberSourceConversation()) {
@@ -4354,6 +4375,7 @@ async function searchGroupMemberSuggestions() {
 
 function closeGroupMembersModal({ restoreFocus = false } = {}) {
   if (!els.groupMembersModal) return;
+  blurActiveElementWithin(els.groupMembersModal);
   els.groupMembersModal.classList.add("hidden");
   state.groupMemberSourceConversationId = null;
   state.groupMemberOriginalPhones = [];
@@ -4370,6 +4392,7 @@ function closeGroupMembersModal({ restoreFocus = false } = {}) {
 function openGroupMembersModal() {
   const conversation = state.currentConversation;
   if (conversation?.kind !== "group" || !els.groupMembersModal) return;
+  blurActiveElementWithin(document);
   const participants = (conversation.participants || []).filter(
     (participant) => participant.role === "participant",
   );
@@ -4381,7 +4404,7 @@ function openGroupMembersModal() {
   renderGroupMembersModal();
   els.groupMembersModal.classList.remove("hidden");
   syncNativePullRefreshEnabled();
-  requestAnimationFrame(() => els.groupMemberInput?.focus());
+  requestAnimationFrame(() => els.groupMembersModal?.focus({ preventScroll: true }));
 }
 
 async function createGroupMembershipBranch() {
@@ -4546,6 +4569,7 @@ function isContactNameModalOpen() {
 function closeContactNameModal({ restoreFocus = false } = {}) {
   if (!els.contactNameModal) return;
   const groupMemberPhone = state.groupMemberContactEditingPhone;
+  blurActiveElementWithin(els.contactNameModal);
   els.contactNameModal.classList.add("hidden");
   state.contactNameParticipantPhone = "";
   state.groupMemberContactEditingPhone = "";
@@ -4592,10 +4616,11 @@ function conversationIsRead(conversation) {
     return !valueIsTruthy(conversation.needs_attention);
   }
   const lastDirection = String(conversation.last_direction || "").toLowerCase();
-  if (lastDirection && lastDirection !== "inbound") return true;
   const last = conversation?.last_occurred_at || conversation?.last_message_at || conversation?.sort_at || "";
+  const lastInbound = conversation?.last_inbound_occurred_at || (lastDirection === "inbound" ? last : "");
+  if (!lastInbound) return lastDirection === "outbound";
   const dealt = conversation?.dealt_with_at || "";
-  if (last && dealt && dealt >= last) return true;
+  if (dealt && dealt >= lastInbound) return true;
   return false;
 }
 
@@ -5422,6 +5447,7 @@ function mergeThreadConversationFreshnessIntoList(conversation) {
   [
     "last_direction",
     "last_occurred_at",
+    "last_inbound_occurred_at",
     "last_message_at",
     "sort_at",
     "dealt_with_at",
@@ -5483,9 +5509,11 @@ function applyConversationReadPatch(conversation, patch) {
   const lastDirection = String(conversation.last_direction || "").toLowerCase();
   const lastOccurredAt =
     conversation.last_occurred_at || conversation.last_message_at || conversation.sort_at || "";
+  const lastInboundOccurredAt =
+    conversation.last_inbound_occurred_at || (lastDirection === "inbound" ? lastOccurredAt : "");
   const needsAttention = manualUnreadAt
     ? 1
-    : Number(lastDirection === "inbound" && Boolean(lastOccurredAt) && (!dealtWithAt || lastOccurredAt > dealtWithAt));
+    : Number(Boolean(lastInboundOccurredAt) && (!dealtWithAt || lastInboundOccurredAt > dealtWithAt));
   return {
     ...conversation,
     dealt_with_at: dealtWithAt,
@@ -8026,23 +8054,25 @@ function restoreCachedThreadScroll(entry, requestSeq) {
   requestAnimationFrame(restore);
 }
 
-function markConversationReadOnOpen(conversationId, conversation, { allowPending = false } = {}) {
+function markConversationReadOnOpen(conversationId, conversation) {
   const id = Number(conversationId);
   if (!state.bootstrap?.mark_read_on_open || conversationIsRead(conversation)) return false;
+  const watermarkReady =
+    Number(state.renderedInboundConversationId) === id && state.renderedInboundWatermarkReady;
+  if (!watermarkReady) return false;
   if (state.readOnOpenPendingIds.has(id)) return true;
   if (state.conversationReadMutationIds.has(id)) return false;
-  state.readOnOpenFailedIds.delete(id);
   state.readOnOpenPendingIds.add(id);
-  const readPromise = setConversationRead(id, true, { silent: true, allowPending });
+  const readPromise = setConversationRead(id, true, {
+    silent: true,
+    readThroughMessageId: state.renderedInboundMessageId,
+    enforceReadThrough: true,
+  });
   state.readOnOpenPromises.set(id, readPromise);
-  readPromise
-    .then((succeeded) => {
-      if (!succeeded) state.readOnOpenFailedIds.add(id);
-    })
-    .finally(() => {
-      state.readOnOpenPendingIds.delete(id);
-      if (state.readOnOpenPromises.get(id) === readPromise) state.readOnOpenPromises.delete(id);
-    });
+  readPromise.finally(() => {
+    state.readOnOpenPendingIds.delete(id);
+    if (state.readOnOpenPromises.get(id) === readPromise) state.readOnOpenPromises.delete(id);
+  });
   return true;
 }
 
@@ -8135,11 +8165,6 @@ async function openConversation(id, options = {}) {
       if (updateHistory) pushMobileThreadState({ conversationId });
     }
   }
-  const readWasOptimistic = markConversationReadOnOpen(
-    conversationId,
-    stageDesktopSwitch ? listConversation : state.currentConversation,
-    { allowPending: stageDesktopSwitch },
-  );
   let payload;
   try {
     payload = await api(`/api/conversations/${conversationId}/messages?limit=80`, { signal: controller.signal });
@@ -8206,18 +8231,6 @@ async function openConversation(id, options = {}) {
   if (activeReadPatch) {
     mergeConversationReadPatchIntoLoadedState(conversationId, activeReadPatch);
     if (confirmedReadPatch) state.conversationReadMutationResults.delete(conversationId);
-  } else if (!readWasOptimistic) {
-    markConversationReadOnOpen(conversationId, state.currentConversation);
-  }
-  if (
-    state.conversationCategory === "unread" &&
-    readWasOptimistic &&
-    !state.readOnOpenFailedIds.has(conversationId) &&
-    conversationIsRead(state.currentConversation)
-  ) {
-    state.conversations = state.conversations.filter(
-      (conversation) => Number(conversation.id) !== conversationId,
-    );
   }
   trackInboundSoundKey(latestInboundSoundKeyFromMessages(state.messages));
   selectFromNumber(preferredReplyIdentity(state.currentConversation, state.messages));
@@ -8251,6 +8264,7 @@ async function openConversation(id, options = {}) {
     }
     if (!found) toast("That matching message is no longer available.");
   }
+  markConversationReadOnOpen(conversationId, state.currentConversation);
   cacheCurrentThread();
   if (state.openConversationController === controller) state.openConversationController = null;
   scheduleStatusPoll();
@@ -9761,11 +9775,11 @@ function bindEvents() {
   });
   els.messageText.addEventListener("keydown", (event) => {
     beginComposerKeyScrollGuard(event);
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      if (els.sendButton.disabled) return;
-      sendCurrentMessage();
-    }
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    if (!enterToSendEnabled()) return;
+    event.preventDefault();
+    if (els.sendButton.disabled) return;
+    sendCurrentMessage();
   });
   els.messageText.addEventListener("beforeinput", beginComposerInputScrollGuard);
   els.messageText.addEventListener("keyup", endComposerInputScrollGuard);

@@ -19,15 +19,8 @@ UNREAD_CONVERSATION_CLAUSE = """
     FROM messages latest
     WHERE latest.conversation_id = c.id
       AND latest.direction = 'inbound'
-      AND (c.dealt_with_at IS NULL OR latest.occurred_at > c.dealt_with_at)
-      AND latest.id = (
-        SELECT candidate.id
-        FROM messages candidate
-        WHERE candidate.conversation_id = c.id
-          AND COALESCE(candidate.source, '') != 'autoreply'
-        ORDER BY candidate.occurred_at DESC, candidate.id DESC
-        LIMIT 1
-      )
+      AND COALESCE(latest.source, '') != 'autoreply'
+      AND latest.occurred_at > COALESCE(c.dealt_with_at, '')
   )
 )
 """

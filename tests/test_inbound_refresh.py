@@ -84,6 +84,45 @@ class InboundRefreshTests(unittest.TestCase):
         self.assertIn("payload.read_applied === false", source)
         self.assertIn("requireRenderedWatermark: shouldMarkRead", source)
 
+    def test_automatic_read_waits_for_render_and_uses_the_same_watermark_guard(self) -> None:
+        source = APP_JS_PATH.read_text()
+        auto_read = source.split("function markConversationReadOnOpen", 1)[1].split(
+            "async function openConversation",
+            1,
+        )[0]
+        open_conversation = source.split("async function openConversation", 1)[1].split(
+            "async function openAdjacentConversation",
+            1,
+        )[0]
+
+        self.assertIn("state.renderedInboundWatermarkReady", auto_read)
+        self.assertIn("readThroughMessageId: state.renderedInboundMessageId", auto_read)
+        self.assertIn("enforceReadThrough: true", auto_read)
+        self.assertEqual(open_conversation.count("markConversationReadOnOpen("), 1)
+        self.assertLess(
+            open_conversation.index("renderMessages(state.messages"),
+            open_conversation.index("markConversationReadOnOpen("),
+        )
+
+    def test_read_state_uses_latest_inbound_even_when_preview_is_outbound(self) -> None:
+        source = APP_JS_PATH.read_text()
+        read_fallback = source.split("function conversationIsRead", 1)[1].split(
+            "function setContactNameEditor",
+            1,
+        )[0]
+        freshness_merge = source.split(
+            "function mergeThreadConversationFreshnessIntoList",
+            1,
+        )[1].split("function mergeConversationIntoLoadedState", 1)[0]
+        read_patch = source.split("function applyConversationReadPatch", 1)[1].split(
+            "function mergeConversationReadPatchIntoLoadedState",
+            1,
+        )[0]
+
+        self.assertIn("last_inbound_occurred_at", read_fallback)
+        self.assertIn('"last_inbound_occurred_at"', freshness_merge)
+        self.assertIn("last_inbound_occurred_at", read_patch)
+
 
 if __name__ == "__main__":
     unittest.main()

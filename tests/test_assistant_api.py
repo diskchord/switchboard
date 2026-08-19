@@ -171,6 +171,34 @@ class AssistantApiDataTests(unittest.TestCase):
         )
         self.assertEqual(no_match["conversations"], [])
 
+    def test_later_outbound_does_not_mask_an_earlier_unread_inbound(self) -> None:
+        conn = connect()
+        upsert_message(
+            conn,
+            conversation_id=self.jane_conversation_id,
+            direction="outbound",
+            from_number=SELF_NUMBER,
+            to_numbers=[JANE_NUMBER],
+            cc_numbers=[],
+            text="A reply sent by another viewer",
+            occurred_at="2026-07-31T10:02:00-04:00",
+            status="sent",
+        )
+        conn.commit()
+        conn.close()
+
+        result = list_unread_conversations({})
+        context = get_conversation_context(self.jane_conversation_id, {})
+
+        self.assertEqual(
+            [item["conversation_id"] for item in result["conversations"]],
+            [self.jane_conversation_id],
+        )
+        summary = result["conversations"][0]
+        self.assertEqual(summary["latest_unread_message_id"], self.jane_message_2)
+        self.assertEqual(summary["unread_count"], 2)
+        self.assertTrue(context["conversation"]["is_unread"])
+
     def test_context_is_bounded_and_includes_contacts_media_and_queued_messages(self) -> None:
         result = get_conversation_context(
             self.jane_conversation_id, {"message_limit": ["1"]}

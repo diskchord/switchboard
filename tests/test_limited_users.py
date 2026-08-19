@@ -344,6 +344,176 @@ class LimitedUserTests(unittest.TestCase):
         )["conversations"]
         self.assertEqual(first_unread, [])
 
+    def test_limited_reply_does_not_mask_unread_for_primary_or_another_user(self) -> None:
+        remote_number = "+12075551234"
+        conversation_id = ensure_conversation(
+            self.conn,
+            [remote_number],
+            [self.first_number],
+        )
+        upsert_message(
+            self.conn,
+            conversation_id=conversation_id,
+            direction="inbound",
+            from_number=remote_number,
+            to_numbers=[self.first_number],
+            cc_numbers=[],
+            text="Can somebody help with this?",
+            occurred_at="2026-08-01T10:00:00-04:00",
+        )
+        self.conn.commit()
+        first_user = create_limited_user(
+            {
+                "username": "first-replier",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+        second_user = create_limited_user(
+            {
+                "username": "second-replier",
+                "password": "correct-horse",
+                "identity_id": self._identity_id(self.first_number),
+            }
+        )["user"]
+
+        global_before = self.conn.execute(
+            "SELECT dealt_with_at, manual_unread_at FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        self.assertEqual(_unread_conversation_count(self.conn), 1)
+        self.assertEqual(
+            _unread_conversation_count(self.conn, self.first_number, first_user["id"]),
+            1,
+        )
+        self.assertEqual(
+            _unread_conversation_count(self.conn, self.first_number, second_user["id"]),
+            1,
+        )
+
+        def send_limited_reply(**kwargs):
+            message_id = upsert_message(
+                self.conn,
+                conversation_id=conversation_id,
+                direction="outbound",
+                from_number=kwargs["from_number"],
+                to_numbers=kwargs["to_numbers"],
+                cc_numbers=[],
+                text=kwargs["text"],
+                occurred_at="2026-08-01T10:01:00-04:00",
+                status="sent",
+                source="test-provider",
+            )
+            self.conn.commit()
+            return {"message_id": message_id, "provider": "test-provider"}
+
+        with patch(
+            "texting_app.server.send_provider_message",
+            side_effect=send_limited_reply,
+        ):
+            reply = send_api_message(
+                {
+                    "conversation_id": conversation_id,
+                    "from_number": self.first_number,
+                    "to_numbers": [remote_number],
+                    "text": "I can help.",
+                },
+                self.first_number,
+                first_user["id"],
+            )
+
+        global_after = self.conn.execute(
+            "SELECT dealt_with_at, manual_unread_at FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        first_state = self.conn.execute(
+            """
+            SELECT dealt_with_at, manual_unread_at
+            FROM limited_user_conversation_states
+            WHERE limited_user_id = ? AND conversation_id = ?
+            """,
+            (first_user["id"], conversation_id),
+        ).fetchone()
+        second_state = self.conn.execute(
+            """
+            SELECT dealt_with_at, manual_unread_at
+            FROM limited_user_conversation_states
+            WHERE limited_user_id = ? AND conversation_id = ?
+            """,
+            (second_user["id"], conversation_id),
+        ).fetchone()
+
+        self.assertEqual(tuple(global_after), tuple(global_before))
+        self.assertEqual(first_state["dealt_with_at"], "2026-08-01T10:01:00-04:00")
+        self.assertIsNone(first_state["manual_unread_at"])
+        self.assertIsNone(second_state)
+        self.assertFalse(reply["conversation"]["needs_attention"])
+        self.assertEqual(reply["unread_count"], 0)
+        self.assertEqual(
+            _list_conversations(
+                self.conn,
+                {"unread": ["true"]},
+                assigned_phone=self.first_number,
+                limited_user_id=first_user["id"],
+            )["conversations"],
+            [],
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in _list_conversations(
+                    self.conn,
+                    {"unread": ["true"]},
+                    assigned_phone=self.first_number,
+                    limited_user_id=second_user["id"],
+                )["conversations"]
+            ],
+            [conversation_id],
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in _list_conversations(
+                    self.conn,
+                    {"unread": ["true"]},
+                )["conversations"]
+            ],
+            [conversation_id],
+        )
+        self.assertTrue(
+            _get_messages(self.conn, conversation_id)["conversation"]["needs_attention"]
+        )
+        self.assertTrue(
+            _get_messages(
+                self.conn,
+                conversation_id,
+                assigned_phone=self.first_number,
+                limited_user_id=second_user["id"],
+            )["conversation"]["needs_attention"]
+        )
+        self.assertEqual(_bootstrap(self.conn)["stats"]["unread_conversations"], 1)
+
+        primary_reply_id = upsert_message(
+            self.conn,
+            conversation_id=conversation_id,
+            direction="outbound",
+            from_number=self.first_number,
+            to_numbers=[remote_number],
+            cc_numbers=[],
+            text="Primary follow-up",
+            occurred_at="2026-08-01T10:02:00-04:00",
+            status="sent",
+        )
+        self.conn.commit()
+        primary_reply = _mark_reply_message_read(primary_reply_id)
+
+        self.assertFalse(primary_reply["conversation"]["needs_attention"])
+        self.assertEqual(primary_reply["unread_count"], 0)
+        self.assertEqual(
+            _unread_conversation_count(self.conn, self.first_number, second_user["id"]),
+            1,
+        )
+
     def test_global_manual_unread_does_not_leak_into_new_limited_scope(self) -> None:
         conversation_id, _ = self._seed_shared_conversation()
         self.conn.execute(

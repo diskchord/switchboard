@@ -933,6 +933,7 @@ public class MainActivity extends Activity {
 	                + "|| (document.querySelector('#settingsModal') && !document.querySelector('#settingsModal').classList.contains('hidden'))"
 	                + "|| (document.querySelector('#statsModal') && !document.querySelector('#statsModal').classList.contains('hidden'))"
 	                + "|| (document.querySelector('#contactNameModal') && !document.querySelector('#contactNameModal').classList.contains('hidden'))"
+	                + "|| (document.querySelector('#groupMembersModal') && !document.querySelector('#groupMembersModal').classList.contains('hidden'))"
 	                + "|| (document.querySelector('#scheduleModal') && !document.querySelector('#scheduleModal').classList.contains('hidden'))"
 	                + "|| (document.querySelector('#faxModal') && !document.querySelector('#faxModal').classList.contains('hidden'))"
                 + "|| document.body.classList.contains('details-overlay-open'))){"
