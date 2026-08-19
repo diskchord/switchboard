@@ -3251,17 +3251,64 @@ def _conversation_summary(
     return conversation
 
 
+_READ_THROUGH_UNSET = object()
+
+
 def set_conversation_dealt(
     conversation_id: int,
     dealt: bool = True,
     assigned_phone: str | None = None,
     limited_user_id: int | None = None,
+    read_through_message_id: int | None | object = _READ_THROUGH_UNSET,
 ) -> dict:
+    guard_read_through = dealt and read_through_message_id is not _READ_THROUGH_UNSET
+    if guard_read_through and read_through_message_id is not None:
+        if isinstance(read_through_message_id, bool) or not isinstance(read_through_message_id, int):
+            raise ValueError("Read-through message ID must be a positive integer or null.")
+        if read_through_message_id <= 0:
+            raise ValueError("Read-through message ID must be a positive integer or null.")
     with closing(connect()) as conn:
+        if guard_read_through:
+            # Hold the writer lock from the comparison through the read-state
+            # update so an inbound message cannot slip between those steps.
+            conn.execute("BEGIN IMMEDIATE")
         _require_conversation_access(conn, conversation_id, assigned_phone)
         row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
         if not row:
             raise ValueError("Conversation not found.")
+        if guard_read_through:
+            access_sql = f"AND {_message_access_sql('visible_inbound')}" if assigned_phone else ""
+            access_params = [assigned_phone, assigned_phone] if assigned_phone else []
+            latest_inbound = conn.execute(
+                f"""
+                SELECT visible_inbound.id
+                FROM messages visible_inbound
+                WHERE visible_inbound.conversation_id = ?
+                  AND visible_inbound.direction = 'inbound'
+                  {access_sql}
+                ORDER BY visible_inbound.occurred_at DESC, visible_inbound.id DESC
+                LIMIT 1
+                """,
+                (conversation_id, *access_params),
+            ).fetchone()
+            latest_inbound_id = int(latest_inbound["id"]) if latest_inbound else None
+            if latest_inbound_id != read_through_message_id:
+                conn.rollback()
+                conversation = _conversation_summary(
+                    conn,
+                    conversation_id,
+                    assigned_phone,
+                    limited_user_id,
+                )
+                return {
+                    "conversation": conversation,
+                    "unread_count": _unread_conversation_count(
+                        conn,
+                        assigned_phone,
+                        limited_user_id,
+                    ),
+                    "read_applied": False,
+                }
         timestamp = now_est()
         if assigned_phone:
             if not limited_user_id:
@@ -3318,6 +3365,7 @@ def set_conversation_dealt(
                 assigned_phone,
                 limited_user_id,
             ),
+            "read_applied": True,
         }
 
 
@@ -5221,12 +5269,18 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif match := re.fullmatch(r"/api/conversations/(\d+)/dealt", path):
                 payload = self._read_json()
                 dealt = bool(payload.get("dealt", True))
+                read_through_message_id = (
+                    payload.get("read_through_message_id")
+                    if "read_through_message_id" in payload
+                    else _READ_THROUGH_UNSET
+                )
                 self._send_json(
                     set_conversation_dealt(
                         int(match.group(1)),
                         dealt,
                         self._assigned_phone(),
                         self._limited_user_id(),
+                        read_through_message_id,
                     )
                 )
             elif path == "/api/conversations/bulk":

@@ -76,6 +76,14 @@ class InboundRefreshTests(unittest.TestCase):
             source,
         )
 
+    def test_manual_read_is_guarded_by_the_latest_rendered_inbound_message(self) -> None:
+        source = APP_JS_PATH.read_text()
+
+        self.assertIn("state.renderedInboundMessageId = latestRenderedInbound", source)
+        self.assertIn("requestBody.read_through_message_id = readThroughMessageId ?? null", source)
+        self.assertIn("payload.read_applied === false", source)
+        self.assertIn("requireRenderedWatermark: shouldMarkRead", source)
+
 
 if __name__ == "__main__":
     unittest.main()

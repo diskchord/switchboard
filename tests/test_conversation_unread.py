@@ -7,10 +7,67 @@ from unittest.mock import patch
 
 from texting_app import config
 from texting_app.db import connect, ensure_conversation, init_db, upsert_message
-from texting_app.server import _get_messages, _list_conversations, _mark_reply_message_read
+from texting_app.server import (
+    _get_messages,
+    _list_conversations,
+    _mark_reply_message_read,
+    set_conversation_dealt,
+)
 
 
 class QueuedMessageUnreadStateTests(unittest.TestCase):
+    def test_read_through_guard_preserves_a_newer_unseen_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "switchboard.sqlite"
+            with patch.object(config, "DB_PATH", database_path), patch.object(config, "PERSONAL_NUMBERS", []):
+                conn = connect()
+                init_db(conn)
+                conversation_id = ensure_conversation(conn, ["+12075551234"], ["+15551230001"])
+                displayed_message_id = upsert_message(
+                    conn,
+                    conversation_id=conversation_id,
+                    direction="inbound",
+                    from_number="+12075551234",
+                    to_numbers=["+15551230001"],
+                    cc_numbers=[],
+                    text="Already visible",
+                    occurred_at="2026-08-18T10:00:00-04:00",
+                )
+                unseen_message_id = upsert_message(
+                    conn,
+                    conversation_id=conversation_id,
+                    direction="inbound",
+                    from_number="+12075551234",
+                    to_numbers=["+15551230001"],
+                    cc_numbers=[],
+                    text="Not rendered yet",
+                    # The ID guard must still distinguish messages when the
+                    # provider gives them the same timestamp.
+                    occurred_at="2026-08-18T10:00:00-04:00",
+                )
+                conn.commit()
+                conn.close()
+
+                stale_result = set_conversation_dealt(
+                    conversation_id,
+                    True,
+                    read_through_message_id=displayed_message_id,
+                )
+
+                self.assertFalse(stale_result["read_applied"])
+                self.assertTrue(stale_result["conversation"]["needs_attention"])
+                self.assertEqual(stale_result["unread_count"], 1)
+
+                current_result = set_conversation_dealt(
+                    conversation_id,
+                    True,
+                    read_through_message_id=unseen_message_id,
+                )
+
+                self.assertTrue(current_result["read_applied"])
+                self.assertFalse(current_result["conversation"]["needs_attention"])
+                self.assertEqual(current_result["unread_count"], 0)
+
     def test_queued_preview_does_not_clear_unread_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             conn = connect(Path(temp_dir) / "switchboard.sqlite")

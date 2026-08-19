@@ -91,6 +91,9 @@ const state = {
   messageLayoutToken: 0,
   messageRenderGeneration: 0,
   messageDomConversationId: null,
+  renderedInboundConversationId: null,
+  renderedInboundMessageId: null,
+  renderedInboundWatermarkReady: false,
   messageUserIntentGeneration: 0,
   messageAnchorCaptureFrame: null,
   messageLayoutFrame: null,
@@ -523,6 +526,7 @@ const I18N = {
     "conversation.unarchived": "Moved to Inbox.",
     "conversation.marked_read": "Marked read.",
     "conversation.marked_unread": "Marked unread.",
+    "conversation.newer_message_unread": "A newer message arrived. Review it before marking this thread read.",
     "conversation.existing_group": "Opened existing group.",
     "thread.conversation": "Conversation",
     "thread.select": "Select a thread",
@@ -821,6 +825,7 @@ const I18N = {
     "conversation.unarchived": "Movido a Entrada.",
     "conversation.marked_read": "Marcado como leído.",
     "conversation.marked_unread": "Marcado como no leído.",
+    "conversation.newer_message_unread": "Llegó un mensaje nuevo. Revísalo antes de marcar esta conversación como leída.",
     "conversation.existing_group": "Grupo existente abierto.",
     "thread.conversation": "Conversación",
     "thread.select": "Selecciona un hilo",
@@ -1119,6 +1124,7 @@ const I18N = {
     "conversation.unarchived": "Déplacé vers la boîte.",
     "conversation.marked_read": "Marqué comme lu.",
     "conversation.marked_unread": "Marqué comme non lu.",
+    "conversation.newer_message_unread": "Un nouveau message est arrivé. Consultez-le avant de marquer ce fil comme lu.",
     "conversation.existing_group": "Groupe existant ouvert.",
     "thread.conversation": "Conversation",
     "thread.select": "Sélectionnez un fil",
@@ -5429,8 +5435,12 @@ function renderReadStateButton(conversation) {
   const hasConversation = Boolean(conversation);
   const isUnread = hasConversation && !conversationIsRead(conversation);
   const mutationPending = hasConversation && state.conversationReadMutationIds.has(Number(conversation.id));
+  const renderedWatermarkReady =
+    hasConversation &&
+    Number(state.renderedInboundConversationId) === Number(conversation.id) &&
+    state.renderedInboundWatermarkReady;
   const label = !hasConversation ? t("conversation.read") : isUnread ? t("conversation.mark_read") : t("conversation.mark_unread");
-  els.dealtButton.disabled = !hasConversation || mutationPending;
+  els.dealtButton.disabled = !hasConversation || mutationPending || (isUnread && !renderedWatermarkReady);
   els.dealtButton.classList.toggle("is-pending", mutationPending);
   els.dealtButton.title = label;
   els.dealtButton.setAttribute("aria-label", label);
@@ -6181,6 +6191,10 @@ function renderThreadLoadingState() {
   state.pendingPassiveMessageScrollMode = "preserve";
   state.messageScrollAnchor = null;
   state.messageDomConversationId = state.currentConversationId;
+  state.renderedInboundConversationId = state.currentConversationId;
+  state.renderedInboundMessageId = null;
+  state.renderedInboundWatermarkReady = false;
+  renderReadStateButton(state.currentConversation);
   els.threadPane.classList.add("thread-loading");
   els.messages.setAttribute("aria-busy", "true");
   els.messages.setAttribute("aria-label", t("messages.loading"));
@@ -6204,9 +6218,28 @@ function renderThreadLoadError(message) {
   invalidateMessageLayoutCorrections();
   state.messageRenderGeneration += 1;
   state.messageDomConversationId = state.currentConversationId;
+  state.renderedInboundConversationId = state.currentConversationId;
+  state.renderedInboundMessageId = null;
+  state.renderedInboundWatermarkReady = false;
+  renderReadStateButton(state.currentConversation);
   finishThreadLoadingState();
   els.messages.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
   updateComposerOffset();
+}
+
+function commitRenderedInboundWatermark(messages) {
+  const renderedInboundMessages = messages.filter((message) => {
+    const messageId = Number(message?.id);
+    return message?.direction === "inbound" && Number.isSafeInteger(messageId) && messageId > 0;
+  });
+  const latestRenderedInbound = renderedInboundMessages.reduce(
+    (latest, message) => (!latest || messageChronologyKey(message) > messageChronologyKey(latest) ? message : latest),
+    null,
+  );
+  state.renderedInboundConversationId = state.currentConversationId;
+  state.renderedInboundMessageId = latestRenderedInbound ? Number(latestRenderedInbound.id) : null;
+  state.renderedInboundWatermarkReady = true;
+  renderReadStateButton(state.currentConversation);
 }
 
 function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
@@ -6235,6 +6268,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
   const visibleMessages = messagesWithInlineReactions(messages);
   if (!visibleMessages.length) {
     els.messages.innerHTML = `<div class="empty-state">${escapeHtml(t("messages.empty"))}</div>`;
+    commitRenderedInboundWatermark(messages);
     updateComposerOffset();
     watchMessageMediaForScrollMode(scrollMode, null, els.messages.scrollTop, bottomStickToken);
     return;
@@ -6328,6 +6362,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
         </article>`;
       })
       .join("");
+  commitRenderedInboundWatermark(messages);
   restoreMessageMediaPlayback(mediaPlayback);
   updateComposerOffset();
   if (shouldRestoreAnchor) {
@@ -8111,7 +8146,11 @@ async function setCurrentConversationArchived(archived) {
   }
 }
 
-async function setConversationRead(conversationId, dealt, { silent = false, allowPending = false } = {}) {
+async function setConversationRead(
+  conversationId,
+  dealt,
+  { silent = false, allowPending = false, readThroughMessageId, enforceReadThrough = false } = {},
+) {
   conversationId = Number(conversationId);
   if (!conversationId) return false;
   const pendingConversationId = Number(state.pendingConversationId);
@@ -8137,27 +8176,41 @@ async function setConversationRead(conversationId, dealt, { silent = false, allo
     dealt_with_at: dealt ? lastMessageTime : optimisticBase.dealt_with_at || "",
     manual_unread_at: dealt ? null : timestamp,
   };
-  state.conversationReadMutationTargets.set(conversationId, optimisticReadPatch);
-  mergeConversationReadPatchIntoLoadedState(conversationId, optimisticReadPatch);
-  if (
-    state.conversationCategory === "unread" &&
-    dealt &&
-    Number(state.pendingConversationId) !== conversationId
-  ) {
-    state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
+  const guardedRead = dealt && enforceReadThrough;
+  if (!guardedRead) {
+    state.conversationReadMutationTargets.set(conversationId, optimisticReadPatch);
+    mergeConversationReadPatchIntoLoadedState(conversationId, optimisticReadPatch);
+    if (
+      state.conversationCategory === "unread" &&
+      dealt &&
+      Number(state.pendingConversationId) !== conversationId
+    ) {
+      state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
+    }
   }
   renderConversationsPreservingScroll();
   focusPendingConversationRow();
   if (Number(state.currentConversationId) === conversationId) renderThreadHeader();
   try {
+    const requestBody = { dealt };
+    if (guardedRead) requestBody.read_through_message_id = readThroughMessageId ?? null;
     const payload = await api(`/api/conversations/${conversationId}/dealt`, {
       method: "POST",
-      body: JSON.stringify({ dealt }),
+      body: JSON.stringify(requestBody),
     });
     const confirmedReadPatch = {
       ...conversationReadPatch(payload.conversation),
       id: conversationId,
     };
+    if (guardedRead && payload.read_applied === false) {
+      mergeConversationReadPatchIntoLoadedState(conversationId, confirmedReadPatch);
+      syncUnreadConversationCount(payload.unread_count);
+      renderConversationsPreservingScroll();
+      focusPendingConversationRow();
+      if (Number(state.currentConversationId) === conversationId) renderThreadHeader();
+      if (!silent) toast(t("conversation.newer_message_unread"));
+      return false;
+    }
     state.conversationReadMutationResults.set(conversationId, confirmedReadPatch);
     while (state.conversationReadMutationResults.size > 100) {
       state.conversationReadMutationResults.delete(state.conversationReadMutationResults.keys().next().value);
@@ -8171,6 +8224,7 @@ async function setConversationRead(conversationId, dealt, { silent = false, allo
     if (
       state.conversationCategory === "unread" &&
       dealt &&
+      conversationIsRead(payload.conversation) &&
       Number(state.pendingConversationId) !== conversationId
     ) {
       state.conversations = state.conversations.filter((conversation) => Number(conversation.id) !== conversationId);
@@ -8211,9 +8265,17 @@ async function setConversationRead(conversationId, dealt, { silent = false, allo
   }
 }
 
-async function setCurrentConversationRead(dealt, { silent = false } = {}) {
+async function setCurrentConversationRead(dealt, { silent = false, requireRenderedWatermark = false } = {}) {
   if (state.pendingConversationId || !state.currentConversationId) return false;
-  return setConversationRead(state.currentConversationId, dealt, { silent });
+  const watermarkReady =
+    Number(state.renderedInboundConversationId) === Number(state.currentConversationId) &&
+    state.renderedInboundWatermarkReady;
+  if (dealt && requireRenderedWatermark && !watermarkReady) return false;
+  return setConversationRead(state.currentConversationId, dealt, {
+    silent,
+    readThroughMessageId: state.renderedInboundMessageId,
+    enforceReadThrough: dealt && requireRenderedWatermark,
+  });
 }
 
 async function toggleCurrentConversationRead() {
@@ -8222,7 +8284,7 @@ async function toggleCurrentConversationRead() {
       ? state.currentConversation
       : state.conversations.find((item) => Number(item.id) === Number(state.currentConversationId));
   const shouldMarkRead = !conversationIsRead(conversation);
-  await setCurrentConversationRead(shouldMarkRead);
+  await setCurrentConversationRead(shouldMarkRead, { requireRenderedWatermark: shouldMarkRead });
 }
 
 async function loadOlderMessages({ render = true, scrollMode = "preserve", schedulePoll = true, signal } = {}) {
