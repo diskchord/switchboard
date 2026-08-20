@@ -5441,6 +5441,27 @@ function mergeConversationIntoList(conversation) {
   }
 }
 
+function messagesWithParticipantMetadata(messages = [], conversation = null) {
+  const participantsByPhone = new Map(
+    (conversation?.participants || [])
+      .filter((participant) => participant.role === "participant" && participant.phone_number)
+      .map((participant) => [participant.phone_number, participant]),
+  );
+  if (!participantsByPhone.size) return messages;
+  return messages.map((message) => {
+    const participant = participantsByPhone.get(message.from_number);
+    if (!participant) return message;
+    const fromDisplay = String(participant.display || "").trim() || phoneDisplay(participant.phone_number);
+    const participantColorValue = String(participant.color || "").trim().toLowerCase();
+    const senderColor =
+      message.direction === "inbound" && /^#[0-9a-f]{6}$/.test(participantColorValue)
+        ? participantColorValue
+        : message.sender_color;
+    if (message.from_display === fromDisplay && message.sender_color === senderColor) return message;
+    return { ...message, from_display: fromDisplay, sender_color: senderColor };
+  });
+}
+
 function mergeThreadConversationFreshnessIntoList(conversation) {
   if (!conversation?.id) return;
   const update = { id: Number(conversation.id) };
@@ -5468,8 +5489,18 @@ function mergeConversationIntoLoadedState(conversation) {
   if (state.currentConversationId === conversationId) {
     const currentBase = Number(state.currentConversation?.id) === conversationId ? state.currentConversation : {};
     state.currentConversation = { ...currentBase, ...update };
+    state.messages = messagesWithParticipantMetadata(state.messages, state.currentConversation);
   }
   mergeConversationIntoList(update);
+  const cached = state.threadCache.get(conversationId);
+  if (cached) {
+    const cachedConversation = { ...cached.conversation, ...update };
+    state.threadCache.set(conversationId, {
+      ...cached,
+      conversation: { ...cached.conversation, ...update },
+      messages: messagesWithParticipantMetadata(cached.messages, cachedConversation),
+    });
+  }
   return state.currentConversationId === conversationId;
 }
 
@@ -5875,7 +5906,12 @@ function renderAttachment(attachment) {
 }
 
 function reactionActorName(reaction) {
-  return reaction.from_display || phoneDisplay(reaction.from_number) || t("conversation.unknown");
+  return (
+    participantSavedName(participantByPhone(reaction.from_number)) ||
+    reaction.from_display ||
+    phoneDisplay(reaction.from_number) ||
+    t("conversation.unknown")
+  );
 }
 
 function reactionActorKey(reaction, index = 0) {
@@ -6475,6 +6511,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
         : "";
       const hasAudioAttachment = messageAttachments.some((attachment) => isAudioAttachment(attachment, mediaUrl(attachment)));
       const currentSender = participantByPhone(message.from_number);
+      const senderDisplay = participantSavedName(currentSender) || message.from_display || phoneDisplay(message.from_number);
       const senderColorValue = String(currentSender?.color || message.sender_color || "").trim();
       const senderColor =
         message.direction === "inbound" &&
@@ -6517,7 +6554,7 @@ function renderMessages(messages, scrollMode = "bottom", scrollOptions = {}) {
               ${queuedDetail}
               ${failureDetail}
               <div class="message-meta">
-                <span>${escapeHtml(message.from_display || phoneDisplay(message.from_number))}</span>
+                <span>${escapeHtml(senderDisplay)}</span>
                 ${assignmentBadge}
                 <time>${escapeHtml(formatTime(message.occurred_at))}</time>
                 <span class="message-status ${escapeHtml(statusKind)}" title="${escapeHtml(statusDetail)}">${escapeHtml(statusLabel)}</span>
@@ -7250,11 +7287,11 @@ function conversationPayloadMatchesState(payload) {
   return JSON.stringify(payload?.conversation || null) === JSON.stringify(state.currentConversation || null);
 }
 
-function participantColorSignature(conversation) {
+function participantMetadataSignature(conversation) {
   return JSON.stringify(
     (conversation?.participants || [])
       .filter((participant) => participant.role === "participant")
-      .map((participant) => [participant.phone_number, participant.color || ""])
+      .map((participant) => [participant.phone_number, participant.display || "", participant.color || ""])
       .sort(([firstPhone], [secondPhone]) => String(firstPhone).localeCompare(String(secondPhone))),
   );
 }
@@ -7482,8 +7519,8 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
     const payload = mergeRefreshedThreadPayload(state.messages, freshPayload);
     const conversationChanged = !conversationPayloadMatchesState(payload);
     const messagesChanged = !messagePayloadMatchesState(payload);
-    const participantColorsChanged =
-      participantColorSignature(payload.conversation) !== participantColorSignature(state.currentConversation);
+    const participantMetadataChanged =
+      participantMetadataSignature(payload.conversation) !== participantMetadataSignature(state.currentConversation);
     if (!conversationChanged && !messagesChanged) {
       return;
     }
@@ -7499,14 +7536,14 @@ async function refreshCurrentConversationStatus({ knownChanged = false, force = 
         clearNewMessagesAffordance();
       }
       trackInboundSoundKey(latestInboundSoundKeyFromMessages(payload.messages), { play: !(passive && mediaWasPlaying) });
-      state.messages = payload.messages;
+      state.messages = messagesWithParticipantMetadata(payload.messages, payload.conversation);
       state.hasMoreMessages = payload.has_more;
       state.olderCount = payload.older_count;
     }
     if (conversationChanged || messagesChanged) {
       renderThreadHeader();
     }
-    if (messagesChanged || participantColorsChanged) {
+    if (messagesChanged || participantMetadataChanged) {
       if (passive && mediaWasPlaying) {
         queuePendingPassiveMessageRender(messageScrollMode);
       } else {
@@ -7938,7 +7975,7 @@ function cacheCurrentThread() {
 function applyThreadPayload(payload, conversationId) {
   state.currentConversationId = Number(conversationId);
   state.currentConversation = payload.conversation;
-  state.messages = payload.messages || [];
+  state.messages = messagesWithParticipantMetadata(payload.messages || [], state.currentConversation);
   state.hasMoreMessages = Boolean(payload.has_more);
   state.olderCount = Number(payload.older_count || 0);
   state.threadLoadedConversationId = Number(conversationId);

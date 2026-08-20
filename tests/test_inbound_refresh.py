@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from texting_app import config
 from texting_app.db import connect, ensure_conversation, init_db, upsert_message
-from texting_app.server import _get_messages, _list_conversations, refresh_state
+from texting_app.server import _get_messages, _list_conversations, _refresh_tokens, refresh_state
 
 
 APP_JS_PATH = Path(__file__).resolve().parents[1] / "static" / "app.js"
@@ -18,6 +18,122 @@ APP_JS_PATH = Path(__file__).resolve().parents[1] / "static" / "app.js"
 class InboundRefreshTests(unittest.TestCase):
     sender = "+15550000001"
     remote = "+12075550101"
+
+    def test_global_contact_rename_changes_group_conversation_token_without_a_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "switchboard.sqlite"
+            with patch.object(config, "DB_PATH", database_path), patch.object(
+                config,
+                "PERSONAL_NUMBERS",
+                [self.sender],
+            ):
+                with closing(connect()) as conn:
+                    init_db(conn)
+                    conversation_id = ensure_conversation(
+                        conn,
+                        [self.remote, "+12075550102"],
+                        [self.sender],
+                    )
+                    conn.commit()
+                    before = _refresh_tokens(conn, conversation_id)
+
+                    conn.execute(
+                        """
+                        UPDATE contacts
+                        SET display_name = 'Renamed participant',
+                            updated_at = '2099-01-01T00:00:00-05:00'
+                        WHERE id = (
+                          SELECT contact_id
+                          FROM conversation_participants
+                          WHERE conversation_id = ? AND phone_number = ?
+                        )
+                        """,
+                        (conversation_id, self.remote),
+                    )
+                    conn.commit()
+                    after = _refresh_tokens(conn, conversation_id)
+                    message_count = conn.execute(
+                        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+                        (conversation_id,),
+                    ).fetchone()[0]
+
+                self.assertEqual(message_count, 0)
+                self.assertNotEqual(before["conversation"], after["conversation"])
+
+    def test_limited_contact_rename_changes_that_users_group_token_without_a_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "switchboard.sqlite"
+            with patch.object(config, "DB_PATH", database_path), patch.object(
+                config,
+                "PERSONAL_NUMBERS",
+                [self.sender],
+            ):
+                with closing(connect()) as conn:
+                    init_db(conn)
+                    conversation_id = ensure_conversation(
+                        conn,
+                        [self.remote, "+12075550102"],
+                        [self.sender],
+                    )
+                    identity_id = conn.execute(
+                        "SELECT id FROM identities WHERE phone_number = ?",
+                        (self.sender,),
+                    ).fetchone()["id"]
+                    limited_user_id = int(
+                        conn.execute(
+                            """
+                            INSERT INTO limited_users(
+                              username, password_hash, identity_id, created_at, updated_at
+                            )
+                            VALUES ('operator', 'unused', ?,
+                              '2026-08-19T09:00:00-04:00',
+                              '2026-08-19T09:00:00-04:00')
+                            """,
+                            (identity_id,),
+                        ).lastrowid
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO limited_user_contacts(
+                          limited_user_id, phone_number, display_name, source, created_at, updated_at
+                        )
+                        VALUES (?, ?, 'Before rename', 'user',
+                          '2026-08-19T09:00:00-04:00',
+                          '2026-08-19T09:00:00-04:00')
+                        """,
+                        (limited_user_id, self.remote),
+                    )
+                    conn.commit()
+                    before = _refresh_tokens(
+                        conn,
+                        conversation_id,
+                        self.sender,
+                        limited_user_id,
+                    )
+
+                    conn.execute(
+                        """
+                        UPDATE limited_user_contacts
+                        SET display_name = 'After rename',
+                            updated_at = '2099-01-01T00:00:00-05:00'
+                        WHERE limited_user_id = ? AND phone_number = ?
+                        """,
+                        (limited_user_id, self.remote),
+                    )
+                    conn.commit()
+                    after = _refresh_tokens(
+                        conn,
+                        conversation_id,
+                        self.sender,
+                        limited_user_id,
+                    )
+                    message_count = conn.execute(
+                        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+                        (conversation_id,),
+                    ).fetchone()[0]
+
+                self.assertEqual(message_count, 0)
+                self.assertNotEqual(before["conversation"], after["conversation"])
 
     def test_inbound_message_changes_refresh_tokens_and_is_immediately_queryable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

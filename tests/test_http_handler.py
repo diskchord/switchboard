@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import unquote, urlparse
 
-from texting_app.server import TextingHandler
+from texting_app.server import TextingHandler, _static_cache_control
 from http.server import ThreadingHTTPServer
 
 
@@ -42,6 +42,29 @@ class _FixtureHandler(TextingHandler):
 class _ApiHandler(TextingHandler):
     def log_message(self, _format: str, *_args) -> None:
         pass
+
+
+class StaticAssetCachePolicyTests(unittest.TestCase):
+    def test_core_javascript_and_stylesheets_always_revalidate(self) -> None:
+        for path in ("/static/app.js", "/static/styles.css"):
+            with self.subTest(path=path):
+                policy = _static_cache_control(path, versioned=True)
+                self.assertNotIn("immutable", policy)
+                self.assertTrue(
+                    "no-cache" in policy or "must-revalidate" in policy or "max-age=0" in policy,
+                    f"Expected a revalidation cache policy for {path}, got {policy!r}",
+                )
+
+    def test_fingerprinted_icons_remain_long_lived_and_immutable(self) -> None:
+        for path in (
+            "/static/favicon.ico",
+            "/static/favicon.svg",
+            "/static/apple-touch-icon.png",
+        ):
+            with self.subTest(path=path):
+                policy = _static_cache_control(path, versioned=True)
+                self.assertIn("max-age=31536000", policy)
+                self.assertIn("immutable", policy)
 
 
 class HttpHandlerTests(unittest.TestCase):

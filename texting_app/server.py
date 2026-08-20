@@ -74,6 +74,7 @@ from .voice import (
 
 
 STATIC_DIR = config.ROOT / "static"
+CORE_STATIC_ASSET_PATHS = {"/static/app.js", "/static/styles.css"}
 MESSAGE_PAGE_SIZE = 80
 MAX_CONVERSATION_TITLE_LENGTH = 120
 PARTICIPANT_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -100,6 +101,17 @@ AUTH_ACCOUNT_METADATA_KEYS = (
     AUTH_SECRET_KEY_METADATA_KEY,
 )
 TWO_FACTOR_SETUP_TOKEN_SECONDS = 10 * 60
+
+
+def _static_cache_control(path: str, *, versioned: bool) -> str:
+    # These core assets use hand-maintained revisions. Revalidate them even
+    # when versioned so a missed revision cannot pin an outdated interface in
+    # browsers or the Android WebView for a full year.
+    if path in CORE_STATIC_ASSET_PATHS:
+        return "public, max-age=0, must-revalidate"
+    if versioned:
+        return "public, max-age=31536000, immutable"
+    return "public, max-age=300, must-revalidate"
 
 PUBLIC_GET_PATHS = {
     "/api/auth/session",
@@ -2014,6 +2026,15 @@ def _refresh_tokens(
                     FROM limited_user_participant_colors lupc
                     WHERE lupc.limited_user_id = ? AND lupc.conversation_id = c.id
                   ) AS participant_colors_updated_at,
+                  (
+                    SELECT COALESCE(MAX(luc.updated_at), '')
+                    FROM conversation_participants participant
+                    JOIN limited_user_contacts luc
+                      ON luc.phone_number = participant.phone_number
+                     AND luc.limited_user_id = ?
+                    WHERE participant.conversation_id = c.id
+                      AND participant.role = 'participant'
+                  ) AS participant_names_updated_at,
                   COALESCE(c.dealt_with_at, '') AS dealt_with_at,
                   COALESCE(c.manual_unread_at, '') AS manual_unread_at,
                   COALESCE(c.last_message_at, '') AS last_message_at,
@@ -2027,6 +2048,7 @@ def _refresh_tokens(
                 WHERE c.id = ?
                 """,
                 (
+                    limited_user_id or 0,
                     limited_user_id or 0,
                     limited_user_id or 0,
                     assigned_phone, assigned_phone,
@@ -2043,6 +2065,14 @@ def _refresh_tokens(
               c.updated_at AS conversation_updated_at,
               '' AS title_updated_at,
               '' AS participant_colors_updated_at,
+              (
+                SELECT COALESCE(MAX(contact.updated_at), '')
+                FROM conversation_participants participant
+                JOIN contact_phones phone ON phone.phone_number = participant.phone_number
+                JOIN contacts contact ON contact.id = phone.contact_id
+                WHERE participant.conversation_id = c.id
+                  AND participant.role = 'participant'
+              ) AS participant_names_updated_at,
               COALESCE(c.dealt_with_at, '') AS dealt_with_at,
               COALESCE(c.manual_unread_at, '') AS manual_unread_at,
               COALESCE(c.last_message_at, '') AS last_message_at,
@@ -2075,6 +2105,7 @@ def _refresh_tokens(
                     "conversation_updated_at",
                     "title_updated_at",
                     "participant_colors_updated_at",
+                    "participant_names_updated_at",
                     "dealt_with_at",
                     "manual_unread_at",
                     "last_message_at",
@@ -5232,11 +5263,7 @@ class TextingHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
-        versioned_static_cache = (
-            "public, max-age=31536000, immutable"
-            if query.get("v")
-            else "public, max-age=300, must-revalidate"
-        )
+        static_cache_control = _static_cache_control(path, versioned=bool(query.get("v")))
         try:
             if not self._require_auth("GET", path):
                 return
@@ -5357,11 +5384,11 @@ class TextingHandler(BaseHTTPRequestHandler):
             elif path in {"/favicon.ico", "/favicon.svg", "/apple-touch-icon.png"}:
                 self._serve_file(
                     STATIC_DIR / path.removeprefix("/"),
-                    cache_control=versioned_static_cache,
+                    cache_control=static_cache_control,
                 )
             elif path.startswith("/static/"):
                 rel = Path(unquote(path.removeprefix("/static/")))
-                self._serve_file(STATIC_DIR / rel.name, cache_control=versioned_static_cache)
+                self._serve_file(STATIC_DIR / rel.name, cache_control=static_cache_control)
             elif path == "/login":
                 if self._current_user() and auth.auth_configured():
                     self._send_redirect("/")
